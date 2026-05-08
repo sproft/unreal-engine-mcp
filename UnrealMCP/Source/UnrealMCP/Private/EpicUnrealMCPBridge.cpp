@@ -104,6 +104,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftBpBrief = MakeShared<FSproftBpBriefCommands>();
     SproftBpInspect = MakeShared<FSproftBpInspectCommands>();
     SproftBpVariable = MakeShared<FSproftBpVariableCommands>();
+    SproftBpClass = MakeShared<FSproftBpClassCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -131,6 +132,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftBpBrief.Reset();
     SproftBpInspect.Reset();
     SproftBpVariable.Reset();
+    SproftBpClass.Reset();
 }
 
 // Initialize subsystem
@@ -401,6 +403,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("bp_variable"))
             {
                 ResultJson = SproftBpVariable->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("bp_class"))
+            {
+                ResultJson = SproftBpClass->HandleCommand(CommandType, Params);
             }
             else
             {

@@ -4195,6 +4195,106 @@ def bp_variable(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_class(
+    op: str,
+    blueprint: str,
+    parent_class: Optional[str] = None,
+    description: Optional[str] = None,
+    display_name: Optional[str] = None,
+    namespace: Optional[str] = None,
+    category: Optional[str] = None,
+    hide_categories: Optional[List[str]] = None,
+    interface: Optional[str] = None,
+    preserve_functions: Optional[bool] = None,
+    compile: bool = True,
+    save: bool = True,
+) -> Dict[str, Any]:
+    """
+    Manage class-level settings on an existing UBlueprint asset.
+
+    Sits next to ``bp_create`` (which creates the asset) and ``bp_brief``
+    (which reads class metadata for orientation).
+
+    Operations (``op``):
+
+      - ``read``: dump current class-level settings: parent class,
+        blueprint type, display name, description, namespace, category,
+        hide categories list, and the implemented Blueprint interface
+        paths.
+      - ``set_parent``: re-parent the Blueprint to a new parent class.
+        ``parent_class`` accepts a short name (Actor, Pawn, Character,
+        ActorComponent, SceneComponent, GameMode, GameModeBase,
+        PlayerController, AIController, UserWidget, DataAsset,
+        BlueprintFunctionLibrary, etc.), a full
+        ``/Script/Module.ClassName`` path, or a ``/Game/...`` Blueprint
+        class path. Goes through ``Blueprint->ParentClass``,
+        ``RefreshAllNodes``, and a recompile.
+      - ``set_class_settings``: write any subset of ``description``,
+        ``display_name``, ``namespace``, ``category``, and
+        ``hide_categories`` (list, replaces the whole array) onto the
+        Blueprint.
+      - ``add_interface``: implement a Blueprint Interface. ``interface``
+        accepts a full ``/Script/Module.IName`` path, a ``/Game/...``
+        Blueprint Interface path, or a short name resolved against the
+        loaded class set.
+      - ``remove_interface``: tear down an implemented interface.
+        ``preserve_functions`` defaults to False (drops the function
+        graphs wholesale).
+
+    Args:
+        op: One of ``read`` / ``set_parent`` / ``set_class_settings`` /
+            ``add_interface`` / ``remove_interface``.
+        blueprint: Short asset name or full ``/Game/...`` Blueprint path.
+        parent_class: New parent class spec for ``set_parent``.
+        description, display_name, namespace, category: Class-level
+            string settings for ``set_class_settings``.
+        hide_categories: List of categories to hide on instances of this
+            Blueprint. Replaces the full HideCategories array.
+        interface: Interface path for ``add_interface`` / ``remove_interface``.
+        preserve_functions: When removing an interface, keep the
+            function graphs as standalone graphs.
+        compile: Compile the Blueprint after each mutating op. Defaults True.
+        save: Save the asset after compile. Defaults True.
+
+    Returns:
+        Operation-specific dict; see the C++ handler for the exact shape.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "op": op,
+        "blueprint": blueprint,
+        "compile": compile,
+        "save": save,
+    }
+    if parent_class is not None:
+        params["parent_class"] = parent_class
+    if description is not None:
+        params["description"] = description
+    if display_name is not None:
+        params["display_name"] = display_name
+    if namespace is not None:
+        params["namespace"] = namespace
+    if category is not None:
+        params["category"] = category
+    if hide_categories is not None:
+        params["hide_categories"] = hide_categories
+    if interface is not None:
+        params["interface"] = interface
+    if preserve_functions is not None:
+        params["preserve_functions"] = preserve_functions
+
+    try:
+        response = unreal.send_command("bp_class", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_class error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
