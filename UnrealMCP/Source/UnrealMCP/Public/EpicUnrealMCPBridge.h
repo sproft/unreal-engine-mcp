@@ -22,6 +22,7 @@
 #include "Commands/SproftSceneQueryCommands.h"
 #include "Commands/SproftMaterialEditCommands.h"
 #include "Commands/SproftActorInspectCommands.h"
+#include "Commands/SproftSceneComposeCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -80,4 +81,5 @@ private:
 	TSharedPtr<FSproftSceneQueryCommands> SproftSceneQuery;
 	TSharedPtr<FSproftMaterialEditCommands> SproftMaterialEdit;
 	TSharedPtr<FSproftActorInspectCommands> SproftActorInspect;
+	TSharedPtr<FSproftSceneComposeCommands> SproftSceneCompose;
 };

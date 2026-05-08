@@ -55,6 +55,12 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   component, and (when asked) the full component tree with each
   component's class, relative transform, attach parent / socket, tags, and
   a short `FProperty::ExportText` value dump per component or per actor.
+- `scene_compose` (small) — declarative single-actor scene mutation.
+  Three operations on one actor per call: `spawn` (class path + optional
+  transform / preferred FName / Outliner label / tags / flat property
+  dict), `modify` (partial transform / label / tags / property patch on
+  an actor resolved by name or label), and `delete`. Property dicts apply
+  through `FProperty::ImportText` on the actor instance.
 
 ## Blueprint authoring (medium to large each)
 
@@ -95,7 +101,9 @@ helpers.
   component listings as part of each record, and multi-tag / boolean tag
   filters.
 - `scene_brief` — short level summary.
-- `scene_compose` — declarative spawn / modify / delete.
+- `scene_compose` (small variant ships in this fork) — broader hosted
+  scope still pending: batched spawn / modify / delete in a single call,
+  prefab / level snippet rollouts, and child-actor reparenting.
 - `actor_inspect` (small variant ships in this fork) — broader hosted
   scope still pending: full component child-actor recursion, deeper
   per-component property control, and component-by-name lookups inline.

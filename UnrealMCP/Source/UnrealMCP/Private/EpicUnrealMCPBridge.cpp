@@ -66,6 +66,7 @@
 #include "Commands/SproftSceneQueryCommands.h"
 #include "Commands/SproftMaterialEditCommands.h"
 #include "Commands/SproftActorInspectCommands.h"
+#include "Commands/SproftSceneComposeCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -87,6 +88,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftSceneQuery = MakeShared<FSproftSceneQueryCommands>();
     SproftMaterialEdit = MakeShared<FSproftMaterialEditCommands>();
     SproftActorInspect = MakeShared<FSproftActorInspectCommands>();
+    SproftSceneCompose = MakeShared<FSproftSceneComposeCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -105,6 +107,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftSceneQuery.Reset();
     SproftMaterialEdit.Reset();
     SproftActorInspect.Reset();
+    SproftSceneCompose.Reset();
 }
 
 // Initialize subsystem
@@ -339,6 +342,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("actor_inspect"))
             {
                 ResultJson = SproftActorInspect->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("scene_compose"))
+            {
+                ResultJson = SproftSceneCompose->HandleCommand(CommandType, Params);
             }
             else
             {

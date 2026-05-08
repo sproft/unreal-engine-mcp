@@ -3522,6 +3522,93 @@ def actor_inspect(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def scene_compose(
+    operation: str,
+    actor_class: Optional[str] = None,
+    actor: Optional[str] = None,
+    name: Optional[str] = None,
+    label: Optional[str] = None,
+    location: Optional[List[float]] = None,
+    rotation: Optional[List[float]] = None,
+    scale: Optional[List[float]] = None,
+    tags: Optional[List[str]] = None,
+    properties: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Declarative single-actor scene mutation: spawn, modify, or delete.
+
+    Mirrors the small cut of the hosted Flop "scene_compose" tool. One actor
+    per call so each request stays auditable. Spawn returns the resolved
+    name of the new actor in the response.
+
+    Operations:
+        - "spawn": create an actor of actor_class at the given transform
+          with optional preferred name, Outliner label, tags, and a flat
+          property dict. Returns the new actor record.
+        - "modify": apply a partial transform / label / tags / property
+          patch to an existing actor resolved by name or label. Each axis
+          of the transform is independent; missing axes leave the existing
+          component untouched.
+        - "delete": destroy an existing actor resolved by name or label.
+
+    Args:
+        operation: "spawn", "modify", or "delete".
+        actor_class: For spawn: an Engine class short name (e.g.
+            "StaticMeshActor", "PointLight") or a full path. /Game/-rooted
+            BP class paths are loaded with or without the "_C" suffix.
+        actor: For modify / delete: actor name (FName) or Outliner label.
+        name: For spawn: optional preferred FName. Rejected with an error
+            if a sibling actor already uses it.
+        label: For spawn: optional Outliner label. For modify: replacement
+            Outliner label.
+        location: For spawn: world-space [x, y, z] location. For modify:
+            replacement location. Cm.
+        rotation: For spawn: [pitch, yaw, roll]. For modify: replacement
+            rotation.
+        scale: For spawn: [x, y, z] scale. For modify: replacement scale.
+        tags: For spawn / modify: optional full replacement list of FName
+            actor tags.
+        properties: For spawn / modify: optional flat dict of property
+            names to JSON values applied through FProperty::ImportText on
+            the actor instance.
+
+    Returns:
+        Dictionary with the operation, the affected actor record (spawn /
+        modify), and applied / skipped property lists.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"operation": operation}
+    if actor_class is not None:
+        params["class"] = actor_class
+    if actor is not None:
+        params["actor"] = actor
+    if name is not None:
+        params["name"] = name
+    if label is not None:
+        params["label"] = label
+    if location is not None:
+        params["location"] = location
+    if rotation is not None:
+        params["rotation"] = rotation
+    if scale is not None:
+        params["scale"] = scale
+    if tags is not None:
+        params["tags"] = tags
+    if properties is not None:
+        params["properties"] = properties
+
+    try:
+        response = unreal.send_command("scene_compose", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"scene_compose error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
