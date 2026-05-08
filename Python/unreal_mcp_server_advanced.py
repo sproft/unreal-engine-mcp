@@ -3967,6 +3967,37 @@ def bp_create(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_brief(blueprint: str) -> Dict[str, Any]:
+    """
+    Read-only one-page orientation summary of a Blueprint asset.
+
+    Smaller and faster than ``read_blueprint_content`` plus
+    ``analyze_blueprint_graph``. Useful when the agent just needs to know
+    "what kind of BP is this" before a deeper pass.
+
+    Args:
+        blueprint: Short asset name or full ``/Game/...`` Blueprint path.
+
+    Returns:
+        Dictionary with name, path, package_name, parent_class,
+        parent_class_short, blueprint_type, variable_count, function_count,
+        macro_count, event_graph_node_count, events (list of named events),
+        components (list of {name, class, is_root}), component_count,
+        interfaces (list of {name, path}), and is_data_only.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("bp_brief", {"blueprint": blueprint})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_brief error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

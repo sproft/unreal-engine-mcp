@@ -72,6 +72,7 @@
 #include "Commands/SproftLevelInspectCommands.h"
 #include "Commands/SproftTagRegistryEditCommands.h"
 #include "Commands/SproftBpCreateCommands.h"
+#include "Commands/SproftBpBriefCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -99,6 +100,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftLevelInspect = MakeShared<FSproftLevelInspectCommands>();
     SproftTagRegistryEdit = MakeShared<FSproftTagRegistryEditCommands>();
     SproftBpCreate = MakeShared<FSproftBpCreateCommands>();
+    SproftBpBrief = MakeShared<FSproftBpBriefCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -123,6 +125,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftLevelInspect.Reset();
     SproftTagRegistryEdit.Reset();
     SproftBpCreate.Reset();
+    SproftBpBrief.Reset();
 }
 
 // Initialize subsystem
@@ -381,6 +384,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("bp_create"))
             {
                 ResultJson = SproftBpCreate->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("bp_brief"))
+            {
+                ResultJson = SproftBpBrief->HandleCommand(CommandType, Params);
             }
             else
             {
