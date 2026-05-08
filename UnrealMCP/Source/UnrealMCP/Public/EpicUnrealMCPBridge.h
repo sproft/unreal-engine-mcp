@@ -19,6 +19,7 @@
 #include "Commands/SproftBpInputCommands.h"
 #include "Commands/SproftWidgetInspectCommands.h"
 #include "Commands/SproftBpComponentCommands.h"
+#include "Commands/SproftSceneQueryCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -74,4 +75,5 @@ private:
 	TSharedPtr<FSproftBpInputCommands> SproftBpInput;
 	TSharedPtr<FSproftWidgetInspectCommands> SproftWidgetInspect;
 	TSharedPtr<FSproftBpComponentCommands> SproftBpComponent;
+	TSharedPtr<FSproftSceneQueryCommands> SproftSceneQuery;
 };

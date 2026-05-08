@@ -63,6 +63,7 @@
 #include "Commands/SproftBpInputCommands.h"
 #include "Commands/SproftWidgetInspectCommands.h"
 #include "Commands/SproftBpComponentCommands.h"
+#include "Commands/SproftSceneQueryCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -81,6 +82,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftBpInput = MakeShared<FSproftBpInputCommands>();
     SproftWidgetInspect = MakeShared<FSproftWidgetInspectCommands>();
     SproftBpComponent = MakeShared<FSproftBpComponentCommands>();
+    SproftSceneQuery = MakeShared<FSproftSceneQueryCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -96,6 +98,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftBpInput.Reset();
     SproftWidgetInspect.Reset();
     SproftBpComponent.Reset();
+    SproftSceneQuery.Reset();
 }
 
 // Initialize subsystem
@@ -318,6 +321,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("bp_component"))
             {
                 ResultJson = SproftBpComponent->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("scene_query"))
+            {
+                ResultJson = SproftSceneQuery->HandleCommand(CommandType, Params);
             }
             else
             {

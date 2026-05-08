@@ -3312,6 +3312,76 @@ def bp_component(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def scene_query(
+    actor_class: Optional[str] = None,
+    match_class_substring: bool = True,
+    name_pattern: Optional[str] = None,
+    label_pattern: Optional[str] = None,
+    tag: Optional[str] = None,
+    center: Optional[List[float]] = None,
+    radius: Optional[float] = None,
+    limit: int = 256,
+) -> Dict[str, Any]:
+    """
+    Read-only multiplexed actor query for the editor world.
+
+    Mirrors a small cut of the hosted Flop "scene_query" tool. All filters
+    are optional and combine with AND. Returns name / label / class /
+    location / rotation / scale / tags / mobility / hidden flags for each
+    match, plus a total / returned / truncated counters.
+
+    Args:
+        actor_class: Filter by class. By default this is a case-insensitive
+            substring match against both the short class name and the full
+            object path (e.g. "StaticMesh" matches AStaticMeshActor and
+            UStaticMeshComponent owners). Set match_class_substring=False
+            for an exact short-name match (e.g. "StaticMeshActor").
+        match_class_substring: When True (default), actor_class is treated
+            as a substring. When False, actor_class is resolved to a UClass
+            and GetAllActorsOfClass narrows the world walk.
+        name_pattern: Case-insensitive substring filter against GetName().
+        label_pattern: Case-insensitive substring filter against
+            GetActorLabel() (the Outliner label).
+        tag: A single FName actor tag the actor must carry.
+        center: Optional [x, y, z] world-space centre for the spatial filter.
+        radius: Optional sphere radius (cm) for the spatial filter. Both
+            center and radius must be supplied together.
+        limit: Cap on returned records. Defaults 256.
+
+    Returns:
+        Dictionary with actors (list), total_matches, returned, truncated,
+        limit.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "match_class_substring": match_class_substring,
+        "limit": limit,
+    }
+    if actor_class is not None:
+        params["class"] = actor_class
+    if name_pattern is not None:
+        params["name_pattern"] = name_pattern
+    if label_pattern is not None:
+        params["label_pattern"] = label_pattern
+    if tag is not None:
+        params["tag"] = tag
+    if center is not None:
+        params["center"] = center
+    if radius is not None:
+        params["radius"] = radius
+
+    try:
+        response = unreal.send_command("scene_query", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"scene_query error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

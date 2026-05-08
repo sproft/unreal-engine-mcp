@@ -38,6 +38,11 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   attachment under an existing scene component, and an optional flat
   property dict applied through `FProperty::ImportText` on the template.
   Compiles and saves on success.
+- `scene_query` (small) — read-only multiplexed actor query for the editor
+  world. Combines class (substring or exact), `name_pattern`,
+  `label_pattern`, single `tag`, and an optional spherical spatial filter
+  with a result limit. Returns class / name / label / location / rotation /
+  scale / tags / mobility / hidden flags per actor.
 
 ## Blueprint authoring (medium to large each)
 
@@ -73,7 +78,10 @@ helpers.
 
 ## Scene & level (medium each)
 
-- `scene_query` — find actors by class / label / tag with spatial filters.
+- `scene_query` (small variant ships in this fork) — broader hosted scope
+  still pending: bounding-box / convex-volume spatial filters, actor
+  component listings as part of each record, and multi-tag / boolean tag
+  filters.
 - `scene_brief` — short level summary.
 - `scene_compose` — declarative spawn / modify / delete.
 - `actor_inspect` — single-actor read with components and properties.
