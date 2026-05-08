@@ -13,7 +13,7 @@ import struct
 import time
 import threading
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, Optional, List
+from typing import AsyncIterator, Dict, Any, Optional, List, Union
 from mcp.server.fastmcp import FastMCP
 
 from helpers.infrastructure_creation import (
@@ -4588,7 +4588,91 @@ def material_inspect(material: str) -> Dict[str, Any]:
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def search_assets(
+    class_filter: Optional[Union[str, List[str]]] = None,
+    class_pattern: Optional[str] = None,
+    include_subclasses: bool = False,
+    path: Optional[Union[str, List[str]]] = None,
+    recursive_paths: bool = True,
+    name_pattern: Optional[str] = None,
+    tag: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
+    limit: int = 256,
+    include_disk_size: bool = False,
+) -> Dict[str, Any]:
+    """
+    Content-Browser-style asset search backed by ``IAssetRegistry``.
+
+    Read-only. Returns each matching asset's path / name / class / package /
+    package_path. With ``include_disk_size=True`` each row also carries the
+    package's on-disk byte size pulled through
+    ``IAssetRegistry::TryGetAssetPackageData``.
+
+    Args:
+        class_filter: Single class token or list of tokens. Each token can
+            be a short name (``StaticMesh``), a full ``/Script/Module.Class``
+            path, or a ``/Game/...`` Blueprint asset path (auto-suffixed
+            with ``_C``). Combined with `class_pattern` for substring
+            post-filtering.
+        class_pattern: Case-insensitive substring matched against the
+            asset's short class name after the ``FARFilter`` pass.
+        include_subclasses: When true, sets ``FARFilter::bRecursiveClasses``
+            so subclasses of the supplied class tokens are included.
+        path: Single content-root prefix or list of them
+            (``"/Game/Crafting"``).
+        recursive_paths: When true (default), subfolders under each prefix
+            are searched.
+        name_pattern: Case-insensitive substring matched against the
+            asset's short name.
+        tag: Either a single ``{"name": "X", "value": "Y"}`` dict or a list
+            of such dicts. ``value`` is optional. Maps onto
+            ``FARFilter::TagsAndValues``.
+        limit: Max rows returned. Default 256, hard-capped at 50000.
+        include_disk_size: Adds a ``disk_size`` field per row.
+
+    Returns:
+        ``{"success": True, "assets": [...], "count": N, "matched_total":
+        M, "limit_hit": bool}``. ``matched_total`` counts every row that
+        passed the post-filter, even rows trimmed by the limit.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {}
+    if isinstance(class_filter, list):
+        params["class_list"] = class_filter
+    elif isinstance(class_filter, str) and class_filter:
+        params["class"] = class_filter
+    if class_pattern:
+        params["class_pattern"] = class_pattern
+    if include_subclasses:
+        params["include_subclasses"] = True
+    if isinstance(path, list):
+        params["path_list"] = path
+    elif isinstance(path, str) and path:
+        params["path"] = path
+    if recursive_paths is False:
+        # Server defaults to true; only forward when caller wants false.
+        params["recursive_paths"] = False
+    if name_pattern:
+        params["name_pattern"] = name_pattern
+    if tag is not None:
+        params["tag"] = tag
+    if isinstance(limit, int) and limit > 0:
+        params["limit"] = limit
+    if include_disk_size:
+        params["include_disk_size"] = True
+
+    try:
+        response = unreal.send_command("search_assets", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"search_assets error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
-    mcp.run(transport='stdio') 
+    mcp.run(transport='stdio')

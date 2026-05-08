@@ -176,6 +176,17 @@ flagged on the prior pass.
   and the used-texture list. For UMaterialInstance: parent material
   path, the parent's parameter list, and the instance's scalar /
   vector / texture overrides.
+- `search_assets` (small) — Content-Browser-style asset search backed
+  by `IAssetRegistry::GetAssets(FARFilter, ...)`. Filters: class
+  (single token, list, or substring pattern, plus optional
+  `include_subclasses`), path (single prefix or list, recursive by
+  default), name pattern, and package-tag pairs mapped onto
+  `FARFilter::TagsAndValues`. Returns each row's path, name, class,
+  class_path, package, and package_path. Optional `include_disk_size`
+  pulls the package's on-disk byte size through
+  `IAssetRegistry::TryGetAssetPackageData`. The response carries
+  `count`, `matched_total`, and a `limit_hit` flag so a caller can
+  paginate by tightening the filter.
 
 ## Blueprint authoring (medium to large each)
 
@@ -267,7 +278,10 @@ helpers.
   scope still pending: streaming-volume listings with their bound
   ULevelStreaming entries, World Partition cell state, world settings
   fragments inline.
-- `search_assets` — Content Browser search.
+- `search_assets` (small variant ships in this fork) — Content
+  Browser search through `IAssetRegistry`. Open follow-ons: persisted
+  saved-search definitions and result paging across multiple calls
+  through an opaque cursor.
 - `asset_references` — dependency graph for an asset.
 - `project_context` — project settings, plugins, content roots.
 
