@@ -4295,6 +4295,87 @@ def bp_class(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_graph(
+    op: str,
+    blueprint: str,
+    graph: Optional[str] = None,
+    node: Optional[str] = None,
+    class_pattern: Optional[str] = None,
+    title_pattern: Optional[str] = None,
+    include_exec: Optional[bool] = None,
+    include_data: Optional[bool] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only graph traversal beyond ``bp_inspect``.
+
+    Useful when the agent needs to debug node wiring without running
+    ``analyze_blueprint_graph`` over the whole asset.
+
+    Operations (``op``):
+
+      - ``list_graphs``: every graph on the Blueprint, grouped by kind
+        (ubergraph / function / macro / interface). Returns name, kind,
+        graph class, and node count per entry.
+      - ``list_nodes``: every node in a chosen ``graph``. Returns node
+        FName, short class, full title, position, and pin count. Optional
+        ``class_pattern`` / ``title_pattern`` filters narrow the result.
+        Defaults to a 256-node cap.
+      - ``get_node``: full pin readback for one ``node`` in a chosen
+        ``graph``. Returns each pin's name, direction, type description,
+        default value, and connected target nodes / pins.
+      - ``list_connections``: flat edge list for a chosen ``graph``.
+        Each edge records source/target node FName + title + pin name.
+        ``include_exec`` and ``include_data`` toggle filter edges by
+        whether the source pin is exec or data. Defaults both True with
+        a 1024-edge cap.
+
+    Args:
+        op: One of ``list_graphs`` / ``list_nodes`` / ``get_node`` /
+            ``list_connections``.
+        blueprint: Short asset name or full ``/Game/...`` Blueprint path.
+        graph: Graph FName resolved case-insensitively, with substring
+            fallback. Required for non-``list_graphs`` ops.
+        node: Node FName for ``get_node``. Resolved case-insensitively
+            against the chosen graph, with title-substring fallback.
+        class_pattern, title_pattern: Substring filters for ``list_nodes``.
+        include_exec, include_data: Edge-kind filters for
+            ``list_connections``. Default both True.
+        limit: Cap on returned entries. Defaults 256 for ``list_nodes``
+            and 1024 for ``list_connections``.
+
+    Returns:
+        Operation-specific dict; see the C++ handler for the exact shape.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"op": op, "blueprint": blueprint}
+    if graph is not None:
+        params["graph"] = graph
+    if node is not None:
+        params["node"] = node
+    if class_pattern is not None:
+        params["class_pattern"] = class_pattern
+    if title_pattern is not None:
+        params["title_pattern"] = title_pattern
+    if include_exec is not None:
+        params["include_exec"] = include_exec
+    if include_data is not None:
+        params["include_data"] = include_data
+    if limit is not None:
+        params["limit"] = limit
+
+    try:
+        response = unreal.send_command("bp_graph", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_graph error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

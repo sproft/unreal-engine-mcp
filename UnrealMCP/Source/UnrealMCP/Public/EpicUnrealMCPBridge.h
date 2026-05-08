@@ -32,6 +32,7 @@
 #include "Commands/SproftBpInspectCommands.h"
 #include "Commands/SproftBpVariableCommands.h"
 #include "Commands/SproftBpClassCommands.h"
+#include "Commands/SproftBpGraphCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -100,4 +101,5 @@ private:
 	TSharedPtr<FSproftBpInspectCommands> SproftBpInspect;
 	TSharedPtr<FSproftBpVariableCommands> SproftBpVariable;
 	TSharedPtr<FSproftBpClassCommands> SproftBpClass;
+	TSharedPtr<FSproftBpGraphCommands> SproftBpGraph;
 };
