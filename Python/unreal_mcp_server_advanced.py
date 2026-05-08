@@ -3235,6 +3235,83 @@ def widget_inspect(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_component(
+    blueprint: str,
+    component_class: str,
+    component_name: str,
+    parent_component: Optional[str] = None,
+    properties: Optional[Dict[str, Any]] = None,
+    location: Optional[List[float]] = None,
+    rotation: Optional[List[float]] = None,
+    scale: Optional[List[float]] = None,
+    compile: bool = True,
+    save: bool = True,
+) -> Dict[str, Any]:
+    """
+    Add a component to an existing Blueprint's SimpleConstructionScript.
+
+    Mirrors the small "add a component" cut of the hosted Flop "bp_component"
+    tool. The class resolver accepts short names (StaticMeshComponent,
+    SpringArm, CameraComponent), with or without the "U" prefix and / or the
+    "Component" suffix, plus full /Script/Module.ClassName paths and BP class
+    paths under /Game/. The optional parent_component name attaches the new
+    node under an existing scene-component SCS node; otherwise the node is
+    added at the SCS root.
+
+    Args:
+        blueprint: Short name or absolute /Game/ path of the target
+            UBlueprint asset.
+        component_class: Component class to instantiate. Examples:
+            "StaticMeshComponent", "USphereComponent", "CameraComponent",
+            "SpringArm", "/Script/Engine.PointLightComponent".
+        component_name: Variable name for the new SCS node.
+        parent_component: Optional FName of an existing scene-component SCS
+            node to attach under. Defaults to the root.
+        properties: Optional flat dict of property names to JSON values
+            applied through FProperty::ImportText on the component template.
+        location: Optional [x, y, z] relative location for scene components.
+        rotation: Optional [pitch, yaw, roll] relative rotation.
+        scale: Optional [x, y, z] relative scale.
+        compile: Compile the Blueprint after the change. Defaults True.
+        save: Save the Blueprint asset after compile. Defaults True.
+
+    Returns:
+        Dictionary with operation, blueprint, component_name, component_class,
+        is_scene_component, optional parent_component, attached_as_root,
+        applied / skipped property lists, compiled, saved.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "operation": "add_component",
+        "blueprint": blueprint,
+        "component_class": component_class,
+        "component_name": component_name,
+        "compile": compile,
+        "save": save,
+    }
+    if parent_component is not None:
+        params["parent_component"] = parent_component
+    if properties is not None:
+        params["properties"] = properties
+    if location is not None:
+        params["location"] = location
+    if rotation is not None:
+        params["rotation"] = rotation
+    if scale is not None:
+        params["scale"] = scale
+
+    try:
+        response = unreal.send_command("bp_component", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_component error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

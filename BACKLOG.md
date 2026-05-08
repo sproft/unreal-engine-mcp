@@ -32,13 +32,22 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   create a `UInputAction` (Boolean / Axis1D / Axis2D / Axis3D), create an
   empty `UInputMappingContext`, and append one key-to-action binding row
   through `UInputMappingContext::MapKey`.
+- `bp_component` (small) — add a `UActorComponent` subclass to an existing
+  Blueprint's `SimpleConstructionScript`. Accepts a short class name or full
+  `/Script/Module.ClassName` path, an optional `parent_component` for
+  attachment under an existing scene component, and an optional flat
+  property dict applied through `FProperty::ImportText` on the template.
+  Compiles and saves on success.
 
 ## Blueprint authoring (medium to large each)
 
 - `bp_create` — create Actor / Pawn / Character / GameMode / etc. Blueprints with a parent class.
 - `bp_class` — read or change the parent class on an existing Blueprint.
 - `bp_variable` — declare typed variables, expose as instance editable, set defaults.
-- `bp_component` — add components (StaticMesh / Skeletal / Camera / Spring Arm / custom).
+- `bp_component` (single-add variant ships in this fork) — broader hosted
+  surface still pending: move / rename / remove component nodes, deeper
+  per-component property control, and full reparenting under an arbitrary
+  attach socket name.
 - `bp_graph` — create or fetch event / function graphs by name.
 - `bp_nodes` — batched node creation across an event graph (event nodes, branch, sequence, casts).
 - `bp_wire` — connect / disconnect named pins between nodes.
