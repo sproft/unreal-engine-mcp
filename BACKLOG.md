@@ -68,6 +68,24 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   Returns stdout / stderr / command_result and the structured log array.
   Requires `PythonScriptPlugin`; the uplugin manifest references it so
   consumer projects auto-enable it.
+- `scene_brief` (small) — read-only one-shot orientation summary of the
+  active editor world: persistent level name + path, attached streaming
+  sublevels, total actor count + per-class counts, world bounds union,
+  GameMode override + default pawn class, level-blueprint has-user-events
+  flag, deduplicated tags in use, and a short list of notable landmark
+  actors (player starts, directional lights, post-process volumes).
+- `level_inspect` (small) — read-only structured per-actor record list for
+  the editor world plus any loaded sublevels. Sits between `scene_brief`
+  and `scene_query`: always returns a uniformly-shaped per-actor block
+  plus a per-level summary, with optional `class` / `name_pattern` /
+  `label_pattern` / `tag` / `level_filter` filters and an optional
+  `include_components` toggle for a compact per-component list.
+- `bp_input` (graph wiring extension) — `add_action_event_node` operation
+  on the existing `bp_input` tool. Spawns a `UK2Node_EnhancedInputAction`
+  in a target Blueprint's event graph for a given `UInputAction` asset,
+  reusing an existing node for the same action. Optionally MakeLinkTo's
+  the chosen trigger exec pin (default "Triggered") to a named function
+  call on the same Blueprint through a `UK2Node_CallFunction` follow-on.
 
 ## Blueprint authoring (medium to large each)
 
@@ -81,11 +99,13 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 - `bp_graph` — create or fetch event / function graphs by name.
 - `bp_nodes` — batched node creation across an event graph (event nodes, branch, sequence, casts).
 - `bp_wire` — connect / disconnect named pins between nodes.
-- `bp_input` (asset side ships in this fork) — wire Enhanced Input action
-  events into a Blueprint's event graph. The data asset side
-  (`create_input_action`, `create_input_mapping_context`, `add_mapping`)
-  is shipped; the graph-side `K2Node_EnhancedInputAction` wiring on top of
-  the existing `add_node` / `connect_nodes` helpers is still pending.
+- `bp_input` (asset side + first graph-wiring slice ship in this fork) —
+  the data asset side (`create_input_action`,
+  `create_input_mapping_context`, `add_mapping`) and a focused
+  `add_action_event_node` operation are shipped. Open follow-ons: select
+  multiple trigger exec pins in one call, parameter-binding from the
+  enhanced-input action value pin into the connected function, and
+  pin-by-pin `set_node_property` overrides on the spawned node.
 - `bp_commit` — compile and save with verification.
 - `bp_author` — high-level "write me a feature" composite.
 - `bp_dry_run` — verify what `bp_commit` would do without applying.
@@ -107,14 +127,20 @@ helpers.
   still pending: bounding-box / convex-volume spatial filters, actor
   component listings as part of each record, and multi-tag / boolean tag
   filters.
-- `scene_brief` — short level summary.
+- `scene_brief` (small variant ships in this fork) — broader hosted
+  scope still pending: post-process volume settings inline, world
+  partition state surface where present, world settings nav-mesh /
+  lighting summary.
 - `scene_compose` (small variant ships in this fork) — broader hosted
   scope still pending: batched spawn / modify / delete in a single call,
   prefab / level snippet rollouts, and child-actor reparenting.
 - `actor_inspect` (small variant ships in this fork) — broader hosted
   scope still pending: full component child-actor recursion, deeper
   per-component property control, and component-by-name lookups inline.
-- `level_inspect` — current level + sublevels + streaming volumes.
+- `level_inspect` (small variant ships in this fork) — broader hosted
+  scope still pending: streaming-volume listings with their bound
+  ULevelStreaming entries, World Partition cell state, world settings
+  fragments inline.
 - `search_assets` — Content Browser search.
 - `asset_references` — dependency graph for an asset.
 - `project_context` — project settings, plugins, content roots.
@@ -208,29 +234,33 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`actor_inspect`, `scene_compose`, `python_execution`),
-the next set should pick up:
+After the latest pass (`scene_brief`, `level_inspect`, `bp_input` graph
+wiring), the next set should pick up:
 
-1. `bp_input` (graph wiring) — `K2Node_EnhancedInputAction` setup on top of
-   the existing `add_node` / `connect_nodes` helpers, so an agent can wire
-   an InputAction into a Blueprint's event graph in one call. The asset
-   side (`bp_input`) and the underlying graph helpers already exist; this
-   is mostly a node-class registration plus an exec-pin route to a named
-   function on the same Blueprint.
-2. `material_edit` (expressions) — extend the small variant with material
+1. `tag_registry_edit` — manage Gameplay Tags. Add / remove / list tag
+   FNames against a chosen `Config/Default*Tags.ini`, including a comment
+   field and a substring-filtered list op. The runtime side requires a
+   live-reload through `UGameplayTagsManager::Get().LoadGameplayTagTables`
+   plus a notify-broadcast so tag pickers refresh; the safer first cut
+   writes the ini and asks the user to reload, then ships the broadcast
+   in a follow-up.
+2. `bp_create` — create Actor / Pawn / Character / GameMode / etc.
+   Blueprints with a parent class. The local repo already has
+   `create_blueprint`; the gap to the hosted Flop equivalent is parent
+   class resolution by short name and a single-call save.
+3. `material_edit` (expressions) — extend the small variant with material
    expression graph authoring. The verbose `UMaterialExpression*` surface
    is the main cost; a "create texture sample wired into BaseColor" cut is
    a reasonable second hop.
-3. `scene_brief` — short level summary on top of `scene_query`. Pulls
-   counts, level / sublevel names, streaming volume names, and a small
-   selection of "interesting" actors (player start, post process volumes,
-   directional lights). Cheap once `scene_query` is in place.
-4. `level_inspect` — read-only dump of the active level plus loaded
-   sublevels, world settings, world partition state where present.
+4. `bp_brief` / `bp_inspect` — read-only Blueprint summary + the targeted
+   per-graph / per-variable / per-component query operations. The local
+   repo has `read_blueprint_content` and `analyze_blueprint_graph`;
+   wrapping them as one-shot scoped queries removes the need to author
+   Python every time.
 
-`python_execution` now covers any operation we have not wrapped natively;
-prefer wrapping the high-frequency calls (`bp_brief`, `bp_inspect`) as
-dedicated tools so the agent does not need to author Python every time.
+`python_execution` covers any operation we have not wrapped natively;
+prefer wrapping the high-frequency calls as dedicated tools so the agent
+does not need to author Python every time.
 
 The `widget_edit` slot-property surface (alignment, fill, padding) is small
 follow-up work if the consumer game needs it during smoke-testing.
