@@ -3468,6 +3468,60 @@ def material_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def actor_inspect(
+    actor: str,
+    include_components: bool = True,
+    include_component_properties: bool = False,
+    include_actor_properties: bool = False,
+    max_properties_per_object: int = 24,
+) -> Dict[str, Any]:
+    """
+    Read-only single-actor dump with components and key properties.
+
+    Mirrors the read side of the hosted Flop "actor_inspect" tool. The actor
+    is resolved by FName first and then by case-insensitive Outliner label.
+    Returns the actor's transform, tags, replication snapshot, root component,
+    and an optional list of all attached components, each with their class,
+    relative transform, attach parent / socket, tags, and (when requested) a
+    short uproperty value dump rendered through FProperty::ExportText.
+
+    Args:
+        actor: Actor name (FName from GetName()) or Outliner label.
+        include_components: Include the components list. Defaults True.
+        include_component_properties: For each component, include a small
+            uproperty value dump capped by max_properties_per_object.
+            Defaults False to keep responses compact.
+        include_actor_properties: Include the actor-level uproperty dump.
+            Defaults False.
+        max_properties_per_object: Per-object cap on uproperty entries
+            emitted when properties are included. Defaults 24.
+
+    Returns:
+        Dictionary with actor metadata, components list (when requested),
+        and optional actor / component property dumps.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "operation": "inspect",
+        "actor": actor,
+        "include_components": include_components,
+        "include_component_properties": include_component_properties,
+        "include_actor_properties": include_actor_properties,
+        "max_properties_per_object": max_properties_per_object,
+    }
+
+    try:
+        response = unreal.send_command("actor_inspect", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"actor_inspect error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

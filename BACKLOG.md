@@ -49,6 +49,12 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   `set_instance_parameter` for scalar / vector / texture overrides on a
   UMaterialInstanceConstant. Expression-graph authoring and Material
   Parameter Collections remain in BACKLOG.md.
+- `actor_inspect` (small) — read-only counterpart to `scene_query` for a
+  single actor. Resolves the actor by `GetName()` first and then by
+  Outliner label, returns transform / tags / replication snapshot / root
+  component, and (when asked) the full component tree with each
+  component's class, relative transform, attach parent / socket, tags, and
+  a short `FProperty::ExportText` value dump per component or per actor.
 
 ## Blueprint authoring (medium to large each)
 
@@ -90,7 +96,9 @@ helpers.
   filters.
 - `scene_brief` — short level summary.
 - `scene_compose` — declarative spawn / modify / delete.
-- `actor_inspect` — single-actor read with components and properties.
+- `actor_inspect` (small variant ships in this fork) — broader hosted
+  scope still pending: full component child-actor recursion, deeper
+  per-component property control, and component-by-name lookups inline.
 - `level_inspect` — current level + sublevels + streaming volumes.
 - `search_assets` — Content Browser search.
 - `asset_references` — dependency graph for an asset.
