@@ -513,15 +513,16 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateStruct(const TSharedP
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create UUserDefinedStruct"));
     }
 
-    // CreateUserDefinedStruct seeds a default first member so the struct
-    // compiles. Drop it before we add the caller's fields.
-    auto& InitialDescriptions = FStructureEditorUtils::GetVarDesc(CreatedStruct);
-    while (InitialDescriptions.Num() > 0)
+    // CreateUserDefinedStruct seeds a single default Boolean member so the
+    // struct compiles. RemoveVariable refuses to make a struct empty, so we
+    // capture the seed's GUID up front, append the caller's fields, and then
+    // remove the seed once the struct has at least one real field.
+    FGuid SeedGuid;
     {
-        const FGuid SeedGuid = InitialDescriptions[0].VarGuid;
-        if (!FStructureEditorUtils::RemoveVariable(CreatedStruct, SeedGuid))
+        const auto& InitialDescs = FStructureEditorUtils::GetVarDesc(CreatedStruct);
+        if (InitialDescs.Num() > 0)
         {
-            break;
+            SeedGuid = InitialDescs[0].VarGuid;
         }
     }
 
@@ -551,6 +552,11 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateStruct(const TSharedP
         FieldJson->SetStringField(TEXT("name"), Spec.Name);
         FieldJson->SetStringField(TEXT("type"), Spec.TypeText);
         AddedFieldsJson.Add(MakeShared<FJsonValueObject>(FieldJson));
+    }
+
+    if (SeedGuid.IsValid())
+    {
+        FStructureEditorUtils::RemoveVariable(CreatedStruct, SeedGuid);
     }
 
     FStructureEditorUtils::CompileStructure(CreatedStruct);
