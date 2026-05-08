@@ -29,6 +29,7 @@
 #include "Commands/SproftTagRegistryEditCommands.h"
 #include "Commands/SproftBpCreateCommands.h"
 #include "Commands/SproftBpBriefCommands.h"
+#include "Commands/SproftBpInspectCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -94,4 +95,5 @@ private:
 	TSharedPtr<FSproftTagRegistryEditCommands> SproftTagRegistryEdit;
 	TSharedPtr<FSproftBpCreateCommands> SproftBpCreate;
 	TSharedPtr<FSproftBpBriefCommands> SproftBpBrief;
+	TSharedPtr<FSproftBpInspectCommands> SproftBpInspect;
 };

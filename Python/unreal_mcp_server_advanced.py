@@ -3998,6 +3998,69 @@ def bp_brief(blueprint: str) -> Dict[str, Any]:
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_inspect(
+    op: str,
+    blueprint: str,
+    class_pattern: Optional[str] = None,
+    title_pattern: Optional[str] = None,
+    pattern: Optional[str] = None,
+    limit: int = 64,
+) -> Dict[str, Any]:
+    """
+    Read-only targeted query operations on a Blueprint asset.
+
+    Sits between ``bp_brief`` (one-shot orientation) and
+    ``read_blueprint_content`` (full dump). Each op returns a focused
+    payload so the agent can answer specific questions without authoring
+    Python every time.
+
+    Operations:
+
+      - ``list_variables``: typed variables with default value, edit
+        flags, category, and friendly name.
+      - ``list_functions``: user-authored function and macro graphs with
+        node counts.
+      - ``list_events``: event-graph events (UK2Node_Event +
+        UK2Node_CustomEvent), with the owning ubergraph name.
+      - ``list_components``: SCS components with class, scene/actor
+        flag, attach parent, attach socket, root flag, and child count.
+      - ``find_node``: node search across all graphs by case-insensitive
+        substring against either node short class name (``class_pattern``)
+        or node title (``title_pattern``). Pass ``pattern`` to match either.
+
+    Args:
+        op: One of ``list_variables`` / ``list_functions`` / ``list_events``
+            / ``list_components`` / ``find_node``.
+        blueprint: Short name or full ``/Game/...`` Blueprint path.
+        class_pattern: Substring against node class short name (find_node).
+        title_pattern: Substring against node title (find_node).
+        pattern: Convenience: matches either class_pattern or title_pattern.
+        limit: Cap on returned matches in find_node. Defaults 64.
+
+    Returns:
+        Operation-specific dict; see C++ handler for the exact shape.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"op": op, "blueprint": blueprint, "limit": limit}
+    if class_pattern is not None:
+        params["class_pattern"] = class_pattern
+    if title_pattern is not None:
+        params["title_pattern"] = title_pattern
+    if pattern is not None:
+        params["pattern"] = pattern
+
+    try:
+        response = unreal.send_command("bp_inspect", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_inspect error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
