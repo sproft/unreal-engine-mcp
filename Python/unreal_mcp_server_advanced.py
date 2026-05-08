@@ -3084,6 +3084,87 @@ def editor_log(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_input(
+    operation: str,
+    package_path: Optional[str] = None,
+    value_type: Optional[str] = None,
+    description: Optional[str] = None,
+    trigger_when_paused: bool = False,
+    input_mapping_context: Optional[str] = None,
+    input_action: Optional[str] = None,
+    key: Optional[str] = None,
+    save: bool = True,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """
+    Manage Enhanced Input data assets.
+
+    Mirrors a small slice of the hosted Flop "bp_input" tool. Three operations
+    are supported in this first cut:
+
+        - "create_input_action": create a UInputAction asset with a chosen
+          value type (Boolean, Axis1D, Axis2D, Axis3D).
+        - "create_input_mapping_context": create an empty UInputMappingContext.
+        - "add_mapping": append one key-to-action binding to an existing IMC.
+
+    Wiring Enhanced Input event nodes into Blueprint event graphs is tracked
+    separately in BACKLOG.md and can be composed on top of the existing
+    add_node / connect_nodes helpers.
+
+    Args:
+        operation: "create_input_action", "create_input_mapping_context", or
+            "add_mapping".
+        package_path: For create operations: the absolute content-browser path
+            for the new asset, e.g. "/Game/Input/IA_Jump".
+        value_type: For create_input_action: one of "bool" / "boolean",
+            "axis1d" / "float", "axis2d" / "vector2d", "axis3d" / "vector".
+            Defaults to "bool".
+        description: Optional ActionDescription / ContextDescription text.
+        trigger_when_paused: For create_input_action: allow the action to
+            trigger while the game is paused. Defaults False.
+        input_mapping_context: For add_mapping: absolute path to the existing
+            UInputMappingContext asset.
+        input_action: For add_mapping: absolute path to the existing
+            UInputAction asset.
+        key: For add_mapping: FKey FName like "SpaceBar", "W",
+            "Gamepad_FaceButton_Bottom", or "Gamepad_LeftStick_X".
+        save: Save the asset(s) after the change. Defaults True.
+        overwrite: For create operations: overwrite an existing asset at
+            package_path. Defaults False.
+
+    Returns:
+        Dictionary with asset metadata on success.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"operation": operation}
+    if package_path is not None:
+        params["package_path"] = package_path
+    if value_type is not None:
+        params["value_type"] = value_type
+    if description is not None:
+        params["description"] = description
+    params["trigger_when_paused"] = trigger_when_paused
+    if input_mapping_context is not None:
+        params["input_mapping_context"] = input_mapping_context
+    if input_action is not None:
+        params["input_action"] = input_action
+    if key is not None:
+        params["key"] = key
+    params["save"] = save
+    params["overwrite"] = overwrite
+
+    try:
+        response = unreal.send_command("bp_input", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_input error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

@@ -60,6 +60,7 @@
 #include "Commands/SproftAssetFactoryCommands.h"
 #include "Commands/SproftWidgetEditCommands.h"
 #include "Commands/SproftEditorLogCommands.h"
+#include "Commands/SproftBpInputCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -75,6 +76,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftAssetFactory = MakeShared<FSproftAssetFactoryCommands>();
     SproftWidgetEdit = MakeShared<FSproftWidgetEditCommands>();
     SproftEditorLog = MakeShared<FSproftEditorLogCommands>();
+    SproftBpInput = MakeShared<FSproftBpInputCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -87,6 +89,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftAssetFactory.Reset();
     SproftWidgetEdit.Reset();
     SproftEditorLog.Reset();
+    SproftBpInput.Reset();
 }
 
 // Initialize subsystem
@@ -297,6 +300,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("editor_log"))
             {
                 ResultJson = SproftEditorLog->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("bp_input"))
+            {
+                ResultJson = SproftBpInput->HandleCommand(CommandType, Params);
             }
             else
             {
