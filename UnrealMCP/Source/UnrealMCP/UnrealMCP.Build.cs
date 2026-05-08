@@ -71,7 +71,8 @@ public class UnrealMCP : ModuleRules
 				{
 					"PropertyEditor",      // For property editing
 					"ToolMenus",           // For editor UI
-					"BlueprintEditorLibrary" // For Blueprint utilities
+					"BlueprintEditorLibrary", // For Blueprint utilities
+					"MaterialEditor"       // For UMaterialEditingLibrary (Sproft material_edit)
 				}
 			);
 		}

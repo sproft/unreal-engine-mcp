@@ -3382,6 +3382,92 @@ def scene_query(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def material_edit(
+    operation: str,
+    package_path: Optional[str] = None,
+    base_color: Optional[List[float]] = None,
+    parent_material: Optional[str] = None,
+    material_instance: Optional[str] = None,
+    parameter_name: Optional[str] = None,
+    parameter_type: Optional[str] = None,
+    value: Optional[Any] = None,
+    save: bool = True,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """
+    Small slice of material authoring: create materials and instances, or
+    set scalar / vector / texture overrides on a Material Instance Constant.
+
+    Mirrors the constrained subset of the hosted Flop "material_edit" tool.
+    Three operations are supported in this first cut:
+
+        - "create_material": create a UMaterial with an optional Constant3
+          base-colour driver wired into the BaseColor input.
+        - "create_material_instance_constant": create a UMaterialInstance
+          Constant pointing at a parent material or instance.
+        - "set_instance_parameter": override scalar / vector / texture
+          parameters on a Material Instance Constant. The parameter type
+          is auto-detected from the supplied value, or pinned with the
+          parameter_type hint.
+
+    Authoring expression graphs and Material Parameter Collections is
+    deferred to a later pass; see BACKLOG.md.
+
+    Args:
+        operation: "create_material", "create_material_instance_constant",
+            or "set_instance_parameter".
+        package_path: For create operations: absolute /Game/ path for the
+            new asset, e.g. "/Game/Materials/M_Default".
+        base_color: For create_material: optional [r, g, b] or [r, g, b, a]
+            linear colour wired into BaseColor through a Constant3Vector
+            expression. Skip to leave BaseColor unwired.
+        parent_material: For create_material_instance_constant: absolute
+            path to the parent UMaterialInterface.
+        material_instance: For set_instance_parameter: absolute path to the
+            target UMaterialInstanceConstant.
+        parameter_name: For set_instance_parameter: parameter FName.
+        parameter_type: For set_instance_parameter: optional hint of
+            "scalar", "vector" / "color", or "texture". Defaults to
+            auto-detect from the value.
+        value: For set_instance_parameter: the override value. Accepts a
+            number (scalar), a [r, g, b, a] array or {"r":..,"g":..} dict
+            (vector), or a texture asset path string (texture).
+        save: Save the asset after the change. Defaults True.
+        overwrite: For create operations: overwrite existing assets at
+            package_path. Defaults False.
+
+    Returns:
+        Dictionary with operation-specific metadata on success.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"operation": operation, "save": save, "overwrite": overwrite}
+    if package_path is not None:
+        params["package_path"] = package_path
+    if base_color is not None:
+        params["base_color"] = base_color
+    if parent_material is not None:
+        params["parent_material"] = parent_material
+    if material_instance is not None:
+        params["material_instance"] = material_instance
+    if parameter_name is not None:
+        params["parameter_name"] = parameter_name
+    if parameter_type is not None:
+        params["parameter_type"] = parameter_type
+    if value is not None:
+        params["value"] = value
+
+    try:
+        response = unreal.send_command("material_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"material_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

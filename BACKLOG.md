@@ -43,6 +43,12 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   `label_pattern`, single `tag`, and an optional spherical spatial filter
   with a result limit. Returns class / name / label / location / rotation /
   scale / tags / mobility / hidden flags per actor.
+- `material_edit` (small) — three operations: `create_material` (with an
+  optional `Constant3Vector` base-colour driver wired into `BaseColor`),
+  `create_material_instance_constant` from a parent UMaterialInterface, and
+  `set_instance_parameter` for scalar / vector / texture overrides on a
+  UMaterialInstanceConstant. Expression-graph authoring and Material
+  Parameter Collections remain in BACKLOG.md.
 
 ## Blueprint authoring (medium to large each)
 
@@ -93,10 +99,11 @@ helpers.
 ## Materials & shading (large)
 
 - `material_inspect` — read material / instance / parameter collection.
-- `material_edit` — create materials, instances, functions, parameter
-  collections; author expression graphs. The MaterialExpression API is verbose;
-  starting with a constrained "set parameter on a material instance" cut would
-  be a small-to-medium pass.
+- `material_edit` (small variant ships in this fork: create material with
+  a Constant3Vector base colour, create material instance constant, and
+  set scalar / vector / texture parameters on an instance). Pending: full
+  MaterialExpression-graph authoring, Material Functions, and Material
+  Parameter Collections.
 
 ## VFX (large each)
 
