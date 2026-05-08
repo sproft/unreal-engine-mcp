@@ -3898,6 +3898,75 @@ def tag_registry_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_create(
+    name: str,
+    parent_class: Optional[str] = None,
+    path: Optional[str] = None,
+    properties: Optional[Dict[str, Any]] = None,
+    compile: bool = True,
+    save: bool = True,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """
+    Create a UBlueprint asset with a chosen parent class.
+
+    Wider surface than the local ``create_blueprint`` helper:
+
+      - ``parent_class`` accepts a short name (Actor, Pawn, Character,
+        ActorComponent, SceneComponent, GameMode, GameModeBase,
+        PlayerController, AIController, UserWidget, DataAsset,
+        BlueprintFunctionLibrary, etc.), a full ``/Script/Module.ClassName``
+        path, or a ``/Game/...`` Blueprint class path.
+      - ``path`` configures the output package path (``/Game/...``);
+        defaults to ``/Game/Blueprints``.
+      - ``properties`` is a flat dict applied via ``FProperty::ImportText``
+        on the generated CDO before the first compile, so callers can land
+        defaults in one shot.
+      - Compiles and saves on success by default.
+
+    Args:
+        name: Short asset name. Must contain no invalid object characters.
+        parent_class: Parent UClass, by short name or full path.
+            Defaults to ``Actor``.
+        path: ``/Game/...`` package path. Defaults to ``/Game/Blueprints``.
+        properties: Optional flat dict applied to the generated CDO.
+        compile: Compile the Blueprint after creation. Defaults True.
+        save: Save the asset after compile. Defaults True.
+        overwrite: When True, opens and reuses an existing asset at the
+            target path; when False, fails if the asset already exists.
+
+    Returns:
+        Dictionary with operation, name, path, object_path, parent_class,
+        parent_class_short, created, reused_existing, compiled, saved,
+        applied (per-property report), and skipped (per-property report).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "operation": "create",
+        "name": name,
+        "compile": compile,
+        "save": save,
+        "overwrite": overwrite,
+    }
+    if parent_class is not None:
+        params["parent_class"] = parent_class
+    if path is not None:
+        params["path"] = path
+    if properties is not None:
+        params["properties"] = properties
+
+    try:
+        response = unreal.send_command("bp_create", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_create error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
