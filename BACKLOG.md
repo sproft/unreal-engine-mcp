@@ -8,6 +8,12 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
+This pass shipped `bp_nodes`, `bp_wire`, and `material_inspect`. Together
+they let a caller author non-trivial Blueprint logic in three calls
+(`bp_nodes` -> `bp_wire` -> `compile_blueprint`) and diagnose a
+material before mutating it, which closes the biggest two BACKLOG gaps
+flagged on the prior pass.
+
 ## Shipped in this fork
 
 - `editor_actions` (small) — save / undo / redo / focus selection / play / stop play.
@@ -146,6 +152,30 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   object, exec / data flag) plus each pin's connected targets.
   `list_connections` returns a flat edge list with exec / data filters
   and a 1024-edge cap.
+- `bp_nodes` (small) — batched K2 node creation in a chosen graph.
+  Defaults to the first event graph; pass `graph` to target a
+  function / macro / interface graph. Supports the most-used K2 node
+  classes (variable_get, variable_set, call_function, branch /
+  if_then_else, dynamic_cast, self, format_text, execution_sequence,
+  knot, make_array, custom_event, event), optional FName + position +
+  pin defaults per entry. Compile is NOT automatic so a caller can
+  stitch wires through `bp_wire` first and run a single
+  `compile_blueprint` at the end of the batch.
+- `bp_wire` (small) — declarative connect / disconnect of named pins
+  between named nodes in a Blueprint graph. Validates pin direction
+  and runs `UEdGraphSchema_K2::CanCreateConnection` for type checks.
+  Per-entry `disconnect=true` breaks an existing wire instead of
+  making a new one; `op="disconnect"` is the per-call shortcut.
+- `material_inspect` (small) — read-only material / material instance
+  dump. For UMaterial: expression list (each with FName, class,
+  position, parameter name), parameter set (scalar / vector / texture
+  / static_switch), per-attribute connected output expression for
+  BaseColor / Metallic / Specular / Roughness / Anisotropy / Normal /
+  Tangent / EmissiveColor / Opacity / OpacityMask /
+  WorldPositionOffset / AmbientOcclusion / Refraction / Displacement,
+  and the used-texture list. For UMaterialInstance: parent material
+  path, the parent's parameter list, and the instance's scalar /
+  vector / texture overrides.
 
 ## Blueprint authoring (medium to large each)
 
@@ -175,8 +205,20 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   authoring, function-graph creation with typed inputs / outputs in a
   single call, and a `compact` mode that returns a graph as a single
   edge-list dump (one payload, no per-node fan-out).
-- `bp_nodes` — batched node creation across an event graph (event nodes, branch, sequence, casts).
-- `bp_wire` — connect / disconnect named pins between nodes.
+- `bp_nodes` (small variant ships in this fork) — batched K2 node
+  creation in a chosen graph for the most-used node classes
+  (variable_get, variable_set, call_function, branch, dynamic_cast,
+  self, format_text, execution_sequence, knot, make_array,
+  custom_event, event). Open follow-ons: SwitchEnum / SwitchInteger /
+  SwitchString / SwitchName, MakeStruct / BreakStruct, MathExpression,
+  AddComponentByClass, and a per-call `auto_wire` flag that infers
+  obvious exec connections from a sequential `nodes` array.
+- `bp_wire` (small variant ships in this fork) — connect / disconnect
+  named pins through `MakeLinkTo` / `BreakLinkTo` with K2 schema
+  compatibility checks. Open follow-ons: pin-default value writes
+  during the same call, batched promoted-default literal nodes when a
+  type does not match, and a `breakall` op that drops every wire on
+  a named pin in one shot.
 - `bp_input` (asset side + first graph-wiring slice ship in this fork) —
   the data asset side (`create_input_action`,
   `create_input_mapping_context`, `add_mapping`) and a focused
@@ -231,7 +273,15 @@ helpers.
 
 ## Materials & shading (large)
 
-- `material_inspect` — read material / instance / parameter collection.
+- `material_inspect` (small variant ships in this fork) — read-only
+  dump of a UMaterial or UMaterialInstance: expression list, parameter
+  set across scalar / vector / texture / static_switch, per-attribute
+  connected output expression for the standard GBuffer attributes,
+  used texture list, and instance overrides. Open follow-ons:
+  Material Function and Material Parameter Collection inspection,
+  per-expression connected-output dump (which output of which child
+  drives each input of this expression), and an `include_graph`
+  toggle that returns the expression graph as an edge list.
 - `material_edit` (small variant ships in this fork: create material with
   a Constant3Vector base colour, create material instance constant, and
   set scalar / vector / texture parameters on an instance). Pending: full
@@ -322,32 +372,32 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`bp_variable`, `bp_class`, `bp_graph`), the next
-set should pick up:
+After the latest pass (`bp_nodes`, `bp_wire`, `material_inspect`), the
+next set should pick up:
 
 1. `material_edit` (expressions) — extend the small variant with
    MaterialExpression graph authoring. Three ops are the right cut:
    `add_expression` (short-name resolver against
    `UMaterialExpressionConstant3Vector` / `Multiply` / `Add` / `Lerp` /
-   `TextureSampleParameter2D` / `ScalarParameter` / etc.),
-   `connect_expressions` (source expression + output index → dest
-   expression + input index, going through
+   `TextureSampleParameter2D` / `ScalarParameter` / etc., going
+   through `UMaterialEditingLibrary::CreateMaterialExpression`),
+   `connect_expressions` (source expression + output name -> dest
+   expression + input name, going through
    `UMaterialEditingLibrary::ConnectMaterialExpressions`), and
    `set_expression_property` (constant value, parameter name, default
-   scalar).
-2. `bp_nodes` — batched node creation across one event graph in a
-   single call. The local repo already has `add_node` /
-   `connect_nodes`; the gap is a declarative tool that takes a list of
-   `{class, title, position, parameters}` plus a list of edges and
-   applies them as a compile-once batch.
-3. `bp_wire` — paired counterpart to `bp_nodes` for already-existing
-   nodes. Connect / disconnect named pins between named nodes through
-   `MakeLinkTo` / `BreakLinkTo` and recompile once at the end.
-4. `material_inspect` — read-only side of materials. Walk the
-   `UMaterial`'s expression list, return each expression's class /
-   FName / position / connected outputs, and dump the parameters
-   defined on the material (Scalar / Vector / Texture). Mirrors the
-   shape of `bp_graph` for shaders.
+   scalar applied through `FProperty::ImportText`).
+2. `bp_function_create` — function-graph creation with typed inputs /
+   outputs in a single call. The local repo has `create_function`
+   plus `add_function_input` / `add_function_output`; the gap is a
+   declarative one-call wrapper that lays the function down with its
+   signature in one round trip.
+3. `niagara_inspect` — read-only Niagara dump (system / emitter list,
+   module list per emitter, parameter readback). Pairs with
+   `material_inspect` for the VFX side.
+4. `bp_commit` — batched compile + save with verification. Surfaces
+   the engine's compiler output and a structural diff so a long
+   authoring chain (`bp_nodes` -> `bp_wire` -> `bp_commit`) reports
+   one consolidated outcome.
 
 `python_execution` still covers any operation we have not wrapped
 natively; prefer wrapping the high-frequency calls as dedicated tools

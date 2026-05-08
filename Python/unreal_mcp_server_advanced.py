@@ -4376,6 +4376,218 @@ def bp_graph(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_nodes(
+    blueprint: str,
+    nodes: Optional[List[Dict[str, Any]]] = None,
+    node: Optional[Dict[str, Any]] = None,
+    graph: Optional[str] = None,
+    op: Optional[str] = None,
+    compile: Optional[bool] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Batched K2 node creation in a Blueprint graph.
+
+    Spawns one or more nodes in a single call. The default graph is the
+    Blueprint's first event graph; pass ``graph`` to target a specific
+    function / macro / interface graph (resolved case-insensitively, with
+    a substring fallback to match ``bp_graph``). Each node entry takes a
+    ``class`` short name plus class-specific parameters; the response
+    returns each new node's FName, GUID, position, and full pin list so
+    a follow-up ``bp_wire`` call can address the pins by name.
+
+    Compile is NOT automatic. Run ``compile_blueprint`` once after wiring
+    up the nodes, or pass ``compile=True`` to force a compile after this
+    batch.
+
+    Supported ``class`` tokens:
+
+      - ``variable_get`` (requires ``variable_name``)
+      - ``variable_set`` (requires ``variable_name``)
+      - ``call_function`` (requires ``function`` such as
+        ``KismetSystemLibrary:PrintString``,
+        ``/Script/Engine.KismetSystemLibrary:PrintString``, or a bare
+        function name on the same Blueprint's class)
+      - ``branch`` / ``if_then_else``
+      - ``dynamic_cast`` (requires ``target_class``)
+      - ``self``
+      - ``format_text``
+      - ``execution_sequence`` (alias ``sequence``)
+      - ``knot``
+      - ``make_array``
+      - ``custom_event`` (optional ``event_name``)
+      - ``event`` (override-style; requires ``event_name`` like
+        ``ReceiveBeginPlay`` / ``ReceiveTick``)
+
+    Optional per-node fields:
+
+      - ``name`` to give the node a stable FName for follow-up wiring.
+      - ``position`` (``[x, y]`` array) or ``pos_x`` / ``pos_y``.
+      - ``pin_defaults`` (dict mapping pin name to default value).
+
+    Args:
+        blueprint: Short asset name or full ``/Game/...`` Blueprint path.
+        nodes: List of node specs (preferred form for batched creation).
+        node: A single node spec (alternative to ``nodes``).
+        graph: Optional graph name; defaults to the first event graph.
+        op: Defaults to ``add``. Future ops can extend this.
+        compile: If true, compile after the batch lands.
+        save: If true, save after the batch lands.
+
+    Returns:
+        Dict with ``nodes`` (created entries) and ``failures`` (errors
+        per failed entry, with the original index).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"blueprint": blueprint}
+    if op is not None:
+        params["op"] = op
+    if graph is not None:
+        params["graph"] = graph
+    if nodes is not None:
+        params["nodes"] = nodes
+    if node is not None:
+        params["node"] = node
+    if compile is not None:
+        params["compile"] = compile
+    if save is not None:
+        params["save"] = save
+
+    try:
+        response = unreal.send_command("bp_nodes", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_nodes error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def bp_wire(
+    blueprint: str,
+    connections: Optional[List[Dict[str, Any]]] = None,
+    source_node: Optional[str] = None,
+    source_pin: Optional[str] = None,
+    dest_node: Optional[str] = None,
+    dest_pin: Optional[str] = None,
+    graph: Optional[str] = None,
+    op: Optional[str] = None,
+    disconnect: Optional[bool] = None,
+    compile: Optional[bool] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Connect or disconnect named pins between named nodes in a Blueprint
+    graph.
+
+    Pin direction is validated (the source pin must be an output, the
+    destination pin must be an input) and pin compatibility runs through
+    the K2 schema's ``CanCreateConnection`` helper before we make the
+    link, so incompatible categories (e.g. wiring a String into an int
+    pin) fail with the engine's own error text instead of silently doing
+    the wrong thing.
+
+    Compile is NOT automatic. Run ``compile_blueprint`` once at the end
+    of your authoring batch, or pass ``compile=True`` here.
+
+    Args:
+        blueprint: Short asset name or full ``/Game/...`` Blueprint path.
+        connections: List of edge specs. Each entry must include
+            ``source_node`` / ``source_pin`` / ``dest_node`` / ``dest_pin``.
+            An optional ``disconnect=true`` per entry breaks an existing
+            wire instead of making a new one.
+        source_node, source_pin, dest_node, dest_pin: Inline single-edge
+            shortcut, equivalent to a one-element ``connections`` list.
+        graph: Optional graph name; defaults to the first event graph.
+        op: ``connect`` (default) or ``disconnect`` (shortcut for setting
+            ``disconnect=true`` on every entry).
+        disconnect: Per-call shortcut equivalent to ``op="disconnect"``.
+        compile, save: If true, compile / save after wiring lands.
+
+    Returns:
+        Dict with ``connections`` (the edges actually applied), and
+        ``failures`` (per-edge error reasons such as missing pins or
+        type incompatibility).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"blueprint": blueprint}
+    if op is not None:
+        params["op"] = op
+    elif disconnect is True:
+        params["op"] = "disconnect"
+    if graph is not None:
+        params["graph"] = graph
+    if connections is not None:
+        params["connections"] = connections
+    if source_node is not None:
+        params["source_node"] = source_node
+    if source_pin is not None:
+        params["source_pin"] = source_pin
+    if dest_node is not None:
+        params["dest_node"] = dest_node
+    if dest_pin is not None:
+        params["dest_pin"] = dest_pin
+    if compile is not None:
+        params["compile"] = compile
+    if save is not None:
+        params["save"] = save
+
+    try:
+        response = unreal.send_command("bp_wire", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_wire error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
+def material_inspect(material: str) -> Dict[str, Any]:
+    """
+    Read-only counterpart to ``material_edit``.
+
+    Resolves the asset path against UEditorAssetLibrary and returns a
+    structured dump of either a UMaterial or a UMaterialInstance. Useful
+    when we need to diagnose a material's parameter set, expression list,
+    or which expression drives each material attribute (BaseColor /
+    Metallic / Roughness / Normal / EmissiveColor etc.) before editing
+    it.
+
+    UMaterial response includes: name + path + class, blend mode, two-
+    sided / translucent flags, expression list (each with its FName,
+    class, position, and parameter name when relevant), parameter list
+    grouped by scalar / vector / texture / static_switch, per-attribute
+    connected output expression (with output pin name), and the full
+    used-texture list.
+
+    UMaterialInstance response includes: parent material path, the
+    parent material's full parameter list, and the instance's own
+    overrides for scalar / vector / texture parameters.
+
+    Args:
+        material: Asset path of a UMaterial or UMaterialInstance.
+
+    Returns:
+        Dict matching the C++ handler's shape; see the header for the
+        exact field set.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("material_inspect", {"material": material})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"material_inspect error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

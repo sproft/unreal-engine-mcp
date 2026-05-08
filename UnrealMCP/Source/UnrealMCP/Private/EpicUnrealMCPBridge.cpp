@@ -74,6 +74,9 @@
 #include "Commands/SproftBpCreateCommands.h"
 #include "Commands/SproftBpBriefCommands.h"
 #include "Commands/SproftBpInspectCommands.h"
+#include "Commands/SproftBpNodesCommands.h"
+#include "Commands/SproftBpWireCommands.h"
+#include "Commands/SproftMaterialInspectCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -106,6 +109,9 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftBpVariable = MakeShared<FSproftBpVariableCommands>();
     SproftBpClass = MakeShared<FSproftBpClassCommands>();
     SproftBpGraph = MakeShared<FSproftBpGraphCommands>();
+    SproftBpNodes = MakeShared<FSproftBpNodesCommands>();
+    SproftBpWire = MakeShared<FSproftBpWireCommands>();
+    SproftMaterialInspect = MakeShared<FSproftMaterialInspectCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -135,6 +141,9 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftBpVariable.Reset();
     SproftBpClass.Reset();
     SproftBpGraph.Reset();
+    SproftBpNodes.Reset();
+    SproftBpWire.Reset();
+    SproftMaterialInspect.Reset();
 }
 
 // Initialize subsystem
@@ -413,6 +422,18 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("bp_graph"))
             {
                 ResultJson = SproftBpGraph->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("bp_nodes"))
+            {
+                ResultJson = SproftBpNodes->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("bp_wire"))
+            {
+                ResultJson = SproftBpWire->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("material_inspect"))
+            {
+                ResultJson = SproftMaterialInspect->HandleCommand(CommandType, Params);
             }
             else
             {
