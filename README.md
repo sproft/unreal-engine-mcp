@@ -154,8 +154,10 @@ the repo.
 |---|---|
 | `editor_actions` | Single multiplexed verb tool for save / undo / redo / focus selection / play / stop play. Mirrors the hosted `editor_actions`. |
 | `window_capture` | Synchronous PNG screenshot of the active editor viewport. Defaults to `<Project>/Saved/MCPScreenshots/`. |
-| `asset_factory` | Asset creation. Supports DataTable (with configurable row struct), Enum (with named entries), and Struct (with typed fields) so far. DataAsset and Enhanced Input bundles are tracked in [BACKLOG.md](BACKLOG.md). |
+| `asset_factory` | Asset creation. Supports DataTable (with configurable row struct), Enum (with named entries), Struct (with typed fields), and DataAsset (any `UDataAsset` subclass with optional flat property overrides applied through `FProperty::ImportText`). |
 | `widget_edit` | UMG Widget Blueprint authoring. Two operations: `create_widget_blueprint` (path + parent class + optional root panel class) and `add_child_widget` (vertical box, horizontal box, progress bar, text block, button, image, and a few other panel types) under a parent panel by FName. Animations, MVVM, and full slot-property control remain in [BACKLOG.md](BACKLOG.md). |
+| `widget_inspect` | Read-only counterpart to `widget_edit`. Walks the `UWidgetTree` and returns the nested hierarchy, a flat widget list, any `UNamedSlot` widgets, and the asset's user-declared Blueprint variables. |
+| `bp_input` | Enhanced Input data assets. Three operations: `create_input_action` (Boolean / Axis1D / Axis2D / Axis3D), `create_input_mapping_context`, and `add_mapping` (key-to-action binding on an existing IMC). Wiring Enhanced Input event nodes into Blueprint event graphs is on the backlog. |
 | `editor_log` | Output Log access. `tail` reads the last N lines of `<Project>/Saved/Logs/<Project>.log` with optional category and minimum-verbosity filters. `write` emits a single line through `LogSproftMCP` at a chosen verbosity (Fatal is demoted to Error). |
 
 Built and tested against the user's UE 5.7 source build at `D:\UE5`. Should

@@ -12,16 +12,26 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 - `editor_actions` (small) — save / undo / redo / focus selection / play / stop play.
 - `window_capture` (small) — synchronous PNG screenshot of the active viewport.
-- `asset_factory` (small) — create DataTable / Enum / Struct assets. The
-  Enum variant takes a list of entry names; the Struct variant takes a list
-  of `{name, type}` field specs covering the standard scalar and small-struct
-  types plus `/Game/`-rooted UScriptStruct paths.
+- `asset_factory` (small) — create DataTable / Enum / Struct / DataAsset
+  assets. The Enum variant takes a list of entry names; the Struct variant
+  takes a list of `{name, type}` field specs covering the standard scalar
+  and small-struct types plus `/Game/`-rooted UScriptStruct paths; the
+  DataAsset variant accepts a target UDataAsset class and an optional
+  flat property dict applied through `FProperty::ImportText_InContainer`.
 - `widget_edit` (small) — create a UWidgetBlueprint (`create_widget_blueprint`)
   and add a typed child widget (`add_child_widget`, e.g. vertical_box,
   progress_bar, text_block, button, image) under a parent panel by FName.
+- `widget_inspect` (small) — read-only counterpart to `widget_edit`. Walks
+  the UWidgetTree, returns the nested hierarchy, a flat widget list, any
+  named slots, and the asset's user-declared variables (excluding entries
+  that are themselves widget tree members).
 - `editor_log` (small) — tail the project's on-disk log file with optional
   category and minimum-verbosity filters; write a single line through GLog
   under a `LogSproftMCP` category.
+- `bp_input` (small) — Enhanced Input data asset factory. Three operations:
+  create a `UInputAction` (Boolean / Axis1D / Axis2D / Axis3D), create an
+  empty `UInputMappingContext`, and append one key-to-action binding row
+  through `UInputMappingContext::MapKey`.
 
 ## Blueprint authoring (medium to large each)
 
@@ -32,7 +42,11 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 - `bp_graph` — create or fetch event / function graphs by name.
 - `bp_nodes` — batched node creation across an event graph (event nodes, branch, sequence, casts).
 - `bp_wire` — connect / disconnect named pins between nodes.
-- `bp_input` — bind Enhanced Input action and axis events.
+- `bp_input` (asset side ships in this fork) — wire Enhanced Input action
+  events into a Blueprint's event graph. The data asset side
+  (`create_input_action`, `create_input_mapping_context`, `add_mapping`)
+  is shipped; the graph-side `K2Node_EnhancedInputAction` wiring on top of
+  the existing `add_node` / `connect_nodes` helpers is still pending.
 - `bp_commit` — compile and save with verification.
 - `bp_author` — high-level "write me a feature" composite.
 - `bp_dry_run` — verify what `bp_commit` would do without applying.
@@ -84,7 +98,9 @@ helpers.
 
 ## UMG / Widgets (medium)
 
-- `widget_inspect` — read widget tree, named slots, styles, MVVM bindings.
+- `widget_inspect` — the small variant ships in this fork. The remaining
+  hosted-Flop scope (style readback, MVVM binding readback) is still
+  outstanding.
 - `widget_edit` — the small variant ships in this fork. The remaining
   hosted-Flop scope (animations, MVVM bindings, advanced styles, event
   binding, slot-property assignment beyond defaults) is still on the table.
@@ -114,8 +130,10 @@ helpers.
 
 ## Data assets (small to medium each, on the asset_factory umbrella)
 
-- `asset_factory` (DataAsset) — create UPrimaryDataAsset subclasses.
-- `asset_factory` (Enhanced Input bundle) — create InputAction + InputMappingContext + IA_Lookup.
+- `asset_factory` (DataAsset) — shipped in this fork.
+- `asset_factory` (Enhanced Input bundle) — superseded by the dedicated
+  `bp_input` tool, which creates InputActions and InputMappingContexts
+  individually and lets the agent bind keys at the row level.
 
 ## Editor & diagnostics (medium each)
 
@@ -140,17 +158,22 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-The Phase 4 unblock is now done. Next pass should pick up:
+After the latest pass (`bp_input`, `asset_factory` data asset variant,
+`widget_inspect`), the next set should pick up:
 
 1. `material_edit` (small variant: create material instance + set scalar /
-   vector parameters) — supports basic look development.
-2. `bp_input` (small) — Enhanced Input bindings are needed for any new
-   gameplay feature.
-3. `widget_inspect` (small) — let the agent read what is already in a widget
-   tree before editing, complementing the new `widget_edit`.
-4. `asset_factory` (DataAsset) — fills out the asset_factory umbrella.
-5. `bp_input` (small) plus `bp_component` (small) — both unblock new
-   gameplay system Blueprints.
+   vector / texture parameters) — supports basic look development. The
+   MaterialExpression API is verbose, so authoring expression graphs is a
+   later pass.
+2. `bp_input` (graph wiring) — `K2Node_EnhancedInputAction` setup on top of
+   the existing `add_node` / `connect_nodes` helpers, so an agent can wire
+   an InputAction into a Blueprint's event graph in one call.
+3. `bp_component` (small) — add SkeletalMesh / Camera / SpringArm
+   components to existing Blueprints alongside the current
+   `add_component_to_blueprint`.
+4. `scene_query` (small) — lift the existing `find_actors_by_name` /
+   `get_actors_in_level` calls into a single multiplexed query with class
+   and tag filters.
 
 The `widget_edit` slot-property surface (alignment, fill, padding) is small
 follow-up work if the consumer game needs it during smoke-testing.
