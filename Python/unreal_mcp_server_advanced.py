@@ -3685,6 +3685,52 @@ def python_execution(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def scene_brief(
+    max_class_counts: int = 256,
+    max_notable_actors: int = 16,
+) -> Dict[str, Any]:
+    """
+    Read-only one-shot orientation summary of the active editor world.
+
+    Mirrors the documented "scene_brief" entry on the hosted Flop tool surface.
+    The goal is a designer-readable snapshot without paying for a full
+    per-actor list. One call returns level identity, sublevel list, actor
+    count and per-class counts, world bounds union, current GameMode override
+    plus default pawn class, the Level Blueprint's "has user events" flag,
+    deduplicated tags in use, and a short list of notable actors (player
+    starts, directional lights, post-process volumes).
+
+    Args:
+        max_class_counts: Cap on entries returned in class_counts. Defaults
+            256. The remaining entries are reported through
+            class_counts_truncated and unique_classes.
+        max_notable_actors: Cap on entries returned in notable_actors.
+            Defaults 16. Set to 0 to skip the list.
+
+    Returns:
+        Dictionary with level_name, level_path, sublevels, actor_count,
+        class_counts, class_counts_truncated, unique_classes, tags_in_use,
+        bounds (or None when nothing has bounds), game_mode_class,
+        default_pawn_class, level_blueprint_has_events, notable_actors.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "max_class_counts": max_class_counts,
+        "max_notable_actors": max_notable_actors,
+    }
+
+    try:
+        response = unreal.send_command("scene_brief", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"scene_brief error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

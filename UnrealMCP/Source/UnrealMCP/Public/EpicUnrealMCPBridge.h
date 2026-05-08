@@ -24,6 +24,7 @@
 #include "Commands/SproftActorInspectCommands.h"
 #include "Commands/SproftSceneComposeCommands.h"
 #include "Commands/SproftPythonExecutionCommands.h"
+#include "Commands/SproftSceneBriefCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -84,4 +85,5 @@ private:
 	TSharedPtr<FSproftActorInspectCommands> SproftActorInspect;
 	TSharedPtr<FSproftSceneComposeCommands> SproftSceneCompose;
 	TSharedPtr<FSproftPythonExecutionCommands> SproftPythonExecution;
+	TSharedPtr<FSproftSceneBriefCommands> SproftSceneBrief;
 };
