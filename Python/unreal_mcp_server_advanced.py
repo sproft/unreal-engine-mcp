@@ -3028,6 +3028,62 @@ def widget_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def editor_log(
+    operation: str = "tail",
+    lines: int = 200,
+    category: Optional[str] = None,
+    min_verbosity: Optional[str] = None,
+    log_path: Optional[str] = None,
+    message: Optional[str] = None,
+    verbosity: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Read or append an Output Log entry.
+
+    Mirrors a small slice of the hosted Flop "editor_log" tool. The Unreal
+    editor's Output Log is mirrored to disk at <Project>/Saved/Logs/<Project>.log,
+    and that file is what we read. Writes go through GLog and a custom
+    LogSproftMCP category so they show up in both the in-editor Output Log
+    and the on-disk file.
+
+    Args:
+        operation: "tail" to read recent log lines, "write" to emit one.
+        lines: For tail: max number of lines to return (1..5000). Default 200.
+        category: For tail: optional category filter, e.g. "LogTemp".
+        min_verbosity: For tail: optional minimum severity. One of fatal,
+            error, warning, display, log, verbose, very_verbose.
+        log_path: For tail: optional override for the log file path.
+        message: For write: the line of text to log. Required for write.
+        verbosity: For write: severity. Defaults to "log". "fatal" is
+            demoted to "error" so the editor does not crash.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"operation": operation}
+    if lines is not None:
+        params["lines"] = lines
+    if category is not None:
+        params["category"] = category
+    if min_verbosity is not None:
+        params["min_verbosity"] = min_verbosity
+    if log_path is not None:
+        params["log_path"] = log_path
+    if message is not None:
+        params["message"] = message
+    if verbosity is not None:
+        params["verbosity"] = verbosity
+
+    try:
+        response = unreal.send_command("editor_log", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"editor_log error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

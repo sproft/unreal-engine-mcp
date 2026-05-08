@@ -15,6 +15,7 @@
 #include "Commands/SproftWindowCaptureCommands.h"
 #include "Commands/SproftAssetFactoryCommands.h"
 #include "Commands/SproftWidgetEditCommands.h"
+#include "Commands/SproftEditorLogCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -66,4 +67,5 @@ private:
 	TSharedPtr<FSproftWindowCaptureCommands> SproftWindowCapture;
 	TSharedPtr<FSproftAssetFactoryCommands> SproftAssetFactory;
 	TSharedPtr<FSproftWidgetEditCommands> SproftWidgetEdit;
+	TSharedPtr<FSproftEditorLogCommands> SproftEditorLog;
 };
