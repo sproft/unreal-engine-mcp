@@ -86,10 +86,43 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   reusing an existing node for the same action. Optionally MakeLinkTo's
   the chosen trigger exec pin (default "Triggered") to a named function
   call on the same Blueprint through a `UK2Node_CallFunction` follow-on.
+- `tag_registry_edit` (small) — manage Gameplay Tags through the editor
+  module. Three operations: `add_tag` writes a tag (with optional dev
+  comment) into a chosen `Config/Default*Tags.ini` source through
+  `IGameplayTagsEditorModule::AddNewGameplayTagToINI`; `remove_tag`
+  deletes a tag through `IGameplayTagsEditorModule::DeleteTagFromINI`;
+  `list_tags` is a read-only substring search over
+  `UGameplayTagsManager::RequestAllGameplayTags` returning each tag's
+  owning source name, source ini path, and dev comment. The editor
+  module handles ini rewrites, tag-tree refresh, and the broadcast that
+  live tag pickers listen on.
+- `bp_create` (small) — create a UBlueprint asset with a chosen parent
+  class through `FKismetEditorUtilities::CreateBlueprint`. Resolves the
+  parent class from a short name (Actor, Pawn, Character, ActorComponent,
+  SceneComponent, GameMode, GameModeBase, PlayerController, AIController,
+  UserWidget, DataAsset, BlueprintFunctionLibrary, etc.), a full
+  `/Script/Module.ClassName` path, or a `/Game/...` Blueprint class
+  path. Output package path is configurable under `/Game/`. An optional
+  flat property dict applies through `FProperty::ImportText` on the
+  generated CDO before the first compile. Compiles and saves on success.
+- `bp_brief` (small) — read-only one-page orientation summary of a
+  Blueprint asset. Returns name, path, parent class (short + full path),
+  blueprint type, variable count, function count, macro count,
+  event-graph node count, named-event list (UK2Node_Event +
+  UK2Node_CustomEvent), SCS component summary, implemented Blueprint
+  interfaces, and a data-only flag.
+- `bp_inspect` (small) — read-only targeted query operations on a
+  Blueprint asset, keyed by `op`. `list_variables`, `list_functions`,
+  `list_events`, `list_components`, and `find_node` (substring against
+  node short class name and / or node title across all graphs).
 
 ## Blueprint authoring (medium to large each)
 
-- `bp_create` — create Actor / Pawn / Character / GameMode / etc. Blueprints with a parent class.
+- `bp_create` (small variant ships in this fork) — short-name parent
+  class resolution, optional flat property dict on the CDO, compile +
+  save on success. Open follow-ons: assign Blueprint interfaces at
+  creation time, post-create `bp_class` reparenting, and post-create
+  default-component dict beyond CDO properties.
 - `bp_class` — read or change the parent class on an existing Blueprint.
 - `bp_variable` — declare typed variables, expose as instance editable, set defaults.
 - `bp_component` (single-add variant ships in this fork) — broader hosted
@@ -117,8 +150,14 @@ helpers.
 
 ## Blueprint inspection (medium)
 
-- `bp_brief` — read-only orientation summary of a Blueprint.
-- `bp_inspect` — 21 targeted query operations (variables, components, graphs, parents).
+- `bp_brief` (small variant ships in this fork) — read-only one-page
+  orientation summary. Open follow-ons: per-variable replication-condition
+  surface, deeper interface-method-by-method readout, and a "constructed
+  archetype" comparison against the parent class CDO.
+- `bp_inspect` (small variant ships in this fork) — `list_variables`,
+  `list_functions`, `list_events`, `list_components`, `find_node`. Open
+  follow-ons: per-pin readback for matched nodes, per-function
+  parameter-list readout, and timeline / sequencer node summaries.
 - `bp_export` — full GraphSpec JSON export.
 
 ## Scene & level (medium each)
@@ -182,7 +221,11 @@ helpers.
 
 - `behavior_tree` — BTs, Blackboards, AI Controllers, EQS.
 - `gas_edit` — Gameplay Abilities, Effects, Attribute Sets.
-- `tag_registry_edit` — Gameplay Tags.
+- `tag_registry_edit` (small variant ships in this fork) — `add_tag`,
+  `remove_tag`, `list_tags` through `IGameplayTagsEditorModule`. Open
+  follow-ons: rename through `RenameTagInINI`, restricted-tag source
+  creation through `AddNewGameplayTagSource`, and per-tag-asset usage
+  search over the AssetRegistry for "where is this tag referenced".
 
 ## Landscape & foliage (large each)
 
@@ -234,29 +277,27 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`scene_brief`, `level_inspect`, `bp_input` graph
-wiring), the next set should pick up:
+After the latest pass (`tag_registry_edit`, `bp_create`, `bp_brief`,
+`bp_inspect`), the next set should pick up:
 
-1. `tag_registry_edit` — manage Gameplay Tags. Add / remove / list tag
-   FNames against a chosen `Config/Default*Tags.ini`, including a comment
-   field and a substring-filtered list op. The runtime side requires a
-   live-reload through `UGameplayTagsManager::Get().LoadGameplayTagTables`
-   plus a notify-broadcast so tag pickers refresh; the safer first cut
-   writes the ini and asks the user to reload, then ships the broadcast
-   in a follow-up.
-2. `bp_create` — create Actor / Pawn / Character / GameMode / etc.
-   Blueprints with a parent class. The local repo already has
-   `create_blueprint`; the gap to the hosted Flop equivalent is parent
-   class resolution by short name and a single-call save.
-3. `material_edit` (expressions) — extend the small variant with material
-   expression graph authoring. The verbose `UMaterialExpression*` surface
-   is the main cost; a "create texture sample wired into BaseColor" cut is
-   a reasonable second hop.
-4. `bp_brief` / `bp_inspect` — read-only Blueprint summary + the targeted
-   per-graph / per-variable / per-component query operations. The local
-   repo has `read_blueprint_content` and `analyze_blueprint_graph`;
-   wrapping them as one-shot scoped queries removes the need to author
-   Python every time.
+1. `bp_class` — read or change the parent class on an existing
+   Blueprint. We already have parent-class resolution in `bp_create`;
+   reusing the same resolver behind an "operation: read" / "operation:
+   reparent" tool covers the live-edit path. Reparenting goes through
+   `FBlueprintEditorUtils::ReparentBlueprint` plus a recompile.
+2. `material_edit` (expressions) — extend the small variant with
+   material expression graph authoring. The verbose `UMaterialExpression*`
+   surface is the main cost; a "create texture sample wired into
+   BaseColor" cut is a reasonable second hop.
+3. `bp_variable` — declare typed variables, expose as instance editable,
+   set defaults. The local repo has `create_variable` and
+   `set_blueprint_variable_properties`; the gap is a single declarative
+   tool that takes a list of `{name, type, default, expose, category}`
+   rows and applies them in one call.
+4. `bp_graph` — create or fetch event / function graphs by name. The
+   local repo already has `create_function`; this would add a
+   `get_or_create_event_graph` op and a "list graphs" mode that returns
+   the same payload `bp_inspect list_functions` does.
 
 `python_execution` covers any operation we have not wrapped natively;
 prefer wrapping the high-frequency calls as dedicated tools so the agent
