@@ -2880,6 +2880,58 @@ def window_capture(file_path: Optional[str] = None) -> Dict[str, Any]:
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def asset_factory(
+    asset_type: str,
+    package_path: str,
+    row_struct: Optional[str] = None,
+    save: bool = True,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """
+    Create a new asset of the requested type.
+
+    Mirrors the hosted Flop "asset_factory" surface. This first cut supports
+    DataTable creation. Other asset types (Enum, Struct, DataAsset, Enhanced
+    Input bundles) are tracked in BACKLOG.md.
+
+    Args:
+        asset_type: Currently must be "datatable".
+        package_path: Absolute content-browser path for the new asset, e.g.
+            "/Game/Data/CraftingRecipes". A trailing ".AssetName" object
+            suffix is allowed and stripped.
+        row_struct: For DataTable: a UScriptStruct path or short name to use
+            as the row schema. Pass either a full path like
+            "/Script/MyModule.MyRow", a Blueprint struct path like
+            "/Game/Data/MyRow.MyRow_C", or a known engine struct short name.
+        save: Save the asset to disk after creating it. Defaults to True.
+        overwrite: If an asset already exists at package_path, overwrite it.
+            Defaults to False (the call fails instead).
+
+    Returns:
+        Dictionary with asset metadata on success.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "asset_type": asset_type,
+        "package_path": package_path,
+        "save": save,
+        "overwrite": overwrite,
+    }
+    if row_struct is not None:
+        params["row_struct"] = row_struct
+
+    try:
+        response = unreal.send_command("asset_factory", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"asset_factory error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
