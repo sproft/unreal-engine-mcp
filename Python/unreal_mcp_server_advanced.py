@@ -2932,6 +2932,90 @@ def asset_factory(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def widget_edit(
+    operation: str,
+    package_path: Optional[str] = None,
+    widget_blueprint: Optional[str] = None,
+    parent_class: Optional[str] = None,
+    root_panel_class: Optional[str] = None,
+    widget_type: Optional[str] = None,
+    widget_name: Optional[str] = None,
+    parent_name: Optional[str] = None,
+    text: Optional[str] = None,
+    expose_as_variable: bool = True,
+    save: bool = True,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """
+    Edit a Widget Blueprint asset.
+
+    Mirrors a small slice of the hosted Flop "widget_edit" tool. Two operations
+    are supported in this first cut:
+        - "create_widget_blueprint": create a UWidgetBlueprint at a path with
+          a parent UUserWidget class and an optional root panel class.
+        - "add_child_widget": construct a named widget (e.g. vertical_box,
+          progress_bar, text_block, button, image) and attach it to an
+          existing parent panel inside an existing Widget Blueprint.
+
+    Args:
+        operation: "create_widget_blueprint" or "add_child_widget".
+        package_path: For create: the absolute content-browser path for the
+            new asset, e.g. "/Game/UI/WBP_CraftingMenu".
+        widget_blueprint: For add_child_widget: the absolute path to the
+            existing widget blueprint, e.g. "/Game/UI/WBP_CraftingMenu".
+        parent_class: For create: a UUserWidget subclass path or short name.
+            Defaults to UUserWidget.
+        root_panel_class: For create: a UPanelWidget subclass path or short
+            name to seed the root widget. Defaults to UCanvasPanel.
+        widget_type: For add_child_widget: the widget type to construct. One
+            of vertical_box, horizontal_box, canvas_panel, overlay, scroll_box,
+            border, size_box, spacer, progress_bar, text_block, button, image,
+            or a fully qualified UWidget class path.
+        widget_name: For add_child_widget: the FName for the new widget. Must
+            be unique within the asset.
+        parent_name: For add_child_widget: the FName of the parent panel
+            inside the asset. If omitted, the asset's root panel is used.
+        text: For add_child_widget: optional initial text for text_block.
+        expose_as_variable: For add_child_widget: mark the new widget as a
+            Blueprint variable so other graphs can bind to it. Defaults True.
+        save: Save the asset after the change. Defaults True.
+        overwrite: For create: overwrite an existing asset at package_path.
+            Defaults False.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"operation": operation}
+    if package_path is not None:
+        params["package_path"] = package_path
+    if widget_blueprint is not None:
+        params["widget_blueprint"] = widget_blueprint
+    if parent_class is not None:
+        params["parent_class"] = parent_class
+    if root_panel_class is not None:
+        params["root_panel_class"] = root_panel_class
+    if widget_type is not None:
+        params["widget_type"] = widget_type
+    if widget_name is not None:
+        params["widget_name"] = widget_name
+    if parent_name is not None:
+        params["parent_name"] = parent_name
+    if text is not None:
+        params["text"] = text
+    params["expose_as_variable"] = expose_as_variable
+    params["save"] = save
+    params["overwrite"] = overwrite
+
+    try:
+        response = unreal.send_command("widget_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"widget_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

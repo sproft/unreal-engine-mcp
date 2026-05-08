@@ -58,6 +58,7 @@
 #include "Commands/SproftEditorActionsCommands.h"
 #include "Commands/SproftWindowCaptureCommands.h"
 #include "Commands/SproftAssetFactoryCommands.h"
+#include "Commands/SproftWidgetEditCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -71,6 +72,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftEditorActions = MakeShared<FSproftEditorActionsCommands>();
     SproftWindowCapture = MakeShared<FSproftWindowCaptureCommands>();
     SproftAssetFactory = MakeShared<FSproftAssetFactoryCommands>();
+    SproftWidgetEdit = MakeShared<FSproftWidgetEditCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -81,6 +83,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftEditorActions.Reset();
     SproftWindowCapture.Reset();
     SproftAssetFactory.Reset();
+    SproftWidgetEdit.Reset();
 }
 
 // Initialize subsystem
@@ -283,6 +286,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("asset_factory"))
             {
                 ResultJson = SproftAssetFactory->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("widget_edit"))
+            {
+                ResultJson = SproftWidgetEdit->HandleCommand(CommandType, Params);
             }
             else
             {
