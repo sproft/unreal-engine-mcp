@@ -3182,6 +3182,59 @@ def bp_input(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def widget_inspect(
+    widget_blueprint: str,
+    include_variables: bool = True,
+    include_functions: bool = True,
+    include_flat: bool = True,
+    include_named_slots: bool = True,
+) -> Dict[str, Any]:
+    """
+    Read-only dump of a Widget Blueprint's tree, variables, and functions.
+
+    Mirrors the read side of the hosted Flop "widget_inspect" tool. The
+    existing read_blueprint_content tool returns an empty components list
+    for Widget Blueprints because UMG widgets do not live in a
+    SimpleConstructionScript; this tool fills that gap by walking the
+    UWidgetTree directly.
+
+    Args:
+        widget_blueprint: Absolute content-browser path to the
+            UWidgetBlueprint, e.g. "/Game/UI/WBP_CraftingMenu".
+        include_variables: Include the asset's NewVariables list, minus
+            entries that are also widget tree members.
+        include_functions: Include a short list of FunctionGraphs.
+        include_flat: Include a flat list of every widget in the tree, not
+            just the nested form.
+        include_named_slots: Include any UNamedSlot widgets exposed for
+            content injection.
+
+    Returns:
+        Dictionary with widget_blueprint, name, parent_class, tree, widgets,
+        widget_count, named_slots, variables, functions.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "operation": "inspect",
+        "widget_blueprint": widget_blueprint,
+        "include_variables": include_variables,
+        "include_functions": include_functions,
+        "include_flat": include_flat,
+        "include_named_slots": include_named_slots,
+    }
+
+    try:
+        response = unreal.send_command("widget_inspect", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"widget_inspect error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

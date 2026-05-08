@@ -17,6 +17,7 @@
 #include "Commands/SproftWidgetEditCommands.h"
 #include "Commands/SproftEditorLogCommands.h"
 #include "Commands/SproftBpInputCommands.h"
+#include "Commands/SproftWidgetInspectCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -70,4 +71,5 @@ private:
 	TSharedPtr<FSproftWidgetEditCommands> SproftWidgetEdit;
 	TSharedPtr<FSproftEditorLogCommands> SproftEditorLog;
 	TSharedPtr<FSproftBpInputCommands> SproftBpInput;
+	TSharedPtr<FSproftWidgetInspectCommands> SproftWidgetInspect;
 };
