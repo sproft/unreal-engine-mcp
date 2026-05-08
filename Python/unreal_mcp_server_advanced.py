@@ -2887,18 +2887,20 @@ def asset_factory(
     row_struct: Optional[str] = None,
     entries: Optional[List[str]] = None,
     fields: Optional[List[Dict[str, str]]] = None,
+    data_asset_class: Optional[str] = None,
+    properties: Optional[Dict[str, Any]] = None,
     save: bool = True,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new asset of the requested type.
 
-    Mirrors the hosted Flop "asset_factory" surface. This fork supports three
-    asset types so far: DataTable, Enum, and Struct. DataAsset and Enhanced
-    Input bundles remain tracked in BACKLOG.md.
+    Mirrors the hosted Flop "asset_factory" surface. This fork supports four
+    asset types so far: DataTable, Enum, Struct, and DataAsset. The Enhanced
+    Input data-asset bundle is split into the dedicated bp_input tool.
 
     Args:
-        asset_type: One of "datatable", "enum", "struct".
+        asset_type: One of "datatable", "enum", "struct", "data_asset".
         package_path: Absolute content-browser path for the new asset, e.g.
             "/Game/Data/CraftingRecipes". A trailing ".AssetName" object
             suffix is allowed and stripped.
@@ -2912,6 +2914,17 @@ def asset_factory(
             each member. Supported type strings: bool, int, int64, float,
             string, name, text, vector, rotator, transform, color, or a
             "/Game/..."-rooted path to an existing UScriptStruct.
+        data_asset_class: For DataAsset: the UDataAsset subclass to
+            instantiate. Pass a /Script-rooted class path
+            ("/Script/Engine.PrimaryDataAsset"), a /Game-rooted Blueprint
+            class path ("/Game/Data/MyDA.MyDA_C"), or a short engine class
+            name. Defaults to UDataAsset.
+        properties: For DataAsset: a flat dict of UPROPERTY name -> value to
+            apply through reflection. Strings, numbers, and booleans are
+            passed verbatim to FProperty::ImportText; nested objects /
+            arrays are JSON-encoded first. Unknown or malformed entries are
+            reported in the "skipped" field of the response without
+            aborting the create.
         save: Save the asset to disk after creating it. Defaults to True.
         overwrite: If an asset already exists at package_path, overwrite it.
             Defaults to False (the call fails instead).
@@ -2935,6 +2948,10 @@ def asset_factory(
         params["entries"] = entries
     if fields is not None:
         params["fields"] = fields
+    if data_asset_class is not None:
+        params["data_asset_class"] = data_asset_class
+    if properties is not None:
+        params["properties"] = properties
 
     try:
         response = unreal.send_command("asset_factory", params)

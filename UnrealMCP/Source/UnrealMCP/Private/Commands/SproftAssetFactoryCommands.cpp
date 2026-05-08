@@ -4,15 +4,18 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "EdGraphSchema_K2.h"
 #include "EditorAssetLibrary.h"
+#include "Engine/DataAsset.h"
 #include "Engine/DataTable.h"
 #include "Engine/UserDefinedEnum.h"
 #include "Engine/UserDefinedStruct.h"
 #include "Kismet2/EnumEditorUtils.h"
 #include "Kismet2/StructureEditorUtils.h"
+#include "Misc/OutputDeviceNull.h"
 #include "Misc/PackageName.h"
-#include "UserDefinedStructure/UserDefinedStructEditorData.h"
 #include "UObject/Package.h"
+#include "UObject/UnrealType.h"
 #include "UObject/UObjectGlobals.h"
+#include "UserDefinedStructure/UserDefinedStructEditorData.h"
 
 namespace
 {
@@ -125,9 +128,14 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::HandleAssetFactory(const TS
     {
         return CreateStruct(Params);
     }
+    if (AssetType == TEXT("data_asset") || AssetType == TEXT("dataasset")
+        || AssetType == TEXT("primary_data_asset") || AssetType == TEXT("primarydataasset"))
+    {
+        return CreateDataAsset(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported asset_type '%s'. Supported: datatable, enum, struct"), *AssetType));
+        FString::Printf(TEXT("Unsupported asset_type '%s'. Supported: datatable, enum, struct, data_asset"), *AssetType));
 }
 
 TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateDataTable(const TSharedPtr<FJsonObject>& Params)
@@ -574,6 +582,214 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateStruct(const TSharedP
     ResultObj->SetStringField(TEXT("name"), AssetName);
     ResultObj->SetStringField(TEXT("path"), AssetObjectPath);
     ResultObj->SetArrayField(TEXT("fields"), AddedFieldsJson);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterCreate);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Resolve a UDataAsset subclass from a path or short name. Loads if necessary. */
+    UClass* ResolveDataAssetClass(const FString& InClassPath)
+    {
+        if (InClassPath.IsEmpty())
+        {
+            return UDataAsset::StaticClass();
+        }
+
+        // Full object path (e.g. "/Script/Engine.PrimaryDataAsset" or
+        // "/Game/Data/MyDA.MyDA_C") loads either way.
+        if (InClassPath.StartsWith(TEXT("/")))
+        {
+            if (UClass* Loaded = LoadClass<UDataAsset>(nullptr, *InClassPath))
+            {
+                return Loaded;
+            }
+            const FString WithSuffix = InClassPath + TEXT("_C");
+            if (UClass* LoadedSuffix = LoadClass<UDataAsset>(nullptr, *WithSuffix))
+            {
+                return LoadedSuffix;
+            }
+            return nullptr;
+        }
+
+        // Short class name. Try loaded classes first, then the engine namespace.
+        if (UClass* Found = FindObject<UClass>(nullptr, *InClassPath))
+        {
+            if (Found->IsChildOf(UDataAsset::StaticClass()))
+            {
+                return Found;
+            }
+        }
+        const FString EnginePath = FString::Printf(TEXT("/Script/Engine.%s"), *InClassPath);
+        if (UClass* EngineClass = LoadClass<UDataAsset>(nullptr, *EnginePath))
+        {
+            return EngineClass;
+        }
+        return nullptr;
+    }
+
+    /** Convert an FJsonValue into a flat string ImportText can parse. Falls
+     *  back to JSON serialisation for nested objects / arrays so the engine's
+     *  default property text format can take it from there.
+     */
+    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    {
+        if (!Value.IsValid())
+        {
+            return FString();
+        }
+        switch (Value->Type)
+        {
+            case EJson::String:
+                return Value->AsString();
+            case EJson::Number:
+                return LexToString(Value->AsNumber());
+            case EJson::Boolean:
+                return Value->AsBool() ? TEXT("true") : TEXT("false");
+            case EJson::Null:
+                return TEXT("None");
+            default:
+            {
+                FString Buffer;
+                TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+                    TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Buffer);
+                FJsonSerializer::Serialize(Value.ToSharedRef(), TEXT(""), Writer);
+                return Buffer;
+            }
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateDataAsset(const TSharedPtr<FJsonObject>& Params)
+{
+    FString PackagePath;
+    if (!Params->TryGetStringField(TEXT("package_path"), PackagePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'package_path' parameter"));
+    }
+    if (!PackagePath.StartsWith(TEXT("/")))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'package_path' must be an absolute content-browser path, got '%s'"), *PackagePath));
+    }
+
+    FString DataAssetClassPath;
+    Params->TryGetStringField(TEXT("data_asset_class"), DataAssetClassPath);
+    if (DataAssetClassPath.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("class"), DataAssetClassPath);
+    }
+
+    bool bSaveAfterCreate = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterCreate);
+
+    bool bOverwrite = false;
+    Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+
+    FString PackageDir;
+    FString AssetName;
+    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    if (AssetName.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not derive asset name from '%s'"), *PackagePath));
+    }
+
+    const FString AssetObjectPath = PackageDir + AssetName;
+    if (UEditorAssetLibrary::DoesAssetExist(AssetObjectPath) && !bOverwrite)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset already exists: %s (set 'overwrite': true to replace)"), *AssetObjectPath));
+    }
+
+    UClass* DataAssetClass = ResolveDataAssetClass(DataAssetClassPath);
+    if (!DataAssetClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve data_asset_class '%s'. Pass a UDataAsset subclass path like /Script/MyModule.MyDA, a /Game/-rooted Blueprint path, or a short name."), *DataAssetClassPath));
+    }
+    if (DataAssetClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Data asset class '%s' is abstract and cannot be instantiated"), *DataAssetClass->GetPathName()));
+    }
+
+    UPackage* Package = CreatePackage(*AssetObjectPath);
+    if (!Package)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to create package at '%s'"), *AssetObjectPath));
+    }
+    Package->FullyLoad();
+
+    UDataAsset* NewAsset = NewObject<UDataAsset>(
+        Package, DataAssetClass, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+    if (!NewAsset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to instantiate %s"), *DataAssetClass->GetPathName()));
+    }
+
+    // Apply optional flat property overrides through the standard reflection
+    // entry point. ImportText handles primitives, enums, names, structs, and
+    // soft references uniformly given a textual representation.
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    const TSharedPtr<FJsonObject>* OverridesObj = nullptr;
+    if (Params->TryGetObjectField(TEXT("properties"), OverridesObj) && OverridesObj && OverridesObj->IsValid())
+    {
+        FOutputDeviceNull NullDevice;
+        for (const auto& Pair : (*OverridesObj)->Values)
+        {
+            const FString& PropertyName = Pair.Key;
+            const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
+
+            FProperty* Prop = FindFProperty<FProperty>(DataAssetClass, *PropertyName);
+            if (!Prop)
+            {
+                TSharedPtr<FJsonObject> SkipEntry = MakeShared<FJsonObject>();
+                SkipEntry->SetStringField(TEXT("name"), PropertyName);
+                SkipEntry->SetStringField(TEXT("reason"), TEXT("not_a_uproperty"));
+                SkippedJson.Add(MakeShared<FJsonValueObject>(SkipEntry));
+                continue;
+            }
+
+            const FString TextValue = JsonValueToImportText(JsonVal);
+            const TCHAR* TextPtr = *TextValue;
+            const TCHAR* Result = Prop->ImportText_InContainer(
+                TextPtr, NewAsset, NewAsset, PPF_None, &NullDevice);
+            if (Result == nullptr)
+            {
+                TSharedPtr<FJsonObject> SkipEntry = MakeShared<FJsonObject>();
+                SkipEntry->SetStringField(TEXT("name"), PropertyName);
+                SkipEntry->SetStringField(TEXT("reason"), TEXT("import_text_failed"));
+                SkipEntry->SetStringField(TEXT("attempted_value"), TextValue);
+                SkippedJson.Add(MakeShared<FJsonValueObject>(SkipEntry));
+                continue;
+            }
+
+            TSharedPtr<FJsonObject> AppliedEntry = MakeShared<FJsonObject>();
+            AppliedEntry->SetStringField(TEXT("name"), PropertyName);
+            AppliedEntry->SetStringField(TEXT("type"), Prop->GetCPPType());
+            AppliedJson.Add(MakeShared<FJsonValueObject>(AppliedEntry));
+        }
+    }
+
+    FAssetRegistryModule::AssetCreated(NewAsset);
+    Package->MarkPackageDirty();
+
+    if (bSaveAfterCreate)
+    {
+        UEditorAssetLibrary::SaveAsset(AssetObjectPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("asset_type"), TEXT("DataAsset"));
+    ResultObj->SetStringField(TEXT("name"), AssetName);
+    ResultObj->SetStringField(TEXT("path"), AssetObjectPath);
+    ResultObj->SetStringField(TEXT("data_asset_class"), DataAssetClass->GetPathName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetArrayField(TEXT("skipped"), SkippedJson);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterCreate);
     return ResultObj;
 }
