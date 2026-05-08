@@ -12,8 +12,16 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 - `editor_actions` (small) — save / undo / redo / focus selection / play / stop play.
 - `window_capture` (small) — synchronous PNG screenshot of the active viewport.
-- `asset_factory` (DataTable variant only, small) — create a DataTable asset
-  with a configurable row UScriptStruct.
+- `asset_factory` (small) — create DataTable / Enum / Struct assets. The
+  Enum variant takes a list of entry names; the Struct variant takes a list
+  of `{name, type}` field specs covering the standard scalar and small-struct
+  types plus `/Game/`-rooted UScriptStruct paths.
+- `widget_edit` (small) — create a UWidgetBlueprint (`create_widget_blueprint`)
+  and add a typed child widget (`add_child_widget`, e.g. vertical_box,
+  progress_bar, text_block, button, image) under a parent panel by FName.
+- `editor_log` (small) — tail the project's on-disk log file with optional
+  category and minimum-verbosity filters; write a single line through GLog
+  under a `LogSproftMCP` category.
 
 ## Blueprint authoring (medium to large each)
 
@@ -77,9 +85,9 @@ helpers.
 ## UMG / Widgets (medium)
 
 - `widget_inspect` — read widget tree, named slots, styles, MVVM bindings.
-- `widget_edit` — create Widget Blueprint with named child widgets, basic
-  styling, animations, event bindings. A "create widget BP + add Text /
-  Button / Image with named slots" cut is small to medium.
+- `widget_edit` — the small variant ships in this fork. The remaining
+  hosted-Flop scope (animations, MVVM bindings, advanced styles, event
+  binding, slot-property assignment beyond defaults) is still on the table.
 
 ## AI & abilities (large each)
 
@@ -106,14 +114,16 @@ helpers.
 
 ## Data assets (small to medium each, on the asset_factory umbrella)
 
-- `asset_factory` (Enum) — create UEnum assets with named entries.
-- `asset_factory` (Struct) — create UScriptStruct assets with typed members.
 - `asset_factory` (DataAsset) — create UPrimaryDataAsset subclasses.
 - `asset_factory` (Enhanced Input bundle) — create InputAction + InputMappingContext + IA_Lookup.
 
 ## Editor & diagnostics (medium each)
 
-- `editor_log` — read the Output Log filtered by category and verbosity.
+- `editor_log` — the on-disk-log tail variant ships in this fork. A future
+  pass could attach a buffering FOutputDevice to GLog so the tool can read
+  log entries that arrived after the editor started without re-parsing the
+  full file. We can also expose the in-editor SOutputLog widget filter
+  helpers if a hook is added to the OutputLog module.
 - `performance_audit` — gather perf stats and run a basic audit.
 - `cpp_source` — read or write C++ source and trigger Live Coding.
 
@@ -130,14 +140,17 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-These are the next 3 to 5 we should pick up after the user smoke-tests the
-current batch:
+The Phase 4 unblock is now done. Next pass should pick up:
 
-1. `widget_edit` (small variant: create Widget Blueprint with named child
-   widgets) — directly unblocks the Phase 4 crafting menu.
-2. `material_edit` (small variant: create material instance + set scalar /
+1. `material_edit` (small variant: create material instance + set scalar /
    vector parameters) — supports basic look development.
-3. `bp_input` (small) — Enhanced Input bindings are needed for any new gameplay
-   feature.
-4. `editor_log` (small) — easy win, useful for every workflow.
-5. `asset_factory` Enum + Struct — needed once we extend the crafting system.
+2. `bp_input` (small) — Enhanced Input bindings are needed for any new
+   gameplay feature.
+3. `widget_inspect` (small) — let the agent read what is already in a widget
+   tree before editing, complementing the new `widget_edit`.
+4. `asset_factory` (DataAsset) — fills out the asset_factory umbrella.
+5. `bp_input` (small) plus `bp_component` (small) — both unblock new
+   gameplay system Blueprints.
+
+The `widget_edit` slot-property surface (alignment, fill, padding) is small
+follow-up work if the consumer game needs it during smoke-testing.

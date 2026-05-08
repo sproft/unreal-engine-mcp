@@ -154,7 +154,9 @@ the repo.
 |---|---|
 | `editor_actions` | Single multiplexed verb tool for save / undo / redo / focus selection / play / stop play. Mirrors the hosted `editor_actions`. |
 | `window_capture` | Synchronous PNG screenshot of the active editor viewport. Defaults to `<Project>/Saved/MCPScreenshots/`. |
-| `asset_factory` | Asset creation. First target is `datatable` with a configurable row struct; more types are tracked in [BACKLOG.md](BACKLOG.md). |
+| `asset_factory` | Asset creation. Supports DataTable (with configurable row struct), Enum (with named entries), and Struct (with typed fields) so far. DataAsset and Enhanced Input bundles are tracked in [BACKLOG.md](BACKLOG.md). |
+| `widget_edit` | UMG Widget Blueprint authoring. Two operations: `create_widget_blueprint` (path + parent class + optional root panel class) and `add_child_widget` (vertical box, horizontal box, progress bar, text block, button, image, and a few other panel types) under a parent panel by FName. Animations, MVVM, and full slot-property control remain in [BACKLOG.md](BACKLOG.md). |
+| `editor_log` | Output Log access. `tail` reads the last N lines of `<Project>/Saved/Logs/<Project>.log` with optional category and minimum-verbosity filters. `write` emits a single line through `LogSproftMCP` at a chosen verbosity (Fatal is demoted to Error). |
 
 Built and tested against the user's UE 5.7 source build at `D:\UE5`. Should
 also work on UE 5.5/5.6 since the API surface used is stable across those
