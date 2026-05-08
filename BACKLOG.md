@@ -115,6 +115,37 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   Blueprint asset, keyed by `op`. `list_variables`, `list_functions`,
   `list_events`, `list_components`, and `find_node` (substring against
   node short class name and / or node title across all graphs).
+- `bp_variable` (small) — declarative Blueprint variable management.
+  One multi-op tool covering `list` / `add` / `remove` / `set_default` /
+  `set_flags` against `UBlueprint::NewVariables`. The `add` path uses a
+  wider type resolver than the existing local helper: scalar tokens,
+  built-in structs (vector, rotator, transform, color, linear_color),
+  `/Script/Module.ClassName` object refs, `/Game/...` Blueprint class
+  refs (auto-suffixed with `_C`), and `struct:/...` UScriptStruct
+  paths. Container types cover `single` / `array` / `set` / `map` (with
+  a `value_type` for the map case). Each mutating op compiles + saves
+  on success unless `compile=false` or `save=false`.
+- `bp_class` (small) — manage class-level settings on an existing
+  UBlueprint. One multi-op tool covering `read` / `set_parent` /
+  `set_class_settings` / `add_interface` / `remove_interface`. The
+  reparent path mirrors the editor's flow: assigns the new ParentClass,
+  runs `RefreshAllNodes` and `MarkBlueprintAsStructurallyModified`,
+  then recompiles. The interface ops use the `FTopLevelAssetPath`
+  overloads of `ImplementNewInterface` / `RemoveInterface` and accept
+  short names, full `/Script/Module.IName` paths, or `/Game/...`
+  Blueprint Interface paths. `set_class_settings` writes the
+  BlueprintOptions property surface (description, display name,
+  namespace, category, hide categories) under `WITH_EDITORONLY_DATA`.
+- `bp_graph` (small) — read-only graph traversal beyond `bp_inspect`.
+  One multi-op tool covering `list_graphs` / `list_nodes` / `get_node`
+  / `list_connections`. `list_graphs` walks `UbergraphPages`,
+  `FunctionGraphs`, `MacroGraphs`, and each
+  `ImplementedInterfaces[*].Graphs`. `list_nodes` accepts substring
+  filters on node class and title and caps at 256 by default.
+  `get_node` returns full pin info (direction, type, default value /
+  object, exec / data flag) plus each pin's connected targets.
+  `list_connections` returns a flat edge list with exec / data filters
+  and a 1024-edge cap.
 
 ## Blueprint authoring (medium to large each)
 
@@ -123,13 +154,27 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   save on success. Open follow-ons: assign Blueprint interfaces at
   creation time, post-create `bp_class` reparenting, and post-create
   default-component dict beyond CDO properties.
-- `bp_class` — read or change the parent class on an existing Blueprint.
-- `bp_variable` — declare typed variables, expose as instance editable, set defaults.
+- `bp_class` (small variant ships in this fork) — `read` / `set_parent`
+  / `set_class_settings` / `add_interface` / `remove_interface`. Open
+  follow-ons: structural fixups when the new parent removes parent
+  members the BP still references (member-fixup), and per-class flag
+  toggles (Const / Abstract / NotPlaceable) we don't expose yet.
+- `bp_variable` (small variant ships in this fork) — `list` / `add` /
+  `remove` / `set_default` / `set_flags` against `NewVariables`. Open
+  follow-ons: per-variable replication-condition surface beyond the
+  bool toggle, default-value parsing for nested struct literals through
+  `FProperty::ImportText` (instead of the current raw-text fallback),
+  and a `rename` op that fixes up downstream Get / Set nodes.
 - `bp_component` (single-add variant ships in this fork) — broader hosted
   surface still pending: move / rename / remove component nodes, deeper
   per-component property control, and full reparenting under an arbitrary
   attach socket name.
-- `bp_graph` — create or fetch event / function graphs by name.
+- `bp_graph` (small read-only variant ships in this fork) —
+  `list_graphs` / `list_nodes` / `get_node` / `list_connections`. Open
+  follow-ons: a `get_or_create_event_graph` op for declarative graph
+  authoring, function-graph creation with typed inputs / outputs in a
+  single call, and a `compact` mode that returns a graph as a single
+  edge-list dump (one payload, no per-node fan-out).
 - `bp_nodes` — batched node creation across an event graph (event nodes, branch, sequence, casts).
 - `bp_wire` — connect / disconnect named pins between nodes.
 - `bp_input` (asset side + first graph-wiring slice ship in this fork) —
@@ -277,31 +322,36 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`tag_registry_edit`, `bp_create`, `bp_brief`,
-`bp_inspect`), the next set should pick up:
+After the latest pass (`bp_variable`, `bp_class`, `bp_graph`), the next
+set should pick up:
 
-1. `bp_class` — read or change the parent class on an existing
-   Blueprint. We already have parent-class resolution in `bp_create`;
-   reusing the same resolver behind an "operation: read" / "operation:
-   reparent" tool covers the live-edit path. Reparenting goes through
-   `FBlueprintEditorUtils::ReparentBlueprint` plus a recompile.
-2. `material_edit` (expressions) — extend the small variant with
-   material expression graph authoring. The verbose `UMaterialExpression*`
-   surface is the main cost; a "create texture sample wired into
-   BaseColor" cut is a reasonable second hop.
-3. `bp_variable` — declare typed variables, expose as instance editable,
-   set defaults. The local repo has `create_variable` and
-   `set_blueprint_variable_properties`; the gap is a single declarative
-   tool that takes a list of `{name, type, default, expose, category}`
-   rows and applies them in one call.
-4. `bp_graph` — create or fetch event / function graphs by name. The
-   local repo already has `create_function`; this would add a
-   `get_or_create_event_graph` op and a "list graphs" mode that returns
-   the same payload `bp_inspect list_functions` does.
+1. `material_edit` (expressions) — extend the small variant with
+   MaterialExpression graph authoring. Three ops are the right cut:
+   `add_expression` (short-name resolver against
+   `UMaterialExpressionConstant3Vector` / `Multiply` / `Add` / `Lerp` /
+   `TextureSampleParameter2D` / `ScalarParameter` / etc.),
+   `connect_expressions` (source expression + output index → dest
+   expression + input index, going through
+   `UMaterialEditingLibrary::ConnectMaterialExpressions`), and
+   `set_expression_property` (constant value, parameter name, default
+   scalar).
+2. `bp_nodes` — batched node creation across one event graph in a
+   single call. The local repo already has `add_node` /
+   `connect_nodes`; the gap is a declarative tool that takes a list of
+   `{class, title, position, parameters}` plus a list of edges and
+   applies them as a compile-once batch.
+3. `bp_wire` — paired counterpart to `bp_nodes` for already-existing
+   nodes. Connect / disconnect named pins between named nodes through
+   `MakeLinkTo` / `BreakLinkTo` and recompile once at the end.
+4. `material_inspect` — read-only side of materials. Walk the
+   `UMaterial`'s expression list, return each expression's class /
+   FName / position / connected outputs, and dump the parameters
+   defined on the material (Scalar / Vector / Texture). Mirrors the
+   shape of `bp_graph` for shaders.
 
-`python_execution` covers any operation we have not wrapped natively;
-prefer wrapping the high-frequency calls as dedicated tools so the agent
-does not need to author Python every time.
+`python_execution` still covers any operation we have not wrapped
+natively; prefer wrapping the high-frequency calls as dedicated tools
+so the agent does not need to author Python every time.
 
-The `widget_edit` slot-property surface (alignment, fill, padding) is small
-follow-up work if the consumer game needs it during smoke-testing.
+The `widget_edit` slot-property surface (alignment, fill, padding) is
+small follow-up work if the consumer game needs it during smoke-testing.
