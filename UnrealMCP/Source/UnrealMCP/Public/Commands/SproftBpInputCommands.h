@@ -6,21 +6,27 @@
 /**
  * Sproft fork addition: bp_input
  *
- * Manage Enhanced Input data assets. The hosted Flop "bp_input" tool also
- * wires Enhanced Input events into Blueprint event graphs; that piece is
- * tracked separately in BACKLOG.md and is a clean follow-up for the existing
- * BlueprintGraph node helpers in this repo. This first cut covers the
- * documented data-asset surface that designers ask for:
+ * Manage Enhanced Input data assets and wire Enhanced Input event nodes into
+ * Blueprint event graphs.
  *
+ * Operations:
  *   - "create_input_action": create a UInputAction asset with a chosen
  *      EInputActionValueType (Boolean, Axis1D, Axis2D, Axis3D).
  *   - "create_input_mapping_context": create an empty UInputMappingContext.
  *   - "add_mapping": append one FEnhancedActionKeyMapping (action + key) to
  *      an existing IMC's default key-mapping list.
+ *   - "add_action_event_node": spawn a UK2Node_EnhancedInputAction event
+ *      node in a target Blueprint's event graph for a given UInputAction
+ *      asset, and optionally MakeLinkTo from a chosen exec pin (default
+ *      "Triggered") to a named function call on the same Blueprint.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UInputAction (UDataAsset subclass, EnhancedInput plugin)
  *   - UInputMappingContext::MapKey (the documented public binding entry point)
+ *   - UK2Node_EnhancedInputAction (InputBlueprintNodes module)
+ *   - UK2Node_CallFunction::SetFromFunction for the function-call follow-on
+ *   - FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified +
+ *     FKismetEditorUtilities::CompileBlueprint for the post-edit save path
  *   - FAssetRegistryModule::AssetCreated for content-browser registration
  *   - UEditorAssetLibrary for save / existence checks
  *
@@ -39,4 +45,5 @@ private:
     TSharedPtr<FJsonObject> CreateInputAction(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> CreateInputMappingContext(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddMapping(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddActionEventNode(const TSharedPtr<FJsonObject>& Params);
 };

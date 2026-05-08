@@ -2,11 +2,19 @@
 #include "Commands/EpicUnrealMCPCommonUtils.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
 #include "EditorAssetLibrary.h"
+#include "Engine/Blueprint.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
 #include "InputCoreTypes.h"
 #include "InputMappingContext.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_EnhancedInputAction.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
@@ -122,9 +130,14 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::HandleBpInput(const TSharedPtr<F
     {
         return AddMapping(Params);
     }
+    if (Operation == TEXT("add_action_event_node") || Operation == TEXT("add_event_node")
+        || Operation == TEXT("wire_action") || Operation == TEXT("add_input_action_event"))
+    {
+        return AddActionEventNode(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported bp_input operation '%s'. Supported: create_input_action, create_input_mapping_context, add_mapping"), *Operation));
+        FString::Printf(TEXT("Unsupported bp_input operation '%s'. Supported: create_input_action, create_input_mapping_context, add_mapping, add_action_event_node"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftBpInputCommands::CreateInputAction(const TSharedPtr<FJsonObject>& Params)
@@ -362,6 +375,204 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::AddMapping(const TSharedPtr<FJso
     ResultObj->SetStringField(TEXT("input_action"), Action->GetPathName());
     ResultObj->SetStringField(TEXT("key"), Key.ToString());
     ResultObj->SetNumberField(TEXT("mapping_count"), IMC->GetMappings().Num());
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftBpInputCommands::AddActionEventNode(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintPath;
+    if (!Params->TryGetStringField(TEXT("blueprint"), BlueprintPath)
+        && !Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath)
+        && !Params->TryGetStringField(TEXT("target"), BlueprintPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'blueprint' parameter (path to the target Blueprint asset)"));
+    }
+
+    FString ActionPath;
+    if (!Params->TryGetStringField(TEXT("input_action"), ActionPath)
+        && !Params->TryGetStringField(TEXT("action"), ActionPath)
+        && !Params->TryGetStringField(TEXT("action_path"), ActionPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'input_action' parameter (path to the UInputAction asset)"));
+    }
+
+    // Trigger pin to MakeLinkTo. Defaults to "Triggered" because that is the
+    // event the consumer game wires for "press to do thing".
+    FString TriggerPinName = TEXT("Triggered");
+    Params->TryGetStringField(TEXT("trigger"), TriggerPinName);
+
+    FString TargetFunctionName;
+    Params->TryGetStringField(TEXT("connect_to_function"), TargetFunctionName);
+    if (TargetFunctionName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("function"), TargetFunctionName);
+    }
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    double NodeX = 0.0;
+    double NodeY = 0.0;
+    if (Params->HasField(TEXT("position")))
+    {
+        const TArray<TSharedPtr<FJsonValue>>* PositionArr = nullptr;
+        if (Params->TryGetArrayField(TEXT("position"), PositionArr) && PositionArr && PositionArr->Num() >= 2)
+        {
+            NodeX = (*PositionArr)[0]->AsNumber();
+            NodeY = (*PositionArr)[1]->AsNumber();
+        }
+    }
+
+    UObject* BlueprintAsset = UEditorAssetLibrary::LoadAsset(BlueprintPath);
+    UBlueprint* Blueprint = Cast<UBlueprint>(BlueprintAsset);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a Blueprint: %s"), *BlueprintPath));
+    }
+
+    UObject* ActionAsset = UEditorAssetLibrary::LoadAsset(ActionPath);
+    UInputAction* InputAction = Cast<UInputAction>(ActionAsset);
+    if (!InputAction)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UInputAction: %s"), *ActionPath));
+    }
+
+    UEdGraph* EventGraph = FEpicUnrealMCPCommonUtils::FindOrCreateEventGraph(Blueprint);
+    if (!EventGraph)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Failed to find or create the Blueprint's event graph"));
+    }
+
+    // Reuse an existing UK2Node_EnhancedInputAction for the same action if
+    // present so we mirror UInputActionEventNodeSpawner's "do not duplicate"
+    // contract from the engine's node spawner.
+    UK2Node_EnhancedInputAction* ActionNode = nullptr;
+    bool bReusedExisting = false;
+    for (UEdGraphNode* ExistingNode : EventGraph->Nodes)
+    {
+        if (UK2Node_EnhancedInputAction* AsAction = Cast<UK2Node_EnhancedInputAction>(ExistingNode))
+        {
+            if (AsAction->InputAction == InputAction)
+            {
+                ActionNode = AsAction;
+                bReusedExisting = true;
+                break;
+            }
+        }
+    }
+
+    if (!ActionNode)
+    {
+        ActionNode = NewObject<UK2Node_EnhancedInputAction>(EventGraph);
+        if (!ActionNode)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to construct UK2Node_EnhancedInputAction"));
+        }
+        ActionNode->InputAction = InputAction;
+        ActionNode->NodePosX = static_cast<int32>(NodeX);
+        ActionNode->NodePosY = static_cast<int32>(NodeY);
+        EventGraph->AddNode(ActionNode, /*bUserAction*/ true, /*bSelectNewNode*/ false);
+        ActionNode->CreateNewGuid();
+        ActionNode->PostPlacedNewNode();
+        ActionNode->AllocateDefaultPins();
+    }
+
+    // Validate the requested trigger pin actually exists. The pin names mirror
+    // ETriggerEvent enum names (Triggered, Started, Ongoing, Canceled, Completed).
+    UEdGraphPin* TriggerPin = ActionNode->FindPin(FName(*TriggerPinName), EGPD_Output);
+    if (!TriggerPin)
+    {
+        // Build a friendly list of available trigger exec pins for the error.
+        TArray<FString> AvailableTriggers;
+        for (UEdGraphPin* Pin : ActionNode->Pins)
+        {
+            if (Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+            {
+                AvailableTriggers.Add(Pin->PinName.ToString());
+            }
+        }
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Trigger pin '%s' not found on UK2Node_EnhancedInputAction. Available exec pins: %s"),
+                *TriggerPinName, *FString::Join(AvailableTriggers, TEXT(", "))));
+    }
+
+    // Optional follow-on: spawn a CallFunction node and link the chosen
+    // trigger exec pin into its exec input.
+    UK2Node_CallFunction* CallNode = nullptr;
+    if (!TargetFunctionName.IsEmpty())
+    {
+        UClass* TargetClass = Blueprint->GeneratedClass ? Blueprint->GeneratedClass : Blueprint->SkeletonGeneratedClass;
+        if (!TargetClass)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Blueprint has no generated class yet; compile the Blueprint once first"));
+        }
+        UFunction* TargetFunction = TargetClass->FindFunctionByName(FName(*TargetFunctionName));
+        if (!TargetFunction)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Function '%s' not found on Blueprint class '%s'. Create it first or pass an existing name."),
+                    *TargetFunctionName, *TargetClass->GetName()));
+        }
+
+        CallNode = NewObject<UK2Node_CallFunction>(EventGraph);
+        if (!CallNode)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to construct UK2Node_CallFunction"));
+        }
+        CallNode->SetFromFunction(TargetFunction);
+        CallNode->NodePosX = ActionNode->NodePosX + 320;
+        CallNode->NodePosY = ActionNode->NodePosY;
+        EventGraph->AddNode(CallNode, /*bUserAction*/ true, /*bSelectNewNode*/ false);
+        CallNode->CreateNewGuid();
+        CallNode->PostPlacedNewNode();
+        CallNode->AllocateDefaultPins();
+
+        // Wire the trigger exec pin into the function's input exec pin.
+        UEdGraphPin* CallExecPin = CallNode->FindPin(UEdGraphSchema_K2::PN_Execute, EGPD_Input);
+        if (!CallExecPin)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Function call node has no exec input pin (expected 'execute' pin)"));
+        }
+        TriggerPin->MakeLinkTo(CallExecPin);
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(Blueprint);
+    }
+
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(Blueprint->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_action_event_node"));
+    ResultObj->SetStringField(TEXT("blueprint"), Blueprint->GetPathName());
+    ResultObj->SetStringField(TEXT("input_action"), InputAction->GetPathName());
+    ResultObj->SetStringField(TEXT("event_node_name"), ActionNode->GetName());
+    ResultObj->SetStringField(TEXT("event_node_guid"), ActionNode->NodeGuid.ToString());
+    ResultObj->SetStringField(TEXT("trigger"), TriggerPinName);
+    ResultObj->SetBoolField(TEXT("reused_existing_event_node"), bReusedExisting);
+    if (CallNode)
+    {
+        ResultObj->SetStringField(TEXT("call_function_node_name"), CallNode->GetName());
+        ResultObj->SetStringField(TEXT("connected_function"), TargetFunctionName);
+    }
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }

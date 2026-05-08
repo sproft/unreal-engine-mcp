@@ -47,7 +47,8 @@ public class UnrealMCP : ModuleRules
 				"KismetCompiler",     // For Blueprint compilation (F15-F22)
 				"UMG",                // For UWidget / UPanelWidget / UWidgetTree (Sproft widget_edit)
 				"UMGEditor",          // For UWidgetBlueprint (Sproft widget_edit)
-				"EnhancedInput"       // For UInputAction / UInputMappingContext (Sproft bp_input)
+				"EnhancedInput",      // For UInputAction / UInputMappingContext (Sproft bp_input)
+				"InputBlueprintNodes" // For UK2Node_EnhancedInputAction (Sproft bp_input graph wiring)
 			}
 		);
 		

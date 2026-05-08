@@ -3111,27 +3111,32 @@ def bp_input(
     input_mapping_context: Optional[str] = None,
     input_action: Optional[str] = None,
     key: Optional[str] = None,
+    blueprint: Optional[str] = None,
+    trigger: Optional[str] = None,
+    connect_to_function: Optional[str] = None,
+    position: Optional[List[float]] = None,
+    compile: bool = True,
     save: bool = True,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
     """
-    Manage Enhanced Input data assets.
+    Manage Enhanced Input data assets and wire input events into Blueprints.
 
-    Mirrors a small slice of the hosted Flop "bp_input" tool. Three operations
-    are supported in this first cut:
+    Mirrors a slice of the hosted Flop "bp_input" tool. Four operations:
 
         - "create_input_action": create a UInputAction asset with a chosen
           value type (Boolean, Axis1D, Axis2D, Axis3D).
         - "create_input_mapping_context": create an empty UInputMappingContext.
         - "add_mapping": append one key-to-action binding to an existing IMC.
-
-    Wiring Enhanced Input event nodes into Blueprint event graphs is tracked
-    separately in BACKLOG.md and can be composed on top of the existing
-    add_node / connect_nodes helpers.
+        - "add_action_event_node": spawn a UK2Node_EnhancedInputAction event
+          node in a target Blueprint's event graph for a given UInputAction
+          asset. Optionally MakeLinkTo from the chosen trigger exec pin
+          (default "Triggered") to a named function call on the same
+          Blueprint.
 
     Args:
-        operation: "create_input_action", "create_input_mapping_context", or
-            "add_mapping".
+        operation: "create_input_action", "create_input_mapping_context",
+            "add_mapping", or "add_action_event_node".
         package_path: For create operations: the absolute content-browser path
             for the new asset, e.g. "/Game/Input/IA_Jump".
         value_type: For create_input_action: one of "bool" / "boolean",
@@ -3142,16 +3147,28 @@ def bp_input(
             trigger while the game is paused. Defaults False.
         input_mapping_context: For add_mapping: absolute path to the existing
             UInputMappingContext asset.
-        input_action: For add_mapping: absolute path to the existing
-            UInputAction asset.
+        input_action: For add_mapping / add_action_event_node: absolute path
+            to the existing UInputAction asset.
         key: For add_mapping: FKey FName like "SpaceBar", "W",
             "Gamepad_FaceButton_Bottom", or "Gamepad_LeftStick_X".
+        blueprint: For add_action_event_node: absolute path to the target
+            Blueprint asset whose event graph will receive the node.
+        trigger: For add_action_event_node: name of the exec pin to wire,
+            mirroring ETriggerEvent enum names. One of "Triggered" (default),
+            "Started", "Ongoing", "Canceled", "Completed".
+        connect_to_function: For add_action_event_node: optional FName of an
+            existing function on the target Blueprint. The trigger exec pin
+            is MakeLinkTo'd to a CallFunction node for it.
+        position: For add_action_event_node: optional [x, y] node-graph
+            coordinate. Defaults [0, 0].
+        compile: For add_action_event_node: compile the Blueprint after
+            placing the node. Defaults True.
         save: Save the asset(s) after the change. Defaults True.
         overwrite: For create operations: overwrite an existing asset at
             package_path. Defaults False.
 
     Returns:
-        Dictionary with asset metadata on success.
+        Dictionary with operation-specific metadata on success.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -3171,6 +3188,15 @@ def bp_input(
         params["input_action"] = input_action
     if key is not None:
         params["key"] = key
+    if blueprint is not None:
+        params["blueprint"] = blueprint
+    if trigger is not None:
+        params["trigger"] = trigger
+    if connect_to_function is not None:
+        params["connect_to_function"] = connect_to_function
+    if position is not None:
+        params["position"] = position
+    params["compile"] = compile
     params["save"] = save
     params["overwrite"] = overwrite
 
