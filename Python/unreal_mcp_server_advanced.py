@@ -2885,18 +2885,20 @@ def asset_factory(
     asset_type: str,
     package_path: str,
     row_struct: Optional[str] = None,
+    entries: Optional[List[str]] = None,
+    fields: Optional[List[Dict[str, str]]] = None,
     save: bool = True,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new asset of the requested type.
 
-    Mirrors the hosted Flop "asset_factory" surface. This first cut supports
-    DataTable creation. Other asset types (Enum, Struct, DataAsset, Enhanced
-    Input bundles) are tracked in BACKLOG.md.
+    Mirrors the hosted Flop "asset_factory" surface. This fork supports three
+    asset types so far: DataTable, Enum, and Struct. DataAsset and Enhanced
+    Input bundles remain tracked in BACKLOG.md.
 
     Args:
-        asset_type: Currently must be "datatable".
+        asset_type: One of "datatable", "enum", "struct".
         package_path: Absolute content-browser path for the new asset, e.g.
             "/Game/Data/CraftingRecipes". A trailing ".AssetName" object
             suffix is allowed and stripped.
@@ -2904,6 +2906,12 @@ def asset_factory(
             as the row schema. Pass either a full path like
             "/Script/MyModule.MyRow", a Blueprint struct path like
             "/Game/Data/MyRow.MyRow_C", or a known engine struct short name.
+        entries: For Enum: a list of entry display names, e.g.
+            ["Wood", "Stone", "Berry"].
+        fields: For Struct: a list of {"name", "type"} objects describing
+            each member. Supported type strings: bool, int, int64, float,
+            string, name, text, vector, rotator, transform, color, or a
+            "/Game/..."-rooted path to an existing UScriptStruct.
         save: Save the asset to disk after creating it. Defaults to True.
         overwrite: If an asset already exists at package_path, overwrite it.
             Defaults to False (the call fails instead).
@@ -2923,6 +2931,10 @@ def asset_factory(
     }
     if row_struct is not None:
         params["row_struct"] = row_struct
+    if entries is not None:
+        params["entries"] = entries
+    if fields is not None:
+        params["fields"] = fields
 
     try:
         response = unreal.send_command("asset_factory", params)
