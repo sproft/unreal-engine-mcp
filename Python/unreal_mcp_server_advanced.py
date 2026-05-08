@@ -4061,6 +4061,140 @@ def bp_inspect(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_variable(
+    op: str,
+    blueprint: str,
+    name: Optional[str] = None,
+    type: Optional[str] = None,
+    value_type: Optional[str] = None,
+    container: Optional[str] = None,
+    default: Any = None,
+    category: Optional[str] = None,
+    friendly_name: Optional[str] = None,
+    tooltip: Optional[str] = None,
+    editable: Optional[bool] = None,
+    blueprint_read_only: Optional[bool] = None,
+    blueprint_writable: Optional[bool] = None,
+    expose_on_spawn: Optional[bool] = None,
+    replicated: Optional[bool] = None,
+    expose_to_cinematics: Optional[bool] = None,
+    instance_editable: Optional[bool] = None,
+    private: Optional[bool] = None,
+    flags: Optional[Dict[str, bool]] = None,
+    compile: bool = True,
+    save: bool = True,
+) -> Dict[str, Any]:
+    """
+    Declarative Blueprint variable management.
+
+    Sits next to the local ``create_variable`` and
+    ``set_blueprint_variable_properties`` helpers, but with a single
+    multi-op surface and a wider type resolver.
+
+    Operations (``op``):
+
+      - ``list``: dump every Blueprint variable with type, current
+        default, category, friendly name, and the user-visible flag set.
+      - ``add``: declare a new variable. Required: ``name``, ``type``.
+        Optional: ``container`` (``single`` / ``array`` / ``set`` /
+        ``map``), ``value_type`` (required when ``container=map``),
+        ``default``, ``category``, ``friendly_name``, ``tooltip``, plus
+        any of the flag toggles below.
+      - ``remove``: delete a variable by ``name``.
+      - ``set_default``: overwrite the variable's default value with the
+        JSON ``default`` payload (string / number / bool / list / dict).
+      - ``set_flags``: mutate the variable's flag set via the ``flags``
+        dict. Recognised keys: editable, blueprint_read_only,
+        blueprint_writable, instance_editable, expose_on_spawn,
+        replicated, expose_to_cinematics, private.
+
+    Type tokens accepted by ``type`` and ``value_type``:
+
+      - Scalars: bool / int / int64 / byte / float / double / string /
+        name / text.
+      - Built-in structs: vector / vector2d / rotator / transform /
+        color / linear_color.
+      - Object refs: full ``/Script/Module.ClassName`` path.
+      - Blueprint class refs: ``/Game/...`` Blueprint asset path; the
+        resolver appends ``_C`` automatically.
+      - User structs: ``struct:/Game/Path/MyStruct`` or
+        ``struct:/Script/Module.MyStruct``.
+
+    Args:
+        op: One of ``list`` / ``add`` / ``remove`` / ``set_default`` /
+            ``set_flags``.
+        blueprint: Short asset name or full ``/Game/...`` Blueprint path.
+        name: Variable FName (required for non-``list`` ops).
+        type: Type token for the variable (required for ``add``).
+        value_type: Map value type token (required when ``container=map``).
+        container: Container type. Defaults to ``single``.
+        default: JSON value applied as the variable's default.
+        category, friendly_name, tooltip: Optional metadata.
+        editable, blueprint_read_only, blueprint_writable, expose_on_spawn,
+            replicated, expose_to_cinematics, instance_editable, private:
+            Optional flag toggles. Pass these on ``add`` to land flags at
+            creation time, or use ``set_flags`` with a ``flags`` dict.
+        flags: Dict of flag toggles for the ``set_flags`` op.
+        compile: Compile the Blueprint after each mutating op. Defaults True.
+        save: Save the asset after compile. Defaults True.
+
+    Returns:
+        Operation-specific dict; see the C++ handler for the exact shape.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "op": op,
+        "blueprint": blueprint,
+        "compile": compile,
+        "save": save,
+    }
+    if name is not None:
+        params["name"] = name
+    if type is not None:
+        params["type"] = type
+    if value_type is not None:
+        params["value_type"] = value_type
+    if container is not None:
+        params["container"] = container
+    if default is not None:
+        params["default"] = default
+    if category is not None:
+        params["category"] = category
+    if friendly_name is not None:
+        params["friendly_name"] = friendly_name
+    if tooltip is not None:
+        params["tooltip"] = tooltip
+    if editable is not None:
+        params["editable"] = editable
+    if blueprint_read_only is not None:
+        params["blueprint_read_only"] = blueprint_read_only
+    if blueprint_writable is not None:
+        params["blueprint_writable"] = blueprint_writable
+    if expose_on_spawn is not None:
+        params["expose_on_spawn"] = expose_on_spawn
+    if replicated is not None:
+        params["replicated"] = replicated
+    if expose_to_cinematics is not None:
+        params["expose_to_cinematics"] = expose_to_cinematics
+    if instance_editable is not None:
+        params["instance_editable"] = instance_editable
+    if private is not None:
+        params["private"] = private
+    if flags is not None:
+        params["flags"] = flags
+
+    try:
+        response = unreal.send_command("bp_variable", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_variable error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
