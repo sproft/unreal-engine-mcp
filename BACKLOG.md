@@ -182,22 +182,24 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`bp_input`, `asset_factory` data asset variant,
-`widget_inspect`), the next set should pick up:
+After the latest pass (`bp_component`, `scene_query`, `material_edit` small
+variant), the next set should pick up:
 
-1. `material_edit` (small variant: create material instance + set scalar /
-   vector / texture parameters) — supports basic look development. The
-   MaterialExpression API is verbose, so authoring expression graphs is a
-   later pass.
-2. `bp_input` (graph wiring) — `K2Node_EnhancedInputAction` setup on top of
+1. `bp_input` (graph wiring) — `K2Node_EnhancedInputAction` setup on top of
    the existing `add_node` / `connect_nodes` helpers, so an agent can wire
-   an InputAction into a Blueprint's event graph in one call.
-3. `bp_component` (small) — add SkeletalMesh / Camera / SpringArm
-   components to existing Blueprints alongside the current
-   `add_component_to_blueprint`.
-4. `scene_query` (small) — lift the existing `find_actors_by_name` /
-   `get_actors_in_level` calls into a single multiplexed query with class
-   and tag filters.
+   an InputAction into a Blueprint's event graph in one call. The asset
+   side (`bp_input`) and the underlying graph helpers already exist; this
+   is mostly a node-class registration plus an exec-pin route to a named
+   function on the same Blueprint.
+2. `material_edit` (expressions) — extend the small variant with material
+   expression graph authoring. The verbose `UMaterialExpression*` surface
+   is the main cost; a "create texture sample wired into BaseColor" cut is
+   a reasonable second hop.
+3. `scene_compose` (small) — declarative spawn / modify / delete on top of
+   the existing actor commands, so a single call can roll out a small
+   level-dressing pass.
+4. `actor_inspect` (small) — read-only single-actor dump with components
+   and key properties. Mirrors `widget_inspect` for the actor side.
 
 The `widget_edit` slot-property surface (alignment, fill, padding) is small
 follow-up work if the consumer game needs it during smoke-testing.
