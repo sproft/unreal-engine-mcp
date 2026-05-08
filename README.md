@@ -141,6 +141,27 @@ This repo includes a standalone local MCP server (`Python/`) and a C++ Unreal pl
 
 ---
 
+## Sproft fork additions
+
+This fork ([github.com/sproft/unreal-engine-mcp](https://github.com/sproft/unreal-engine-mcp))
+ports a subset of the hosted Flop tool surface back into the open-source local
+MCP server. All additions are clean-room implementations derived from the
+documented behaviour and the public UE5 API. None of them link against or
+draw from the proprietary FlopAI plugin. MIT-licensed alongside the rest of
+the repo.
+
+| **Tool** | **Description** |
+|---|---|
+| `editor_actions` | Single multiplexed verb tool for save / undo / redo / focus selection / play / stop play. Mirrors the hosted `editor_actions`. |
+| `window_capture` | Synchronous PNG screenshot of the active editor viewport. Defaults to `<Project>/Saved/MCPScreenshots/`. |
+| `asset_factory` | Asset creation. First target is `datatable` with a configurable row struct; more types are tracked in [BACKLOG.md](BACKLOG.md). |
+
+Built and tested against the user's UE 5.7 source build at `D:\UE5`. Should
+also work on UE 5.5/5.6 since the API surface used is stable across those
+versions.
+
+---
+
 ## The Flop Agent — [flopperam.com](https://flopperam.com/)
 
 The MCP gives your IDE tools. **The Flop Agent** is a fully autonomous AI that lives inside Unreal Engine — it plans multi-step workflows, writes and executes code, recovers from errors, and iterates until the job is done.
