@@ -208,8 +208,8 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`bp_component`, `scene_query`, `material_edit` small
-variant), the next set should pick up:
+After the latest pass (`actor_inspect`, `scene_compose`, `python_execution`),
+the next set should pick up:
 
 1. `bp_input` (graph wiring) — `K2Node_EnhancedInputAction` setup on top of
    the existing `add_node` / `connect_nodes` helpers, so an agent can wire
@@ -221,11 +221,16 @@ variant), the next set should pick up:
    expression graph authoring. The verbose `UMaterialExpression*` surface
    is the main cost; a "create texture sample wired into BaseColor" cut is
    a reasonable second hop.
-3. `scene_compose` (small) — declarative spawn / modify / delete on top of
-   the existing actor commands, so a single call can roll out a small
-   level-dressing pass.
-4. `actor_inspect` (small) — read-only single-actor dump with components
-   and key properties. Mirrors `widget_inspect` for the actor side.
+3. `scene_brief` — short level summary on top of `scene_query`. Pulls
+   counts, level / sublevel names, streaming volume names, and a small
+   selection of "interesting" actors (player start, post process volumes,
+   directional lights). Cheap once `scene_query` is in place.
+4. `level_inspect` — read-only dump of the active level plus loaded
+   sublevels, world settings, world partition state where present.
+
+`python_execution` now covers any operation we have not wrapped natively;
+prefer wrapping the high-frequency calls (`bp_brief`, `bp_inspect`) as
+dedicated tools so the agent does not need to author Python every time.
 
 The `widget_edit` slot-property surface (alignment, fill, padding) is small
 follow-up work if the consumer game needs it during smoke-testing.
