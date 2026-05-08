@@ -2785,9 +2785,67 @@ def rename_function(
         return {"success": False, "message": str(e)}
 
 
-# Run the server
+# ============================================================================
+# Sproft fork additions: lower-level primitives mirroring the hosted Flop tools.
+# These are clean-room implementations derived from the public UE5 API and the
+# documented behaviour of the hosted tools. They are NOT derived from the
+# proprietary FlopAI plugin.
+# ============================================================================
 
+@mcp.tool()
+def editor_actions(
+    action: str,
+    asset_path: Optional[str] = None,
+    only_if_dirty: bool = True,
+    save_maps: bool = True,
+    save_content: bool = True,
+    start_location: Optional[List[float]] = None,
+    start_rotation: Optional[List[float]] = None,
+) -> Dict[str, Any]:
+    """
+    Run an editor lifecycle action: save, undo/redo, focus selection, or play.
 
+    Mirrors the hosted Flop "editor_actions" tool. The "action" parameter
+    selects which verb to perform.
+
+    Args:
+        action: One of:
+            - "save_all": Save all dirty packages.
+            - "save_current_level": Save the active level.
+            - "save_asset": Save a specific asset (requires asset_path).
+            - "undo": Undo the last editor transaction.
+            - "redo": Redo the next editor transaction.
+            - "focus_selection": Frame the active viewport on the selection.
+            - "play": Start a Play in Editor session.
+            - "stop_play": End the active PIE session.
+        asset_path: Required for "save_asset". Object path like "/Game/Foo".
+        only_if_dirty: When saving, only save if the asset is marked dirty.
+        save_maps: For "save_all", include map packages.
+        save_content: For "save_all", include content packages.
+        start_location: Optional [x, y, z] PIE start location.
+        start_rotation: Optional [pitch, yaw, roll] PIE start rotation.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"action": action}
+    if asset_path is not None:
+        params["asset_path"] = asset_path
+    params["only_if_dirty"] = only_if_dirty
+    params["save_maps"] = save_maps
+    params["save_content"] = save_content
+    if start_location is not None:
+        params["start_location"] = start_location
+    if start_rotation is not None:
+        params["start_rotation"] = start_rotation
+
+    try:
+        response = unreal.send_command("editor_actions", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"editor_actions error: {e}")
+        return {"success": False, "message": str(e)}
 
 
 # Run the server

@@ -55,6 +55,7 @@
 #include "Commands/EpicUnrealMCPBlueprintCommands.h"
 #include "Commands/EpicUnrealMCPBlueprintGraphCommands.h"
 #include "Commands/EpicUnrealMCPCommonUtils.h"
+#include "Commands/SproftEditorActionsCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -65,6 +66,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     EditorCommands = MakeShared<FEpicUnrealMCPEditorCommands>();
     BlueprintCommands = MakeShared<FEpicUnrealMCPBlueprintCommands>();
     BlueprintGraphCommands = MakeShared<FEpicUnrealMCPBlueprintGraphCommands>();
+    SproftEditorActions = MakeShared<FSproftEditorActionsCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -72,6 +74,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     EditorCommands.Reset();
     BlueprintCommands.Reset();
     BlueprintGraphCommands.Reset();
+    SproftEditorActions.Reset();
 }
 
 // Initialize subsystem
@@ -261,6 +264,11 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
                      CommandType == TEXT("rename_function"))
             {
                 ResultJson = BlueprintGraphCommands->HandleCommand(CommandType, Params);
+            }
+            // Sproft fork additions
+            else if (CommandType == TEXT("editor_actions"))
+            {
+                ResultJson = SproftEditorActions->HandleCommand(CommandType, Params);
             }
             else
             {
