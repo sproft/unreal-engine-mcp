@@ -12,6 +12,7 @@
 #include "Commands/EpicUnrealMCPBlueprintCommands.h"
 #include "Commands/EpicUnrealMCPBlueprintGraphCommands.h"
 #include "Commands/SproftEditorActionsCommands.h"
+#include "Commands/SproftWindowCaptureCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -60,4 +61,5 @@ private:
 	TSharedPtr<FEpicUnrealMCPBlueprintGraphCommands> BlueprintGraphCommands;
 	// Sproft fork additions: lower-level primitives mirroring the hosted Flop tools
 	TSharedPtr<FSproftEditorActionsCommands> SproftEditorActions;
+	TSharedPtr<FSproftWindowCaptureCommands> SproftWindowCapture;
 };

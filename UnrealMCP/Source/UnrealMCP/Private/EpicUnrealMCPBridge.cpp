@@ -56,6 +56,7 @@
 #include "Commands/EpicUnrealMCPBlueprintGraphCommands.h"
 #include "Commands/EpicUnrealMCPCommonUtils.h"
 #include "Commands/SproftEditorActionsCommands.h"
+#include "Commands/SproftWindowCaptureCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -67,6 +68,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     BlueprintCommands = MakeShared<FEpicUnrealMCPBlueprintCommands>();
     BlueprintGraphCommands = MakeShared<FEpicUnrealMCPBlueprintGraphCommands>();
     SproftEditorActions = MakeShared<FSproftEditorActionsCommands>();
+    SproftWindowCapture = MakeShared<FSproftWindowCaptureCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -75,6 +77,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     BlueprintCommands.Reset();
     BlueprintGraphCommands.Reset();
     SproftEditorActions.Reset();
+    SproftWindowCapture.Reset();
 }
 
 // Initialize subsystem
@@ -269,6 +272,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("editor_actions"))
             {
                 ResultJson = SproftEditorActions->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("window_capture"))
+            {
+                ResultJson = SproftWindowCapture->HandleCommand(CommandType, Params);
             }
             else
             {

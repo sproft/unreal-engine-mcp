@@ -2848,6 +2848,38 @@ def editor_actions(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def window_capture(file_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Capture a PNG screenshot of the active editor viewport.
+
+    Mirrors the hosted Flop "window_capture" tool. The screenshot is taken
+    synchronously from the active viewport and written to disk in PNG.
+
+    Args:
+        file_path: Absolute or project-relative output path. If omitted, the
+            file is written to <Project>/Saved/MCPScreenshots/Capture_<ts>.png.
+            A ".png" extension will be appended if missing.
+
+    Returns:
+        Dictionary with file_path, width, height, and byte_size on success.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {}
+    if file_path is not None:
+        params["file_path"] = file_path
+
+    try:
+        response = unreal.send_command("window_capture", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"window_capture error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
