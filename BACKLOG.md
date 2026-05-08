@@ -187,6 +187,15 @@ flagged on the prior pass.
   `IAssetRegistry::TryGetAssetPackageData`. The response carries
   `count`, `matched_total`, and a `limit_hit` flag so a caller can
   paginate by tightening the filter.
+- `asset_references` (small) — read-only dependency graph for one
+  asset through `IAssetRegistry::GetReferencers` /
+  `GetDependencies`. `direction` selects one of `hard_referencers`,
+  `soft_referencers`, `hard_dependencies`, `soft_dependencies`, or
+  the `all_*` variants. Walks transitively up to `depth` (default 1,
+  cap 6). Each row carries name, path, class, class_path, package,
+  and package_path. Optional `class_filter` drops rows whose asset
+  class does not match. Returns `count`, `matched_total`,
+  `limit_hit`, and `depth_reached`.
 
 ## Blueprint authoring (medium to large each)
 
@@ -282,7 +291,12 @@ helpers.
   Browser search through `IAssetRegistry`. Open follow-ons: persisted
   saved-search definitions and result paging across multiple calls
   through an opaque cursor.
-- `asset_references` — dependency graph for an asset.
+- `asset_references` (small variant ships in this fork) — dependency
+  graph for an asset through `IAssetRegistry::GetReferencers` /
+  `GetDependencies`. Open follow-ons: SearchableName / Manage
+  category support beyond the current package-only walk, return-by-
+  level grouping when the seed package is a level, and a `dot_graph`
+  output mode for one-shot rendering of the dependency closure.
 - `project_context` — project settings, plugins, content roots.
 
 ## Materials & shading (large)

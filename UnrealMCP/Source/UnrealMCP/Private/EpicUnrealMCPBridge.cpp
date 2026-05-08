@@ -78,6 +78,7 @@
 #include "Commands/SproftBpWireCommands.h"
 #include "Commands/SproftMaterialInspectCommands.h"
 #include "Commands/SproftSearchAssetsCommands.h"
+#include "Commands/SproftAssetReferencesCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -114,6 +115,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftBpWire = MakeShared<FSproftBpWireCommands>();
     SproftMaterialInspect = MakeShared<FSproftMaterialInspectCommands>();
     SproftSearchAssets = MakeShared<FSproftSearchAssetsCommands>();
+    SproftAssetReferences = MakeShared<FSproftAssetReferencesCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -147,6 +149,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftBpWire.Reset();
     SproftMaterialInspect.Reset();
     SproftSearchAssets.Reset();
+    SproftAssetReferences.Reset();
 }
 
 // Initialize subsystem
@@ -441,6 +444,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("search_assets"))
             {
                 ResultJson = SproftSearchAssets->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("asset_references"))
+            {
+                ResultJson = SproftAssetReferences->HandleCommand(CommandType, Params);
             }
             else
             {

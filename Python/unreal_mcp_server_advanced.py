@@ -4672,6 +4672,70 @@ def search_assets(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def asset_references(
+    asset: str,
+    direction: str = "hard_referencers",
+    depth: int = 1,
+    class_filter: Optional[str] = None,
+    limit: int = 1024,
+) -> Dict[str, Any]:
+    """
+    Read-only dependency-graph dump for a single asset.
+
+    Walks ``IAssetRegistry::GetReferencers`` / ``GetDependencies`` for the
+    asset's package and returns every package the walk reaches. Useful for
+    answering "what would break if we delete or rename this asset?" before
+    we actually delete or rename it.
+
+    Args:
+        asset: Asset path (``/Game/Foo/MyMaterial`` or
+            ``/Game/Foo/MyMaterial.MyMaterial``). Internally we strip the
+            asset-name suffix because the AR dependency walk is keyed by
+            package name.
+        direction: One of:
+            - ``hard_referencers`` (default) — packages that hard-import
+              the seed asset.
+            - ``soft_referencers`` — packages that soft-reference it.
+            - ``hard_dependencies`` — packages the seed hard-imports.
+            - ``soft_dependencies`` — packages the seed soft-references.
+            - ``all_referencers`` / ``all_dependencies`` — every package
+              dep / ref regardless of Hard / Soft.
+        depth: Transitive walk depth. Default 1 (immediate neighbours
+            only). Capped at 6.
+        class_filter: Optional class token (short name like ``Material``,
+            full ``/Script/Module.ClassName``, or ``/Game/...`` Blueprint
+            asset path). Drops rows whose asset class does not match.
+        limit: Max rows returned. Default 1024, hard-capped at 50000.
+
+    Returns:
+        ``{"success": True, "assets": [...], "count": N, "matched_total":
+        M, "limit_hit": bool, "depth_reached": K}`` plus seed_asset,
+        seed_package, direction, and depth_requested fields for context.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "asset": asset,
+        "direction": direction,
+    }
+    if isinstance(depth, int) and depth > 0:
+        params["depth"] = depth
+    if isinstance(limit, int) and limit > 0:
+        params["limit"] = limit
+    if class_filter:
+        params["class_filter"] = class_filter
+
+    try:
+        response = unreal.send_command("asset_references", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"asset_references error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
