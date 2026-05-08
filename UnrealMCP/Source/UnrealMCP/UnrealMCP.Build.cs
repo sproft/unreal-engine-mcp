@@ -48,10 +48,11 @@ public class UnrealMCP : ModuleRules
 				"UMG",                // For UWidget / UPanelWidget / UWidgetTree (Sproft widget_edit)
 				"UMGEditor",          // For UWidgetBlueprint (Sproft widget_edit)
 				"EnhancedInput",      // For UInputAction / UInputMappingContext (Sproft bp_input)
-				"InputBlueprintNodes" // For UK2Node_EnhancedInputAction (Sproft bp_input graph wiring)
+				"InputBlueprintNodes", // For UK2Node_EnhancedInputAction (Sproft bp_input graph wiring)
+				"GameplayTags"        // For UGameplayTagsManager (Sproft tag_registry_edit)
 			}
 		);
-		
+
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -65,7 +66,7 @@ public class UnrealMCP : ModuleRules
 				"PythonScriptPlugin"  // For IPythonScriptPlugin (Sproft python_execution)
 			}
 		);
-		
+
 		if (Target.bBuildEditor == true)
 		{
 			PrivateDependencyModuleNames.AddRange(
@@ -74,7 +75,8 @@ public class UnrealMCP : ModuleRules
 					"PropertyEditor",      // For property editing
 					"ToolMenus",           // For editor UI
 					"BlueprintEditorLibrary", // For Blueprint utilities
-					"MaterialEditor"       // For UMaterialEditingLibrary (Sproft material_edit)
+					"MaterialEditor",      // For UMaterialEditingLibrary (Sproft material_edit)
+					"GameplayTagsEditor"   // For IGameplayTagsEditorModule (Sproft tag_registry_edit)
 				}
 			);
 		}

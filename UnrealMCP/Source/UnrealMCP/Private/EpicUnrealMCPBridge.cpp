@@ -70,6 +70,7 @@
 #include "Commands/SproftPythonExecutionCommands.h"
 #include "Commands/SproftSceneBriefCommands.h"
 #include "Commands/SproftLevelInspectCommands.h"
+#include "Commands/SproftTagRegistryEditCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -95,6 +96,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftPythonExecution = MakeShared<FSproftPythonExecutionCommands>();
     SproftSceneBrief = MakeShared<FSproftSceneBriefCommands>();
     SproftLevelInspect = MakeShared<FSproftLevelInspectCommands>();
+    SproftTagRegistryEdit = MakeShared<FSproftTagRegistryEditCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -117,6 +119,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftPythonExecution.Reset();
     SproftSceneBrief.Reset();
     SproftLevelInspect.Reset();
+    SproftTagRegistryEdit.Reset();
 }
 
 // Initialize subsystem
@@ -367,6 +370,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("level_inspect"))
             {
                 ResultJson = SproftLevelInspect->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("tag_registry_edit"))
+            {
+                ResultJson = SproftTagRegistryEdit->HandleCommand(CommandType, Params);
             }
             else
             {

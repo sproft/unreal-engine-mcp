@@ -26,6 +26,7 @@
 #include "Commands/SproftPythonExecutionCommands.h"
 #include "Commands/SproftSceneBriefCommands.h"
 #include "Commands/SproftLevelInspectCommands.h"
+#include "Commands/SproftTagRegistryEditCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -88,4 +89,5 @@ private:
 	TSharedPtr<FSproftPythonExecutionCommands> SproftPythonExecution;
 	TSharedPtr<FSproftSceneBriefCommands> SproftSceneBrief;
 	TSharedPtr<FSproftLevelInspectCommands> SproftLevelInspect;
+	TSharedPtr<FSproftTagRegistryEditCommands> SproftTagRegistryEdit;
 };

@@ -3825,6 +3825,79 @@ def level_inspect(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def tag_registry_edit(
+    operation: str,
+    tag: Optional[str] = None,
+    comment: Optional[str] = None,
+    source: Optional[str] = None,
+    pattern: Optional[str] = None,
+    only_dictionary_tags: bool = False,
+    restricted: bool = False,
+    allow_non_restricted_children: bool = True,
+    limit: int = 256,
+) -> Dict[str, Any]:
+    """
+    Manage the project's Gameplay Tag registry through the editor module.
+
+    Three operations:
+
+      - "add_tag": writes a tag (and optional dev comment) into a chosen
+        ``Config/Default*Tags.ini`` file. Defaults to ``DefaultGameplayTags.ini``.
+        The editor module rewrites the ini, refreshes the in-memory tag tree,
+        and broadcasts the change so live tag pickers refresh.
+      - "remove_tag": deletes a tag from the ini that owns it. Children, if
+        any, get a redirector entry written automatically by the editor module.
+      - "list_tags": read-only substring search over all registered tags.
+        Returns each tag's name, owning source, source ini path (when the
+        source is config-backed), and dev comment.
+
+    Args:
+        operation: One of ``add_tag`` / ``remove_tag`` / ``list_tags``.
+        tag: The fully-qualified tag string for ``add_tag`` and ``remove_tag``,
+            for example ``Status.Damage.Fire``.
+        comment: Optional developer comment, applied on ``add_tag``.
+        source: Optional FName of the tag source (typically an ini filename
+            such as ``DefaultGameplayTags.ini``). Defaults to that value when
+            unset on ``add_tag``.
+        pattern: Optional case-insensitive substring filter for ``list_tags``.
+        only_dictionary_tags: When True, ``list_tags`` excludes implicitly
+            added tags. Defaults False.
+        restricted: When True, ``add_tag`` writes a restricted tag.
+        allow_non_restricted_children: For restricted ``add_tag`` writes,
+            whether normal children are still allowed under this tag.
+            Defaults True.
+        limit: Cap on returned entries from ``list_tags``. Defaults 256.
+
+    Returns:
+        Operation-specific dict; see C++ handler for the exact shape.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"operation": operation}
+    if tag is not None:
+        params["tag"] = tag
+    if comment is not None:
+        params["comment"] = comment
+    if source is not None:
+        params["source"] = source
+    if pattern is not None:
+        params["pattern"] = pattern
+    params["only_dictionary_tags"] = only_dictionary_tags
+    params["restricted"] = restricted
+    params["allow_non_restricted_children"] = allow_non_restricted_children
+    params["limit"] = limit
+
+    try:
+        response = unreal.send_command("tag_registry_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"tag_registry_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
