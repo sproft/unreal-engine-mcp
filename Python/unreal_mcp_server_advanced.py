@@ -3609,6 +3609,82 @@ def scene_compose(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def python_execution(
+    operation: str,
+    code: Optional[str] = None,
+    path: Optional[str] = None,
+    args: Optional[List[str]] = None,
+    mode: Optional[str] = None,
+    unattended: bool = True,
+    max_response_chars: int = 65536,
+) -> Dict[str, Any]:
+    """
+    Run Python in the editor's interpreter through PythonScriptPlugin.
+
+    Mirrors the hosted Flop "python_execution" tool. Two operations:
+
+        - "execute_string": run a string of Python source. The default mode
+          is "execute_file" so multi-statement programs and `import`
+          statements behave as if you ran them from a file.
+        - "execute_file": run a Python file on disk. The path may include
+          positional `args`; the engine forwards them as `sys.argv[1:]`.
+
+    Returns the captured stdout / stderr lines, the boolean success flag
+    `ok`, and `command_result` (the repr of the last evaluated expression
+    for evaluate-statement mode, None otherwise). Output is truncated at
+    max_response_chars to keep the JSON channel responsive.
+
+    The PythonScriptPlugin must be enabled in the consumer project. The
+    UnrealMCP plugin manifest references it, so projects that depend on
+    UnrealMCP pull it in automatically; if it is disabled the tool returns
+    a structured error message.
+
+    Args:
+        operation: "execute_string" or "execute_file".
+        code: For execute_string: the Python source.
+        path: For execute_file: filesystem path to a .py file. Must exist.
+        args: For execute_file: optional list of positional arguments
+            forwarded to the file as `sys.argv[1:]`.
+        mode: Optional override of the engine execution mode:
+            "execute_file" (default), "execute_statement", or
+            "evaluate_statement". Statement / evaluate modes are
+            single-statement only.
+        unattended: Pass `EPythonCommandFlags::Unattended`. Defaults True
+            so dialogs and prompts do not block the editor while we run.
+        max_response_chars: Cap on stdout / stderr / command_result size.
+            Defaults 64 KiB.
+
+    Returns:
+        Dictionary with operation, mode, ok, stdout, stderr, command_result,
+        log entries.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "operation": operation,
+        "unattended": unattended,
+        "max_response_chars": max_response_chars,
+    }
+    if code is not None:
+        params["code"] = code
+    if path is not None:
+        params["path"] = path
+    if args is not None:
+        params["args"] = args
+    if mode is not None:
+        params["mode"] = mode
+
+    try:
+        response = unreal.send_command("python_execution", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"python_execution error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

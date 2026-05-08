@@ -67,6 +67,7 @@
 #include "Commands/SproftMaterialEditCommands.h"
 #include "Commands/SproftActorInspectCommands.h"
 #include "Commands/SproftSceneComposeCommands.h"
+#include "Commands/SproftPythonExecutionCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -89,6 +90,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftMaterialEdit = MakeShared<FSproftMaterialEditCommands>();
     SproftActorInspect = MakeShared<FSproftActorInspectCommands>();
     SproftSceneCompose = MakeShared<FSproftSceneComposeCommands>();
+    SproftPythonExecution = MakeShared<FSproftPythonExecutionCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -108,6 +110,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftMaterialEdit.Reset();
     SproftActorInspect.Reset();
     SproftSceneCompose.Reset();
+    SproftPythonExecution.Reset();
 }
 
 // Initialize subsystem
@@ -346,6 +349,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("scene_compose"))
             {
                 ResultJson = SproftSceneCompose->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("python_execution"))
+            {
+                ResultJson = SproftPythonExecution->HandleCommand(CommandType, Params);
             }
             else
             {

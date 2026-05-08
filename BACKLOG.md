@@ -61,6 +61,13 @@ UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
   dict), `modify` (partial transform / label / tags / property patch on
   an actor resolved by name or label), and `delete`. Property dicts apply
   through `FProperty::ImportText` on the actor instance.
+- `python_execution` (small) — run Python in the editor's interpreter
+  through `IPythonScriptPlugin::ExecPythonCommandEx`. Two operations:
+  `execute_string` (a string of source, multi-statement by default) and
+  `execute_file` (a `.py` path on disk with optional positional args).
+  Returns stdout / stderr / command_result and the structured log array.
+  Requires `PythonScriptPlugin`; the uplugin manifest references it so
+  consumer projects auto-enable it.
 
 ## Blueprint authoring (medium to large each)
 
@@ -192,7 +199,10 @@ helpers.
 
 ## Execution (large each)
 
-- `python_execution` — run Python in-editor against the unreal module.
+- `python_execution` (small variant ships in this fork) — broader hosted
+  scope still pending: persistent shared interpreter scope across calls,
+  output streaming for long-running scripts, and richer typed result
+  marshalling beyond the current stdout / stderr / repr capture.
 - `unreal_api` — query the 15,000+ entry API surface.
 - `skills` — fetch on-demand workflow docs.
 

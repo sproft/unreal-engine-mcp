@@ -60,7 +60,8 @@ public class UnrealMCP : ModuleRules
 				"SlateCore",
 				"Kismet",
 				"Projects",
-				"AssetRegistry"
+				"AssetRegistry",
+				"PythonScriptPlugin"  // For IPythonScriptPlugin (Sproft python_execution)
 			}
 		);
 		
