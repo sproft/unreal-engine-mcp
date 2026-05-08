@@ -69,6 +69,7 @@
 #include "Commands/SproftSceneComposeCommands.h"
 #include "Commands/SproftPythonExecutionCommands.h"
 #include "Commands/SproftSceneBriefCommands.h"
+#include "Commands/SproftLevelInspectCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -93,6 +94,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftSceneCompose = MakeShared<FSproftSceneComposeCommands>();
     SproftPythonExecution = MakeShared<FSproftPythonExecutionCommands>();
     SproftSceneBrief = MakeShared<FSproftSceneBriefCommands>();
+    SproftLevelInspect = MakeShared<FSproftLevelInspectCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -114,6 +116,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftSceneCompose.Reset();
     SproftPythonExecution.Reset();
     SproftSceneBrief.Reset();
+    SproftLevelInspect.Reset();
 }
 
 // Initialize subsystem
@@ -360,6 +363,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("scene_brief"))
             {
                 ResultJson = SproftSceneBrief->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("level_inspect"))
+            {
+                ResultJson = SproftLevelInspect->HandleCommand(CommandType, Params);
             }
             else
             {

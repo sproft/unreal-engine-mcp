@@ -3731,6 +3731,74 @@ def scene_brief(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def level_inspect(
+    actor_class: Optional[str] = None,
+    match_class_substring: bool = True,
+    name_pattern: Optional[str] = None,
+    label_pattern: Optional[str] = None,
+    tag: Optional[str] = None,
+    level_filter: Optional[str] = None,
+    include_components: bool = False,
+    limit: int = 512,
+) -> Dict[str, Any]:
+    """
+    Read-only structured per-actor record list for the editor world.
+
+    Sits between scene_brief (one designer summary) and scene_query (filtered
+    subset). Always returns a uniformly-shaped per-actor block, plus a
+    per-level summary, so the agent can plan a level audit in one call. All
+    filters are optional and combine with AND.
+
+    Args:
+        actor_class: Filter by class. Substring match by default; pass
+            match_class_substring=False for an exact short-name match.
+        match_class_substring: When True (default), actor_class is treated
+            as a substring against the short class name and full class path.
+        name_pattern: Case-insensitive substring filter against GetName().
+        label_pattern: Case-insensitive substring filter against
+            GetActorLabel() (the Outliner label).
+        tag: A single FName actor tag the actor must carry.
+        level_filter: Case-insensitive substring filter against the owning
+            ULevel's owning-world name. Useful in worlds with sublevels.
+        include_components: When True, emit a compact component list per
+            actor (name, class, mobility, tags). Defaults False to keep
+            responses compact.
+        limit: Cap on returned actor records. Defaults 512.
+
+    Returns:
+        Dictionary with operation, level_name, level_path, levels (per-level
+        summary), actors (per-actor records), actors_scanned, total_matches,
+        returned, truncated, limit.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "match_class_substring": match_class_substring,
+        "include_components": include_components,
+        "limit": limit,
+    }
+    if actor_class is not None:
+        params["class"] = actor_class
+    if name_pattern is not None:
+        params["name_pattern"] = name_pattern
+    if label_pattern is not None:
+        params["label_pattern"] = label_pattern
+    if tag is not None:
+        params["tag"] = tag
+    if level_filter is not None:
+        params["level_filter"] = level_filter
+
+    try:
+        response = unreal.send_command("level_inspect", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"level_inspect error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
