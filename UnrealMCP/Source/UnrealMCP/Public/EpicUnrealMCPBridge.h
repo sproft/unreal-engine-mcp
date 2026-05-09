@@ -60,6 +60,7 @@
 #include "Commands/SproftSoundAssetEditCommands.h"
 #include "Commands/SproftIkRetargetCommands.h"
 #include "Commands/SproftIkRigEditCommands.h"
+#include "Commands/SproftChaosEditCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -156,4 +157,5 @@ private:
 	TSharedPtr<FSproftSoundAssetEditCommands> SproftSoundAssetEdit;
 	TSharedPtr<FSproftIkRetargetCommands> SproftIkRetarget;
 	TSharedPtr<FSproftIkRigEditCommands> SproftIkRigEdit;
+	TSharedPtr<FSproftChaosEditCommands> SproftChaosEdit;
 };

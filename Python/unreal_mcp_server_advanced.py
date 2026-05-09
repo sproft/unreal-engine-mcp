@@ -6742,6 +6742,83 @@ def ik_rig_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def chaos_edit(
+    collection: str,
+    op: Optional[str] = None,
+    include_geometry_sources: Optional[bool] = None,
+    include_per_level_histogram: Optional[bool] = None,
+    max_sources: Optional[int] = None,
+    max_materials: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Inspect a UGeometryCollection asset (read-only first slice).
+
+    Geometry Collections drive Chaos destruction; this read-only
+    slice walks the asset's public surface plus the underlying
+    ``FGeometryCollection`` managed-array data and reports geometry
+    sources, fracture-level histogram, cluster info, bone hierarchy
+    depth, simulation settings, materials, Nanite block, and
+    aggregate counts.
+
+    One op (``inspect``, default).
+
+    Args:
+        collection: Path or short name of a UGeometryCollection
+            asset. Required.
+        op: Operation discriminator. Only ``inspect`` (default) is
+            supported.
+        include_geometry_sources: When True (default), the response
+            carries the ``geometry_sources`` array. False keeps the
+            counts only.
+        include_per_level_histogram: When True (default), the
+            response carries ``count_per_level`` and
+            ``cluster_count_per_level`` arrays.
+        max_sources: Cap on the geometry-source walk. Default 64.
+        max_materials: Cap on the material walk. Default 256.
+
+    Returns:
+        Dict with asset metadata (``name`` / ``path`` / ``class``),
+        ``is_empty``, ``has_visible_geometry``, ``root_index``, the
+        ``geometry_sources`` array (each with ``source_path`` /
+        ``local_transform`` / ``source_materials`` / ``split_components``
+        / ``set_internal_from_material_index`` /
+        ``add_internal_materials``), aggregate transform counts
+        (``vertex_count`` / ``face_count`` / ``geometry_count`` /
+        ``transform_count`` / ``cluster_count`` / ``rigid_count`` /
+        ``none_sim_count`` / ``max_level`` / ``bone_hierarchy_depth``),
+        per-level histograms (``count_per_level`` /
+        ``cluster_count_per_level``), the ``simulation`` block
+        (clustering, damage model + thresholds, mass / density
+        toggles, removal surface, collision toggles), the
+        ``materials`` array, the ``nanite`` block, and the
+        ``embedded_geometry_count`` / ``auto_instance_mesh_count`` /
+        ``size_specific_data_count`` aggregates.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"collection": collection}
+    if op is not None:
+        params["op"] = op
+    if include_geometry_sources is not None:
+        params["include_geometry_sources"] = include_geometry_sources
+    if include_per_level_histogram is not None:
+        params["include_per_level_histogram"] = include_per_level_histogram
+    if max_sources is not None:
+        params["max_sources"] = max_sources
+    if max_materials is not None:
+        params["max_materials"] = max_materials
+
+    try:
+        response = unreal.send_command("chaos_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"chaos_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

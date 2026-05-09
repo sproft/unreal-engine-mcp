@@ -101,6 +101,7 @@
 #include "Commands/SproftSoundAssetEditCommands.h"
 #include "Commands/SproftIkRetargetCommands.h"
 #include "Commands/SproftIkRigEditCommands.h"
+#include "Commands/SproftChaosEditCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -160,6 +161,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftSoundAssetEdit = MakeShared<FSproftSoundAssetEditCommands>();
     SproftIkRetarget = MakeShared<FSproftIkRetargetCommands>();
     SproftIkRigEdit = MakeShared<FSproftIkRigEditCommands>();
+    SproftChaosEdit = MakeShared<FSproftChaosEditCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -216,6 +218,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftSoundAssetEdit.Reset();
     SproftIkRetarget.Reset();
     SproftIkRigEdit.Reset();
+    SproftChaosEdit.Reset();
 }
 
 // Initialize subsystem
@@ -602,6 +605,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("ik_rig_edit"))
             {
                 ResultJson = SproftIkRigEdit->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("chaos_edit"))
+            {
+                ResultJson = SproftChaosEdit->HandleCommand(CommandType, Params);
             }
             else
             {
