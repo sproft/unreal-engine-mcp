@@ -5274,6 +5274,61 @@ def behavior_tree(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def gas_edit(asset: str) -> Dict[str, Any]:
+    """
+    Read-only structured dump of a Gameplay Ability System asset.
+
+    Resolves the target path to one of:
+        - UGameplayAbility (or a Blueprint with a UGameplayAbility CDO):
+          returns ability tags, cancel / block / activation owned /
+          activation required / activation blocked tags, source / target
+          required / blocked tags, cost + cooldown gameplay-effect class
+          paths, and any AbilityTriggers.
+        - UGameplayEffect (or a Blueprint with a UGameplayEffect CDO):
+          returns DurationPolicy, DurationMagnitude /
+          MaxDurationMagnitude when Has-Duration, the modifier list
+          (each with attribute name + owning AttributeSet class +
+          ModifierOp + literal magnitude when scalable),
+          executions list, GameplayCues, and the cached asset / granted
+          / blocked-ability tag containers through the public
+          accessors that the GE component model migrated to in 5.3+.
+        - UAttributeSet (or a Blueprint with a UAttributeSet CDO):
+          walks the CDO's FProperty list filtering on
+          ``FGameplayAttribute::IsSupportedProperty`` and returns each
+          attribute's name, CPP type, base / current default value, and
+          storage mode (legacy float vs. FGameplayAttributeData).
+
+    The edit-side ops (tag mutation, modifier add / remove, cost /
+    cooldown rebind, attribute default override) remain on the backlog.
+    Pairs with ``tag_registry_edit`` so a caller can answer "what tags
+    drive what ability" in two read-only calls.
+
+    Args:
+        asset: Short asset name or full ``/Game/...`` path. Either a
+            native UGameplayAbility / UGameplayEffect / UAttributeSet
+            class or a Blueprint asset whose generated class is one of
+            those three.
+
+    Returns:
+        Dict with ``name`` / ``path`` / ``asset_class`` /
+        ``resolved_class`` / ``resolved_class_path`` /
+        ``is_blueprint``, plus a ``kind`` discriminator
+        (``gameplay_ability`` / ``gameplay_effect`` /
+        ``attribute_set``) and the kind-specific fields above.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        response = unreal.send_command("gas_edit", {"asset": asset})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"gas_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

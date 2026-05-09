@@ -43,6 +43,7 @@
 #include "Commands/SproftAssetReferencesCommands.h"
 #include "Commands/SproftBpExportCommands.h"
 #include "Commands/SproftBehaviorTreeCommands.h"
+#include "Commands/SproftGasEditCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -122,4 +123,5 @@ private:
 	TSharedPtr<FSproftAssetReferencesCommands> SproftAssetReferences;
 	TSharedPtr<FSproftBpExportCommands> SproftBpExport;
 	TSharedPtr<FSproftBehaviorTreeCommands> SproftBehaviorTree;
+	TSharedPtr<FSproftGasEditCommands> SproftGasEdit;
 };

@@ -84,6 +84,7 @@
 #include "Commands/SproftAssetReferencesCommands.h"
 #include "Commands/SproftBpExportCommands.h"
 #include "Commands/SproftBehaviorTreeCommands.h"
+#include "Commands/SproftGasEditCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -126,6 +127,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftAssetReferences = MakeShared<FSproftAssetReferencesCommands>();
     SproftBpExport = MakeShared<FSproftBpExportCommands>();
     SproftBehaviorTree = MakeShared<FSproftBehaviorTreeCommands>();
+    SproftGasEdit = MakeShared<FSproftGasEditCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -165,6 +167,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftAssetReferences.Reset();
     SproftBpExport.Reset();
     SproftBehaviorTree.Reset();
+    SproftGasEdit.Reset();
 }
 
 // Initialize subsystem
@@ -483,6 +486,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("behavior_tree"))
             {
                 ResultJson = SproftBehaviorTree->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("gas_edit"))
+            {
+                ResultJson = SproftGasEdit->HandleCommand(CommandType, Params);
             }
             else
             {
