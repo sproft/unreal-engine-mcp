@@ -8,24 +8,62 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped four new tool families that close out
-the remaining persistent skips: `landscape_edit` (small variant
-retry covering `set_landscape_material` and `import_heightmap_png`,
-the slice we dropped on the earlier pass because the sculpt brush
-surface did not collapse to one focused minimum), `pcg_graph_edit`
-(read-only first slice over `UPCGGraph` covering nodes / pins /
-edges plus the graph's exposed input / output surface),
-`niagara_script_edit` (read-only first slice over `UNiagaraScript`
-covering usage / input / output / attribute parameter sets plus
-the cached VM compile data including the GPU shader parameter
-metadata), and `animation_graph_edit` (read-only first slice over
+The most recent pass deepened edit-side coverage on four
+read-only tools shipped earlier: `pcg_graph_edit` adds an edit
+slice (`add_node` through `UPCGGraph::AddNodeOfType<T>`,
+`connect_pins` through `UPCGGraph::AddEdge`, `remove_node`
+through `UPCGGraph::RemoveNode`); `niagara_edit` adds
+`add_emitter_from_asset` through the editor-only
+`UNiagaraSystem::AddEmitterHandle(SourceEmitter, HandleName,
+VersionGuid)` overload (defaulting the version GUID to the
+source emitter's `GetExposedVersion().VersionGuid` so the
+system pulls the active branch); `ik_rig_edit` adds three ops
+(`set_retarget_root` / `add_retarget_chain` / `add_ik_goal`)
+routed through the editor-only `UIKRigController` accessor
+(`UIKRigController::GetController(Rig)` plus the documented
+`SetRetargetRoot` / `AddRetargetChain(ChainName, StartBone,
+EndBone, OptionalGoalName)` / `AddNewGoal(GoalName, BoneName)`
+methods); `chaos_edit` adds `set_simulation_settings` (writes
+a flat property dict against the asset's reflected simulation
+surface (`Mass` / `MinimumMassClamp` / `bMassAsDensity` /
+`EnableClustering` / `MaxClusterLevel` / `DamageModel` etc.)
+through `FProperty::ImportText_InContainer`, then runs
+`InvalidateCollection` so the cached simulation data rebuilds)
+plus `import_static_mesh` (appends a UStaticMesh through the
+editor-only `FGeometryCollectionConversion::AppendStaticMesh`).
+Each mutating op runs `MarkPackageDirty` and saves to disk by
+default; failed property writes on `chaos_edit set_simulation_settings`
+surface under `skipped` with a reason.
+
+Adds `IKRigEditor` and `GeometryCollectionEditor` to the
+editor-only `PrivateDependencyModuleNames`. The remove-side
+ops (chain remove, goal remove, solver mutation,
+bone-settings writes for IK Rig; per-instance damage threshold
+override and the re-cluster ops for Chaos) stay on this list,
+along with the broader Niagara emitter-side authoring surface
+(parameter store mutations, module / sim-stage authoring,
+sim-target / determinism flag writes, request-compile) and
+the PCG pin-rename / per-node settings-property mutate ops.
+
+The pass before that shipped four new tool families that close
+out the remaining persistent skips: `landscape_edit` (small
+variant retry covering `set_landscape_material` and
+`import_heightmap_png`, the slice we dropped on the earlier
+pass because the sculpt brush surface did not collapse to one
+focused minimum), `pcg_graph_edit` (read-only first slice over
+`UPCGGraph` covering nodes / pins / edges plus the graph's
+exposed input / output surface), `niagara_script_edit`
+(read-only first slice over `UNiagaraScript` covering usage /
+input / output / attribute parameter sets plus the cached VM
+compile data including the GPU shader parameter metadata), and
+`animation_graph_edit` (read-only first slice over
 `UAnimBlueprint` going one level deeper than the existing
 `animation_inspect` AnimBP path: per state machine returns the
 per-state details, the per-machine transitions array with
-`previous_state` / `next_state` / blend-mode tokens, and the flat
-AnimGraph node-property list off
-`UAnimBlueprintGeneratedClass::AnimNodeProperties`). Together the
-four close `landscape_edit`, `pcg_graph_edit`,
+`previous_state` / `next_state` / blend-mode tokens, and the
+flat AnimGraph node-property list off
+`UAnimBlueprintGeneratedClass::AnimNodeProperties`). Together
+the four close `landscape_edit`, `pcg_graph_edit`,
 `niagara_script_edit`, and `animation_graph_edit` on the
 priority list. The earlier pass shipped four tool families that
 went wider: `ik_rig_edit` (read-only first slice over
