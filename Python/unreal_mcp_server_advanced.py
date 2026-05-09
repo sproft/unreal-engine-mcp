@@ -6475,7 +6475,7 @@ def metasound_edit(
 
 @mcp.tool()
 def unreal_api(
-    cls: str,
+    cls: Optional[str] = None,
     op: Optional[str] = None,
     pattern: Optional[str] = None,
     include_inherited: Optional[bool] = None,
@@ -6483,6 +6483,19 @@ def unreal_api(
     max_children: Optional[int] = None,
     max_properties: Optional[int] = None,
     max_functions: Optional[int] = None,
+    parent_class: Optional[str] = None,
+    class_a: Optional[str] = None,
+    class_b: Optional[str] = None,
+    property: Optional[str] = None,
+    function: Optional[str] = None,
+    member: Optional[str] = None,
+    include_subclasses_of: Optional[str] = None,
+    include_abstract: Optional[bool] = None,
+    include_interfaces: Optional[bool] = None,
+    include_blueprint: Optional[bool] = None,
+    include_native: Optional[bool] = None,
+    include_parent: Optional[bool] = None,
+    max_results: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Reflection-driven query of the live UE5 type database.
@@ -6495,7 +6508,7 @@ def unreal_api(
     can I call, what UPROPERTY fields does it expose) is fully
     answered out of the in-process reflection database.
 
-    Three ops, keyed by ``op``:
+    Six ops, keyed by ``op``:
 
         - ``describe`` (default): full surface for one class.
           Parent class, direct child class list, implemented
@@ -6508,6 +6521,23 @@ def unreal_api(
         - ``find_function``: case-insensitive substring search across
           one class's function list. Same record shape as
           ``describe``'s ``functions`` array, but only for matches.
+        - ``list_classes``: substring filter across every loaded
+          ``UClass``. Optional ``include_subclasses_of`` collapses
+          the walk to descendants of a chosen class. Returns a
+          compact class row per match (``class`` / ``class_path`` /
+          ``super_class`` / ``is_native`` / ``is_abstract`` /
+          ``is_interface`` / ``is_blueprint``).
+        - ``find_in_subclasses``: walks every descendant of
+          ``parent_class`` and reports each subclass that declares a
+          property / function matching the supplied substring (or
+          ``member`` for either). Only own declarations are
+          considered, so the result tells the caller which
+          descendant ADDS the member rather than which inherits it.
+        - ``class_diff``: compares two classes' own (or inherited)
+          surfaces. Returns ``properties.added`` /
+          ``properties.removed`` / ``properties.changed`` plus the
+          parallel function trio. ``changed`` rows surface whenever
+          a same-named member's signature differs.
 
     The class identifier accepts ``/Script/Module.ClassName``, a
     ``/Game/...`` Blueprint class path (auto-suffixed with ``_C``),
@@ -6515,14 +6545,19 @@ def unreal_api(
     A / U prefix variants and a ``/Script/Engine.<Name>`` fallback).
 
     Args:
-        cls: Class identifier. Required for every op.
-        op: One of ``describe`` (default), ``find_property``, or
-            ``find_function``.
+        cls: Class identifier. Required for ``describe`` /
+            ``find_property`` / ``find_function``.
+        op: One of ``describe`` (default), ``find_property``,
+            ``find_function``, ``list_classes``,
+            ``find_in_subclasses``, or ``class_diff``.
         pattern: Required for ``find_property`` / ``find_function``.
-            Case-insensitive substring matched against property /
-            function FName.
+            Optional for ``list_classes`` (substring across every
+            class name; missing means "every class").
+            Case-insensitive substring matched against the FName.
         include_inherited: Walk parent properties + functions too.
-            Default True.
+            Default True for ``describe`` / ``find_property`` /
+            ``find_function``; default False for ``class_diff`` so
+            the diff focuses on each class's own declarations.
         include_children: Include the direct-child class list under
             ``describe``. Default True.
         max_children: Cap on the direct-child class list. Default 256.
@@ -6530,30 +6565,55 @@ def unreal_api(
             Default 512.
         max_functions: Cap on the function list / match list.
             Default 512.
+        parent_class: Required for ``find_in_subclasses``. Same
+            class identifier surface as ``cls``.
+        class_a: Required for ``class_diff``.
+        class_b: Required for ``class_diff``.
+        property: Optional substring filter on the property side
+            for ``find_in_subclasses``.
+        function: Optional substring filter on the function side
+            for ``find_in_subclasses``.
+        member: Optional shorthand for ``find_in_subclasses`` that
+            matches the substring against either side; equivalent
+            to passing the same value as both ``property`` and
+            ``function``.
+        include_subclasses_of: ``list_classes`` only. When set,
+            collapses the walk to descendants of the named class
+            instead of the loaded UClass universe.
+        include_abstract: ``list_classes`` / ``find_in_subclasses``.
+            Default True. Set False to drop CLASS_Abstract entries.
+        include_interfaces: ``list_classes`` / ``find_in_subclasses``.
+            Default True. Set False to drop CLASS_Interface entries.
+        include_blueprint: ``list_classes`` only. Default True. Set
+            False to drop CLASS_CompiledFromBlueprint entries.
+        include_native: ``list_classes`` only. Default True. Set
+            False to drop CLASS_Native entries.
+        include_parent: ``find_in_subclasses`` only. Default False.
+            Set True to also test the parent class for matches.
+        max_results: Cap on the per-row class list for the
+            multi-class ops. Default 256.
 
     Returns:
-        Dict with class metadata (``class`` / ``class_short`` /
-        ``class_path`` / ``is_native`` / ``is_abstract`` /
-        ``is_blueprint`` / ``is_interface`` / ``class_flags`` /
-        ``tooltip``), the optional ``parent`` block, the
-        ``interfaces`` array, the ``properties`` array (each with
-        ``name`` / ``cpp_type`` / ``container`` / ``inner_type`` /
-        ``flags`` / ``tooltip`` / ``category`` / ``owner_class`` /
-        ``inherited``), the ``functions`` array (each with ``name`` /
-        ``params`` / ``return`` / ``flags`` / ``tooltip`` /
-        ``category`` / ``owner_class`` / ``inherited`` / ``is_pure`` /
-        ``is_blueprint_callable`` / ``is_blueprint_event`` /
-        ``is_static`` / ``is_net`` / ``is_const``), the ``children``
-        array (only for ``describe``), and aggregate counts
-        (``properties_total`` / ``properties_truncated`` /
-        ``functions_total`` / ``functions_truncated`` /
-        ``child_count`` / ``child_count_total``).
+        Op-dependent dict.
+        ``describe`` / ``find_property`` / ``find_function``: same
+        shape as before (class metadata + properties / functions /
+        children arrays + counts).
+        ``list_classes``: ``classes`` array of compact class rows,
+        ``count``, ``matched_total``, ``truncated``.
+        ``find_in_subclasses``: ``classes`` array of class rows
+        with ``property_matches`` + ``function_matches`` arrays,
+        ``count``, ``matched_total``, ``truncated``.
+        ``class_diff``: ``class_a`` / ``class_b`` headers plus
+        ``properties`` block (``added`` / ``removed`` / ``changed``
+        + ``*_count``) and a parallel ``functions`` block.
     """
     unreal = get_unreal_connection()
     if not unreal:
         return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
-    params: Dict[str, Any] = {"class": cls}
+    params: Dict[str, Any] = {}
+    if cls is not None:
+        params["class"] = cls
     if op is not None:
         params["op"] = op
     if pattern is not None:
@@ -6568,6 +6628,32 @@ def unreal_api(
         params["max_properties"] = max_properties
     if max_functions is not None:
         params["max_functions"] = max_functions
+    if parent_class is not None:
+        params["parent_class"] = parent_class
+    if class_a is not None:
+        params["class_a"] = class_a
+    if class_b is not None:
+        params["class_b"] = class_b
+    if property is not None:
+        params["property"] = property
+    if function is not None:
+        params["function"] = function
+    if member is not None:
+        params["member"] = member
+    if include_subclasses_of is not None:
+        params["include_subclasses_of"] = include_subclasses_of
+    if include_abstract is not None:
+        params["include_abstract"] = include_abstract
+    if include_interfaces is not None:
+        params["include_interfaces"] = include_interfaces
+    if include_blueprint is not None:
+        params["include_blueprint"] = include_blueprint
+    if include_native is not None:
+        params["include_native"] = include_native
+    if include_parent is not None:
+        params["include_parent"] = include_parent
+    if max_results is not None:
+        params["max_results"] = max_results
 
     try:
         response = unreal.send_command("unreal_api", params)

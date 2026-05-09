@@ -423,8 +423,20 @@ TSharedPtr<FJsonObject> FSproftUnrealApiCommands::HandleCommand(const FString& C
     {
         return HandleFindFunction(Params);
     }
+    if (Op == TEXT("list_classes"))
+    {
+        return HandleListClasses(Params);
+    }
+    if (Op == TEXT("find_in_subclasses"))
+    {
+        return HandleFindInSubclasses(Params);
+    }
+    if (Op == TEXT("class_diff"))
+    {
+        return HandleClassDiff(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("unreal_api: unsupported op '%s'. Supported: describe, find_property, find_function"), *Op));
+        FString::Printf(TEXT("unreal_api: unsupported op '%s'. Supported: describe, find_property, find_function, list_classes, find_in_subclasses, class_diff"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftUnrealApiCommands::HandleDescribe(const TSharedPtr<FJsonObject>& Params)
@@ -641,5 +653,497 @@ TSharedPtr<FJsonObject> FSproftUnrealApiCommands::HandleFindFunction(const TShar
     Out->SetArrayField(TEXT("matches"), MatchArr);
     Out->SetNumberField(TEXT("matched_total"), MatchedTotal);
     Out->SetBoolField(TEXT("truncated"), MatchArr.Num() < MatchedTotal);
+    return Out;
+}
+
+namespace
+{
+    /** Compact class descriptor for the multi-class ops (list_classes,
+     *  find_in_subclasses). Lighter than the describe header so a
+     *  500-row response stays under the JSON budget. */
+    TSharedPtr<FJsonObject> UnrealApi_BuildClassRow(UClass* Klass)
+    {
+        TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+        if (!Klass) return Row;
+        Row->SetStringField(TEXT("class"), Klass->GetName());
+        Row->SetStringField(TEXT("class_path"), Klass->GetPathName());
+        Row->SetBoolField(TEXT("is_native"), Klass->HasAnyClassFlags(CLASS_Native));
+        Row->SetBoolField(TEXT("is_abstract"), Klass->HasAnyClassFlags(CLASS_Abstract));
+        Row->SetBoolField(TEXT("is_interface"), Klass->HasAnyClassFlags(CLASS_Interface));
+        Row->SetBoolField(TEXT("is_blueprint"), Klass->HasAnyClassFlags(CLASS_CompiledFromBlueprint));
+        if (UClass* Super = Klass->GetSuperClass())
+        {
+            Row->SetStringField(TEXT("super_class"), Super->GetName());
+            Row->SetStringField(TEXT("super_class_path"), Super->GetPathName());
+        }
+        return Row;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftUnrealApiCommands::HandleListClasses(const TSharedPtr<FJsonObject>& Params)
+{
+    // Pull the substring filter and optional parent-class restriction.
+    FString Pattern;
+    Params->TryGetStringField(TEXT("pattern"), Pattern);
+    FString Subclasses;
+    Params->TryGetStringField(TEXT("include_subclasses_of"), Subclasses);
+
+    int32 MaxResults = 256;
+    bool bIncludeAbstract = true;
+    bool bIncludeInterfaces = true;
+    bool bIncludeBlueprint = true;
+    bool bIncludeNative = true;
+
+    double TempNum = 0.0;
+    if (Params->TryGetNumberField(TEXT("max_results"), TempNum)) MaxResults = FMath::Max(0, static_cast<int32>(TempNum));
+    Params->TryGetBoolField(TEXT("include_abstract"), bIncludeAbstract);
+    Params->TryGetBoolField(TEXT("include_interfaces"), bIncludeInterfaces);
+    Params->TryGetBoolField(TEXT("include_blueprint"), bIncludeBlueprint);
+    Params->TryGetBoolField(TEXT("include_native"), bIncludeNative);
+
+    UClass* ParentClass = nullptr;
+    if (!Subclasses.IsEmpty())
+    {
+        ParentClass = UnrealApi_ResolveClass(Subclasses);
+        if (!ParentClass)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Failed to resolve include_subclasses_of: %s"), *Subclasses));
+        }
+    }
+
+    const FString PatternLower = Pattern.ToLower();
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    if (!Pattern.IsEmpty())
+    {
+        Out->SetStringField(TEXT("pattern"), Pattern);
+    }
+    if (ParentClass)
+    {
+        TSharedPtr<FJsonObject> ParentObj = MakeShared<FJsonObject>();
+        ParentObj->SetStringField(TEXT("class"), ParentClass->GetName());
+        ParentObj->SetStringField(TEXT("class_path"), ParentClass->GetPathName());
+        Out->SetObjectField(TEXT("subclasses_of"), ParentObj);
+    }
+
+    // Walk the class universe. When a parent is given, collapse the
+    // walk to descendants of that parent (cheaper than scanning every
+    // loaded UClass).
+    TArray<UClass*> Universe;
+    if (ParentClass)
+    {
+        // GetDerivedClasses with bRecursive=true returns every descendant.
+        // We append the parent itself too so a caller can match an exact
+        // class name plus its descendants.
+        Universe.Add(ParentClass);
+        TArray<UClass*> Derived;
+        GetDerivedClasses(ParentClass, Derived, /*bRecursive=*/true);
+        Universe.Append(Derived);
+    }
+    else
+    {
+        for (TObjectIterator<UClass> It; It; ++It)
+        {
+            Universe.Add(*It);
+        }
+    }
+
+    int32 MatchedTotal = 0;
+    TArray<TSharedPtr<FJsonValue>> Matches;
+    for (UClass* Candidate : Universe)
+    {
+        if (!Candidate) continue;
+        const bool bIsNative = Candidate->HasAnyClassFlags(CLASS_Native);
+        const bool bIsBp = Candidate->HasAnyClassFlags(CLASS_CompiledFromBlueprint);
+        const bool bIsInterface = Candidate->HasAnyClassFlags(CLASS_Interface);
+        const bool bIsAbstract = Candidate->HasAnyClassFlags(CLASS_Abstract);
+        if (!bIncludeNative && bIsNative) continue;
+        if (!bIncludeBlueprint && bIsBp) continue;
+        if (!bIncludeInterfaces && bIsInterface) continue;
+        if (!bIncludeAbstract && bIsAbstract) continue;
+
+        if (!PatternLower.IsEmpty())
+        {
+            if (!Candidate->GetName().ToLower().Contains(PatternLower)) continue;
+        }
+        ++MatchedTotal;
+        if (Matches.Num() >= MaxResults) continue;
+        Matches.Add(MakeShared<FJsonValueObject>(UnrealApi_BuildClassRow(Candidate)));
+    }
+
+    Out->SetArrayField(TEXT("classes"), Matches);
+    Out->SetNumberField(TEXT("count"), Matches.Num());
+    Out->SetNumberField(TEXT("matched_total"), MatchedTotal);
+    Out->SetBoolField(TEXT("truncated"), Matches.Num() < MatchedTotal);
+    return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftUnrealApiCommands::HandleFindInSubclasses(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ParentParam;
+    if (!Params->TryGetStringField(TEXT("parent_class"), ParentParam)
+        && !Params->TryGetStringField(TEXT("class"), ParentParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'parent_class' parameter"));
+    }
+    UClass* ParentClass = UnrealApi_ResolveClass(ParentParam);
+    if (!ParentClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to resolve parent_class: %s"), *ParentParam));
+    }
+
+    FString PropertyPattern;
+    Params->TryGetStringField(TEXT("property"), PropertyPattern);
+    FString FunctionPattern;
+    Params->TryGetStringField(TEXT("function"), FunctionPattern);
+    FString MemberPattern;
+    Params->TryGetStringField(TEXT("member"), MemberPattern);
+
+    if (PropertyPattern.IsEmpty() && FunctionPattern.IsEmpty() && MemberPattern.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Provide 'property', 'function', or 'member' (any one matches)"));
+    }
+
+    int32 MaxResults = 256;
+    bool bIncludeAbstract = true;
+    bool bIncludeInterfaces = true;
+    bool bIncludeParent = false;
+    double TempNum = 0.0;
+    if (Params->TryGetNumberField(TEXT("max_results"), TempNum)) MaxResults = FMath::Max(0, static_cast<int32>(TempNum));
+    Params->TryGetBoolField(TEXT("include_abstract"), bIncludeAbstract);
+    Params->TryGetBoolField(TEXT("include_interfaces"), bIncludeInterfaces);
+    Params->TryGetBoolField(TEXT("include_parent"), bIncludeParent);
+
+    const FString PropPatternLower = PropertyPattern.ToLower();
+    const FString FuncPatternLower = FunctionPattern.ToLower();
+    const FString MemberPatternLower = MemberPattern.ToLower();
+
+    TArray<UClass*> Candidates;
+    if (bIncludeParent)
+    {
+        Candidates.Add(ParentClass);
+    }
+    TArray<UClass*> Derived;
+    GetDerivedClasses(ParentClass, Derived, /*bRecursive=*/true);
+    Candidates.Append(Derived);
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    {
+        TSharedPtr<FJsonObject> ParentObj = MakeShared<FJsonObject>();
+        ParentObj->SetStringField(TEXT("class"), ParentClass->GetName());
+        ParentObj->SetStringField(TEXT("class_path"), ParentClass->GetPathName());
+        Out->SetObjectField(TEXT("parent_class"), ParentObj);
+    }
+    if (!PropertyPattern.IsEmpty()) Out->SetStringField(TEXT("property_pattern"), PropertyPattern);
+    if (!FunctionPattern.IsEmpty()) Out->SetStringField(TEXT("function_pattern"), FunctionPattern);
+    if (!MemberPattern.IsEmpty()) Out->SetStringField(TEXT("member_pattern"), MemberPattern);
+
+    int32 MatchedTotal = 0;
+    TArray<TSharedPtr<FJsonValue>> Rows;
+    for (UClass* Klass : Candidates)
+    {
+        if (!Klass) continue;
+        if (!bIncludeInterfaces && Klass->HasAnyClassFlags(CLASS_Interface)) continue;
+        if (!bIncludeAbstract && Klass->HasAnyClassFlags(CLASS_Abstract)) continue;
+
+        TArray<FString> PropMatches;
+        TArray<FString> FuncMatches;
+
+        // ExcludeSuper: only walk this class's own declarations, not
+        // inherited members. The whole point of find_in_subclasses is
+        // to find which descendants ADD a member.
+        for (TFieldIterator<FProperty> PropIt(Klass, EFieldIteratorFlags::ExcludeSuper); PropIt; ++PropIt)
+        {
+            FProperty* Prop = *PropIt;
+            if (!Prop) continue;
+            const FString NameLower = Prop->GetName().ToLower();
+            if (!PropPatternLower.IsEmpty() && NameLower.Contains(PropPatternLower))
+            {
+                PropMatches.AddUnique(Prop->GetName());
+            }
+            if (!MemberPatternLower.IsEmpty() && NameLower.Contains(MemberPatternLower))
+            {
+                PropMatches.AddUnique(Prop->GetName());
+            }
+        }
+        for (TFieldIterator<UFunction> FuncIt(Klass, EFieldIteratorFlags::ExcludeSuper); FuncIt; ++FuncIt)
+        {
+            UFunction* Func = *FuncIt;
+            if (!Func) continue;
+            const FString NameLower = Func->GetName().ToLower();
+            if (!FuncPatternLower.IsEmpty() && NameLower.Contains(FuncPatternLower))
+            {
+                FuncMatches.AddUnique(Func->GetName());
+            }
+            if (!MemberPatternLower.IsEmpty() && NameLower.Contains(MemberPatternLower))
+            {
+                FuncMatches.AddUnique(Func->GetName());
+            }
+        }
+
+        if (PropMatches.Num() == 0 && FuncMatches.Num() == 0) continue;
+        ++MatchedTotal;
+        if (Rows.Num() >= MaxResults) continue;
+
+        TSharedPtr<FJsonObject> Row = UnrealApi_BuildClassRow(Klass);
+        if (PropMatches.Num() > 0)
+        {
+            TArray<TSharedPtr<FJsonValue>> PropArr;
+            for (const FString& N : PropMatches) PropArr.Add(MakeShared<FJsonValueString>(N));
+            Row->SetArrayField(TEXT("property_matches"), PropArr);
+        }
+        if (FuncMatches.Num() > 0)
+        {
+            TArray<TSharedPtr<FJsonValue>> FuncArr;
+            for (const FString& N : FuncMatches) FuncArr.Add(MakeShared<FJsonValueString>(N));
+            Row->SetArrayField(TEXT("function_matches"), FuncArr);
+        }
+        Row->SetNumberField(TEXT("property_match_count"), PropMatches.Num());
+        Row->SetNumberField(TEXT("function_match_count"), FuncMatches.Num());
+        Rows.Add(MakeShared<FJsonValueObject>(Row));
+    }
+
+    Out->SetArrayField(TEXT("classes"), Rows);
+    Out->SetNumberField(TEXT("count"), Rows.Num());
+    Out->SetNumberField(TEXT("matched_total"), MatchedTotal);
+    Out->SetBoolField(TEXT("truncated"), Rows.Num() < MatchedTotal);
+    return Out;
+}
+
+namespace
+{
+    /** Property signature record used by class_diff. Two properties
+     *  match if their canonical signatures match. */
+    FString UnrealApi_PropSignature(const FProperty* Prop)
+    {
+        if (!Prop) return FString();
+        FString Sig = Prop->GetCPPType();
+        if (const FArrayProperty* Arr = CastField<FArrayProperty>(Prop))
+        {
+            if (Arr->Inner) Sig += FString::Printf(TEXT("[Array<%s>]"), *Arr->Inner->GetCPPType());
+        }
+        else if (const FSetProperty* Set = CastField<FSetProperty>(Prop))
+        {
+            if (Set->ElementProp) Sig += FString::Printf(TEXT("[Set<%s>]"), *Set->ElementProp->GetCPPType());
+        }
+        else if (const FMapProperty* Map = CastField<FMapProperty>(Prop))
+        {
+            const FString K = Map->KeyProp ? Map->KeyProp->GetCPPType() : FString(TEXT("?"));
+            const FString V = Map->ValueProp ? Map->ValueProp->GetCPPType() : FString(TEXT("?"));
+            Sig += FString::Printf(TEXT("[Map<%s,%s>]"), *K, *V);
+        }
+        return Sig;
+    }
+
+    /** Function signature record used by class_diff. */
+    FString UnrealApi_FuncSignature(UFunction* Func)
+    {
+        if (!Func) return FString();
+        FString Sig = TEXT("(");
+        bool bFirst = true;
+        FString ReturnType = TEXT("void");
+        for (TFieldIterator<FProperty> ParamIt(Func); ParamIt; ++ParamIt)
+        {
+            FProperty* P = *ParamIt;
+            if (!P || !P->HasAnyPropertyFlags(CPF_Parm)) continue;
+            if (P->HasAnyPropertyFlags(CPF_ReturnParm))
+            {
+                ReturnType = P->GetCPPType();
+                continue;
+            }
+            if (!bFirst) Sig += TEXT(",");
+            bFirst = false;
+            Sig += P->GetCPPType();
+            if (P->HasAnyPropertyFlags(CPF_ReferenceParm)) Sig += TEXT("&");
+            if (P->HasAnyPropertyFlags(CPF_OutParm) && !P->HasAnyPropertyFlags(CPF_ReturnParm)) Sig += TEXT(" out");
+        }
+        Sig += TEXT(")->");
+        Sig += ReturnType;
+        // Append the canonical flag set so a pure-vs-impure diff surfaces.
+        const uint32 RelevantFlags = static_cast<uint32>(Func->FunctionFlags) & (FUNC_BlueprintPure | FUNC_BlueprintCallable | FUNC_BlueprintEvent | FUNC_Static | FUNC_NetMulticast | FUNC_NetServer | FUNC_NetClient | FUNC_Const);
+        Sig += FString::Printf(TEXT("[F=%08x]"), RelevantFlags);
+        return Sig;
+    }
+
+    /** Walk a class's own properties keyed by name. */
+    void UnrealApi_GatherOwnProps(UClass* Klass, TMap<FString, FProperty*>& Out)
+    {
+        Out.Reset();
+        if (!Klass) return;
+        for (TFieldIterator<FProperty> It(Klass, EFieldIteratorFlags::ExcludeSuper); It; ++It)
+        {
+            FProperty* P = *It;
+            if (!P) continue;
+            Out.Add(P->GetName(), P);
+        }
+    }
+
+    void UnrealApi_GatherOwnFuncs(UClass* Klass, TMap<FString, UFunction*>& Out)
+    {
+        Out.Reset();
+        if (!Klass) return;
+        for (TFieldIterator<UFunction> It(Klass, EFieldIteratorFlags::ExcludeSuper); It; ++It)
+        {
+            UFunction* F = *It;
+            if (!F) continue;
+            Out.Add(F->GetName(), F);
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftUnrealApiCommands::HandleClassDiff(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ClassA;
+    FString ClassB;
+    if (!Params->TryGetStringField(TEXT("class_a"), ClassA))
+    {
+        Params->TryGetStringField(TEXT("a"), ClassA);
+    }
+    if (!Params->TryGetStringField(TEXT("class_b"), ClassB))
+    {
+        Params->TryGetStringField(TEXT("b"), ClassB);
+    }
+    if (ClassA.IsEmpty() || ClassB.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'class_a' / 'class_b' parameters"));
+    }
+
+    UClass* KA = UnrealApi_ResolveClass(ClassA);
+    UClass* KB = UnrealApi_ResolveClass(ClassB);
+    if (!KA)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to resolve class_a: %s"), *ClassA));
+    }
+    if (!KB)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to resolve class_b: %s"), *ClassB));
+    }
+
+    bool bIncludeInherited = false;
+    Params->TryGetBoolField(TEXT("include_inherited"), bIncludeInherited);
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    {
+        TSharedPtr<FJsonObject> RowA = MakeShared<FJsonObject>();
+        RowA->SetStringField(TEXT("class"), KA->GetName());
+        RowA->SetStringField(TEXT("class_path"), KA->GetPathName());
+        Out->SetObjectField(TEXT("class_a"), RowA);
+
+        TSharedPtr<FJsonObject> RowB = MakeShared<FJsonObject>();
+        RowB->SetStringField(TEXT("class"), KB->GetName());
+        RowB->SetStringField(TEXT("class_path"), KB->GetPathName());
+        Out->SetObjectField(TEXT("class_b"), RowB);
+    }
+
+    // Walk both classes' own (or inherited) members keyed by name.
+    TMap<FString, FProperty*> PA;
+    TMap<FString, FProperty*> PB;
+    TMap<FString, UFunction*> FA;
+    TMap<FString, UFunction*> FB;
+    if (bIncludeInherited)
+    {
+        for (TFieldIterator<FProperty> It(KA, EFieldIteratorFlags::IncludeSuper); It; ++It) { if (*It) PA.Add((*It)->GetName(), *It); }
+        for (TFieldIterator<FProperty> It(KB, EFieldIteratorFlags::IncludeSuper); It; ++It) { if (*It) PB.Add((*It)->GetName(), *It); }
+        for (TFieldIterator<UFunction> It(KA, EFieldIteratorFlags::IncludeSuper); It; ++It) { if (*It) FA.Add((*It)->GetName(), *It); }
+        for (TFieldIterator<UFunction> It(KB, EFieldIteratorFlags::IncludeSuper); It; ++It) { if (*It) FB.Add((*It)->GetName(), *It); }
+    }
+    else
+    {
+        UnrealApi_GatherOwnProps(KA, PA);
+        UnrealApi_GatherOwnProps(KB, PB);
+        UnrealApi_GatherOwnFuncs(KA, FA);
+        UnrealApi_GatherOwnFuncs(KB, FB);
+    }
+
+    // Properties.
+    TArray<TSharedPtr<FJsonValue>> PropAdded;
+    TArray<TSharedPtr<FJsonValue>> PropRemoved;
+    TArray<TSharedPtr<FJsonValue>> PropChanged;
+    for (const auto& Pair : PB)
+    {
+        if (!PA.Contains(Pair.Key))
+        {
+            PropAdded.Add(MakeShared<FJsonValueObject>(BuildPropertyRecord(Pair.Value, KB)));
+        }
+        else
+        {
+            const FString SigA = UnrealApi_PropSignature(PA[Pair.Key]);
+            const FString SigB = UnrealApi_PropSignature(Pair.Value);
+            if (SigA != SigB)
+            {
+                TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+                Row->SetStringField(TEXT("name"), Pair.Key);
+                Row->SetStringField(TEXT("a_cpp_type"), SigA);
+                Row->SetStringField(TEXT("b_cpp_type"), SigB);
+                PropChanged.Add(MakeShared<FJsonValueObject>(Row));
+            }
+        }
+    }
+    for (const auto& Pair : PA)
+    {
+        if (!PB.Contains(Pair.Key))
+        {
+            PropRemoved.Add(MakeShared<FJsonValueObject>(BuildPropertyRecord(Pair.Value, KA)));
+        }
+    }
+
+    // Functions.
+    TArray<TSharedPtr<FJsonValue>> FuncAdded;
+    TArray<TSharedPtr<FJsonValue>> FuncRemoved;
+    TArray<TSharedPtr<FJsonValue>> FuncChanged;
+    for (const auto& Pair : FB)
+    {
+        if (!FA.Contains(Pair.Key))
+        {
+            FuncAdded.Add(MakeShared<FJsonValueObject>(BuildFunctionRecord(Pair.Value, KB)));
+        }
+        else
+        {
+            const FString SigA = UnrealApi_FuncSignature(FA[Pair.Key]);
+            const FString SigB = UnrealApi_FuncSignature(Pair.Value);
+            if (SigA != SigB)
+            {
+                TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+                Row->SetStringField(TEXT("name"), Pair.Key);
+                Row->SetStringField(TEXT("a_signature"), SigA);
+                Row->SetStringField(TEXT("b_signature"), SigB);
+                FuncChanged.Add(MakeShared<FJsonValueObject>(Row));
+            }
+        }
+    }
+    for (const auto& Pair : FA)
+    {
+        if (!FB.Contains(Pair.Key))
+        {
+            FuncRemoved.Add(MakeShared<FJsonValueObject>(BuildFunctionRecord(Pair.Value, KA)));
+        }
+    }
+
+    TSharedPtr<FJsonObject> PropertiesBlock = MakeShared<FJsonObject>();
+    PropertiesBlock->SetArrayField(TEXT("added"), PropAdded);
+    PropertiesBlock->SetArrayField(TEXT("removed"), PropRemoved);
+    PropertiesBlock->SetArrayField(TEXT("changed"), PropChanged);
+    PropertiesBlock->SetNumberField(TEXT("added_count"), PropAdded.Num());
+    PropertiesBlock->SetNumberField(TEXT("removed_count"), PropRemoved.Num());
+    PropertiesBlock->SetNumberField(TEXT("changed_count"), PropChanged.Num());
+    Out->SetObjectField(TEXT("properties"), PropertiesBlock);
+
+    TSharedPtr<FJsonObject> FunctionsBlock = MakeShared<FJsonObject>();
+    FunctionsBlock->SetArrayField(TEXT("added"), FuncAdded);
+    FunctionsBlock->SetArrayField(TEXT("removed"), FuncRemoved);
+    FunctionsBlock->SetArrayField(TEXT("changed"), FuncChanged);
+    FunctionsBlock->SetNumberField(TEXT("added_count"), FuncAdded.Num());
+    FunctionsBlock->SetNumberField(TEXT("removed_count"), FuncRemoved.Num());
+    FunctionsBlock->SetNumberField(TEXT("changed_count"), FuncChanged.Num());
+    Out->SetObjectField(TEXT("functions"), FunctionsBlock);
+
+    Out->SetBoolField(TEXT("include_inherited"), bIncludeInherited);
     return Out;
 }

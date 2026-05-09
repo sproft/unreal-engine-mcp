@@ -87,4 +87,7 @@ private:
     TSharedPtr<FJsonObject> HandleDescribe(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleFindProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleFindFunction(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleListClasses(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleFindInSubclasses(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleClassDiff(const TSharedPtr<FJsonObject>& Params);
 };
