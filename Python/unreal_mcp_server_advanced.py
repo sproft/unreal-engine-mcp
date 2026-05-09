@@ -5468,6 +5468,85 @@ def foliage_inspect(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def sequencer_edit(
+    sequence: str,
+    op: Optional[str] = None,
+    include_tracks: Optional[bool] = None,
+    include_camera_cut_track: Optional[bool] = None,
+    include_sections: Optional[bool] = None,
+    include_possessables: Optional[bool] = None,
+    include_spawnables: Optional[bool] = None,
+    max_sections_per_track: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only structured dump of a ULevelSequence (or any UMovieSceneSequence).
+
+    The first slice ships the read side: master tracks list with class
+    + name + section count, per-section start / end / duration,
+    possessables list (binding GUID + name + class), spawnables list
+    (binding GUID + name + spawn-template class), plus the playback
+    range and the tick / display frame rates. The edit-side ops
+    (track add, section move, possessable / spawnable swap) live on
+    the backlog.
+
+    Args:
+        sequence: Short asset name or full ``/Game/...`` Level Sequence
+            path. Resolves through ``UEditorAssetLibrary::LoadAsset``
+            and accepts any UMovieSceneSequence subclass.
+        op: Operation discriminator. Only ``inspect`` (the default) is
+            supported in this slice.
+        include_tracks: Include the master tracks array. Default True.
+        include_camera_cut_track: Include the camera-cut track stub
+            when present. Default True.
+        include_sections: Include per-section start / end / duration on
+            each track. Default True.
+        include_possessables: Include the possessables array. Default
+            True.
+        include_spawnables: Include the spawnables array. Default
+            True.
+        max_sections_per_track: Cap on per-track section emission.
+            Default 64; sets ``sections_truncated: true`` on the
+            offending track when the cap fires.
+
+    Returns:
+        Dict with ``name`` / ``path`` / ``class`` / ``class_path``,
+        ``tick_resolution`` / ``display_rate`` (each
+        ``{numerator, denominator, approx_fps}``),
+        ``playback_start_frame`` / ``playback_end_frame`` /
+        ``playback_duration_frames`` plus ``playback_has_start`` /
+        ``playback_has_end``, ``tracks`` array, optional
+        ``camera_cut_track`` block, ``possessables`` array,
+        ``spawnables`` array.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"sequence": sequence}
+    if op is not None:
+        params["op"] = op
+    if include_tracks is not None:
+        params["include_tracks"] = include_tracks
+    if include_camera_cut_track is not None:
+        params["include_camera_cut_track"] = include_camera_cut_track
+    if include_sections is not None:
+        params["include_sections"] = include_sections
+    if include_possessables is not None:
+        params["include_possessables"] = include_possessables
+    if include_spawnables is not None:
+        params["include_spawnables"] = include_spawnables
+    if max_sections_per_track is not None:
+        params["max_sections_per_track"] = max_sections_per_track
+
+    try:
+        response = unreal.send_command("sequencer_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"sequencer_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

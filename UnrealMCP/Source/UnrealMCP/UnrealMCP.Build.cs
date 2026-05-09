@@ -54,7 +54,9 @@ public class UnrealMCP : ModuleRules
 				"AIModule",           // For UBehaviorTree / UBlackboardData (Sproft behavior_tree)
 				"GameplayAbilities",  // For UGameplayAbility / UGameplayEffect / UAttributeSet (Sproft gas_edit)
 				"Landscape",          // For ALandscape / ULandscapeInfo / ULandscapeLayerInfoObject (Sproft landscape_inspect)
-				"Foliage"             // For AInstancedFoliageActor / UFoliageType (Sproft foliage_inspect)
+				"Foliage",            // For AInstancedFoliageActor / UFoliageType (Sproft foliage_inspect)
+				"MovieScene",         // For UMovieScene / UMovieSceneTrack / UMovieSceneSection (Sproft sequencer_edit)
+				"LevelSequence"       // For ULevelSequence (Sproft sequencer_edit)
 			}
 		);
 

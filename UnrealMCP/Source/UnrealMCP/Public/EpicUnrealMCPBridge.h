@@ -46,6 +46,7 @@
 #include "Commands/SproftGasEditCommands.h"
 #include "Commands/SproftLandscapeInspectCommands.h"
 #include "Commands/SproftFoliageInspectCommands.h"
+#include "Commands/SproftSequencerEditCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -128,4 +129,5 @@ private:
 	TSharedPtr<FSproftGasEditCommands> SproftGasEdit;
 	TSharedPtr<FSproftLandscapeInspectCommands> SproftLandscapeInspect;
 	TSharedPtr<FSproftFoliageInspectCommands> SproftFoliageInspect;
+	TSharedPtr<FSproftSequencerEditCommands> SproftSequencerEdit;
 };
