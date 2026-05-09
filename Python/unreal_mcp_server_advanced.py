@@ -5509,46 +5509,59 @@ def sequencer_edit(
     include_possessables: Optional[bool] = None,
     include_spawnables: Optional[bool] = None,
     max_sections_per_track: Optional[int] = None,
+    actor: Optional[str] = None,
+    binding_name: Optional[str] = None,
+    overwrite: Optional[bool] = None,
+    save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Read-only structured dump of a ULevelSequence (or any UMovieSceneSequence).
+    Multi-op tool over a ULevelSequence asset.
 
-    The first slice ships the read side: master tracks list with class
-    + name + section count, per-section start / end / duration,
-    possessables list (binding GUID + name + class), spawnables list
-    (binding GUID + name + spawn-template class), plus the playback
-    range and the tick / display frame rates. The edit-side ops
-    (track add, section move, possessable / spawnable swap) live on
-    the backlog.
+    Operations (selected through ``op``):
+        - ``inspect`` (default): read-only structured dump of an
+          existing sequence. Returns master tracks, per-section
+          start / end / duration, possessables, spawnables, plus
+          playback range and tick / display frame rates.
+        - ``create_level_sequence``: create a new ULevelSequence at a
+          ``/Game/...`` package path with default tick / display
+          rates and an empty MovieScene (through
+          ULevelSequence::Initialize).
+        - ``add_possessable``: bind a named editor-world actor to an
+          existing ULevelSequence. Wraps UMovieScene::AddPossessable +
+          UMovieSceneSequence::BindPossessableObject so the Sequencer
+          UI picks the binding up the next time the asset opens.
+
+    Edit-slice future work (track add, section add, section move,
+    spawnable creation, camera-cut creation) stays on the backlog.
 
     Args:
-        sequence: Short asset name or full ``/Game/...`` Level Sequence
-            path. Resolves through ``UEditorAssetLibrary::LoadAsset``
-            and accepts any UMovieSceneSequence subclass.
-        op: Operation discriminator. Only ``inspect`` (the default) is
-            supported in this slice.
-        include_tracks: Include the master tracks array. Default True.
-        include_camera_cut_track: Include the camera-cut track stub
-            when present. Default True.
-        include_sections: Include per-section start / end / duration on
-            each track. Default True.
-        include_possessables: Include the possessables array. Default
-            True.
-        include_spawnables: Include the spawnables array. Default
-            True.
-        max_sections_per_track: Cap on per-track section emission.
-            Default 64; sets ``sections_truncated: true`` on the
-            offending track when the cap fires.
+        sequence: For ``inspect`` / ``add_possessable`` the existing
+            Level Sequence asset path or short name. For
+            ``create_level_sequence`` the target ``/Game/...`` package
+            path.
+        op: One of ``inspect`` (default), ``create_level_sequence``,
+            or ``add_possessable``.
+        include_tracks / include_camera_cut_track / include_sections /
+            include_possessables / include_spawnables /
+            max_sections_per_track: ``inspect``-only flags.
+        actor: ``add_possessable``-only target actor name (matched
+            against GetName() first and Outliner label second).
+        binding_name: ``add_possessable``-only friendly name for the
+            FMovieScenePossessable. Optional; falls back to the
+            actor's GetActorLabel().
+        overwrite: ``create_level_sequence``-only flag. Replace an
+            existing asset at the path. Default False.
+        save: Save the asset after the edit. Default True for both
+            edit ops.
 
     Returns:
-        Dict with ``name`` / ``path`` / ``class`` / ``class_path``,
-        ``tick_resolution`` / ``display_rate`` (each
-        ``{numerator, denominator, approx_fps}``),
-        ``playback_start_frame`` / ``playback_end_frame`` /
-        ``playback_duration_frames`` plus ``playback_has_start`` /
-        ``playback_has_end``, ``tracks`` array, optional
-        ``camera_cut_track`` block, ``possessables`` array,
-        ``spawnables`` array.
+        For ``inspect`` see the read-only slice's contract. For
+        ``create_level_sequence`` a dict with ``operation`` /
+        ``name`` / ``path`` / ``class`` / ``tick_resolution`` /
+        ``display_rate`` / ``saved``. For ``add_possessable`` a dict
+        with ``operation`` / ``sequence`` / ``guid`` /
+        ``binding_name`` / ``actor`` / ``actor_label`` /
+        ``actor_class`` / ``actor_class_path`` / ``saved``.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -5569,6 +5582,14 @@ def sequencer_edit(
         params["include_spawnables"] = include_spawnables
     if max_sections_per_track is not None:
         params["max_sections_per_track"] = max_sections_per_track
+    if actor is not None:
+        params["actor"] = actor
+    if binding_name is not None:
+        params["binding_name"] = binding_name
+    if overwrite is not None:
+        params["overwrite"] = overwrite
+    if save is not None:
+        params["save"] = save
 
     try:
         response = unreal.send_command("sequencer_edit", params)

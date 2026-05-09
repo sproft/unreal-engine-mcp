@@ -1,7 +1,13 @@
 #include "Commands/SproftSequencerEditCommands.h"
 #include "Commands/EpicUnrealMCPCommonUtils.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Editor.h"
 #include "EditorAssetLibrary.h"
+#include "Engine/World.h"
+#include "EngineUtils.h"
+#include "GameFramework/Actor.h"
+#include "LevelSequence.h"
 #include "MovieScene.h"
 #include "MovieSceneBinding.h"
 #include "MovieScenePossessable.h"
@@ -9,6 +15,7 @@
 #include "MovieSceneSequence.h"
 #include "MovieSceneSpawnable.h"
 #include "MovieSceneTrack.h"
+#include "UObject/Package.h"
 
 namespace
 {
@@ -124,6 +131,62 @@ namespace
         }
         return Out;
     }
+
+    /** Split a `/Game/Subdir/AssetName` path into directory + asset
+     *  name. Mirrors the helper in `SproftAssetFactoryCommands` so the
+     *  edit slice does not fight the asset-creation flow. */
+    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    {
+        FString Trim = InPath;
+        Trim.TrimEndInline();
+        Trim.RemoveFromEnd(TEXT("/"));
+
+        int32 LastSlash = INDEX_NONE;
+        if (Trim.FindLastChar('/', LastSlash))
+        {
+            OutPackageDir = Trim.Left(LastSlash + 1);
+            OutAssetName = Trim.Mid(LastSlash + 1);
+        }
+        else
+        {
+            OutPackageDir = TEXT("/Game/");
+            OutAssetName = Trim;
+        }
+
+        int32 DotIdx = INDEX_NONE;
+        if (OutAssetName.FindChar('.', DotIdx))
+        {
+            OutAssetName = OutAssetName.Left(DotIdx);
+        }
+    }
+
+    /** Mirrors the actor lookup `actor_inspect` / `scene_compose` use:
+     *  GetName() first, GetActorLabel() second. Sequencer always
+     *  binds against the editor world, never PIE; we do the same. */
+    AActor* ResolveActorByName(UWorld* World, const FString& Target)
+    {
+        if (!World || Target.IsEmpty())
+        {
+            return nullptr;
+        }
+        for (TActorIterator<AActor> It(World); It; ++It)
+        {
+            AActor* Actor = *It;
+            if (Actor && Actor->GetName() == Target)
+            {
+                return Actor;
+            }
+        }
+        for (TActorIterator<AActor> It(World); It; ++It)
+        {
+            AActor* Actor = *It;
+            if (Actor && Actor->GetActorLabel() == Target)
+            {
+                return Actor;
+            }
+        }
+        return nullptr;
+    }
 }
 
 FSproftSequencerEditCommands::FSproftSequencerEditCommands()
@@ -132,12 +195,31 @@ FSproftSequencerEditCommands::FSproftSequencerEditCommands()
 
 TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params)
 {
-    if (CommandType == TEXT("sequencer_edit"))
+    if (CommandType != TEXT("sequencer_edit"))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown sequencer_edit command: %s"), *CommandType));
+    }
+    if (!Params.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing params object"));
+    }
+    FString Op;
+    Params->TryGetStringField(TEXT("op"), Op);
+    if (Op.IsEmpty() || Op == TEXT("inspect"))
     {
         return HandleSequencerInspect(Params);
     }
+    if (Op == TEXT("create_level_sequence"))
+    {
+        return HandleCreateLevelSequence(Params);
+    }
+    if (Op == TEXT("add_possessable"))
+    {
+        return HandleAddPossessable(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unknown sequencer_edit command: %s"), *CommandType));
+        FString::Printf(TEXT("sequencer_edit: unsupported op '%s'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleSequencerInspect(const TSharedPtr<FJsonObject>& Params)
@@ -167,15 +249,6 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleSequencerInspect(con
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
             FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
-    }
-
-    const FString Op = Params->HasField(TEXT("op"))
-        ? Params->GetStringField(TEXT("op"))
-        : FString(TEXT("inspect"));
-    if (Op != TEXT("inspect"))
-    {
-        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-            FString::Printf(TEXT("sequencer_edit: only the 'inspect' op is supported in this slice; got '%s'"), *Op));
     }
 
     bool bIncludeTracks = true;
@@ -298,5 +371,173 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleSequencerInspect(con
         Result->SetNumberField(TEXT("spawnable_count"), Arr.Num());
     }
 
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCreateLevelSequence(const TSharedPtr<FJsonObject>& Params)
+{
+    FString PackagePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), PackagePath)
+        && !Params->TryGetStringField(TEXT("path"), PackagePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+    if (!PackagePath.StartsWith(TEXT("/Game/")))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence path '%s' must start with /Game/"), *PackagePath));
+    }
+
+    FString PackageDir;
+    FString AssetName;
+    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    if (AssetName.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not derive asset name from '%s'"), *PackagePath));
+    }
+    const FString AssetObjectPath = PackageDir + AssetName;
+
+    bool bOverwrite = false;
+    Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    if (UEditorAssetLibrary::DoesAssetExist(AssetObjectPath) && !bOverwrite)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset already exists: %s (set 'overwrite': true to replace)"),
+                *AssetObjectPath));
+    }
+
+    UPackage* Package = CreatePackage(*AssetObjectPath);
+    if (!Package)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to create package at '%s'"), *AssetObjectPath));
+    }
+    Package->FullyLoad();
+
+    ULevelSequence* Sequence = NewObject<ULevelSequence>(
+        Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create ULevelSequence"));
+    }
+    // Initialize lays down a fresh UMovieScene with the project's
+    // default tick / display rates and clock source. Without this the
+    // sequence opens but every Sequencer panel call hits a null
+    // MovieScene path.
+    Sequence->Initialize();
+
+    FAssetRegistryModule::AssetCreated(Sequence);
+    Package->MarkPackageDirty();
+
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(AssetObjectPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("create_level_sequence"));
+    Result->SetStringField(TEXT("name"), AssetName);
+    Result->SetStringField(TEXT("path"), AssetObjectPath);
+    Result->SetStringField(TEXT("class"), Sequence->GetClass()->GetName());
+    if (UMovieScene* MovieScene = Sequence->GetMovieScene())
+    {
+        Result->SetObjectField(TEXT("tick_resolution"),
+            FrameRateRecord(MovieScene->GetTickResolution()));
+        Result->SetObjectField(TEXT("display_rate"),
+            FrameRateRecord(MovieScene->GetDisplayRate()));
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddPossessable(const TSharedPtr<FJsonObject>& Params)
+{
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+
+    FString ActorTarget;
+    if (!Params->TryGetStringField(TEXT("actor"), ActorTarget)
+        && !Params->TryGetStringField(TEXT("actor_name"), ActorTarget)
+        && !Params->TryGetStringField(TEXT("target"), ActorTarget))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'actor' parameter"));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    ULevelSequence* Sequence = Cast<ULevelSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a ULevelSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!World)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
+    }
+    AActor* Actor = ResolveActorByName(World, ActorTarget);
+    if (!Actor)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No actor with name or label '%s' in editor world"), *ActorTarget));
+    }
+
+    FString BindingName;
+    if (!Params->TryGetStringField(TEXT("binding_name"), BindingName) || BindingName.IsEmpty())
+    {
+        BindingName = Actor->GetActorLabel();
+        if (BindingName.IsEmpty())
+        {
+            BindingName = Actor->GetName();
+        }
+    }
+
+    const FGuid BindingGuid = MovieScene->AddPossessable(BindingName, Actor->GetClass());
+    if (!BindingGuid.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UMovieScene::AddPossessable failed for actor '%s'"), *ActorTarget));
+    }
+
+    // BindPossessableObject populates the LevelSequenceBindingReferences
+    // table that Sequencer's runtime uses to map a GUID back to an
+    // editor-world actor. Without it, the possessable is a name + class
+    // entry on the MovieScene with no live binding.
+    Sequence->BindPossessableObject(BindingGuid, *Actor, World);
+
+    Sequence->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_possessable"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("guid"), BindingGuid.ToString());
+    Result->SetStringField(TEXT("binding_name"), BindingName);
+    Result->SetStringField(TEXT("actor"), Actor->GetName());
+    Result->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
+    Result->SetStringField(TEXT("actor_class"), Actor->GetClass()->GetName());
+    Result->SetStringField(TEXT("actor_class_path"), Actor->GetClass()->GetPathName());
+    Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }

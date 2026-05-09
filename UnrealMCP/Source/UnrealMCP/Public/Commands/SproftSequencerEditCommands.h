@@ -4,75 +4,70 @@
 #include "Json.h"
 
 /**
- * Sproft fork addition: sequencer_edit (read-only first slice)
+ * Sproft fork addition: sequencer_edit (read + small edit slice)
  *
- * Read-only structured dump of a ULevelSequence (or any
- * UMovieSceneSequence subclass). The hosted Flop tool surface promised
- * a sequencer authoring tool with track / section / camera-cut / event
- * handling. The first slice we ship here is the read side: the master
- * track list with class + name + section count, per-section
- * start / end / duration, the possessables list (one entry per
- * FMovieScenePossessable with binding GUID + name + class) and the
- * spawnables list (one entry per FMovieSceneSpawnable with binding
- * GUID + name + spawn-template class). The edit-side ops (track add,
- * section move, possessable / spawnable swap) remain on the backlog.
+ * Multi-op tool keyed by `op`:
+ *   - `inspect` (default): read-only structured dump of a
+ *     ULevelSequence (or any UMovieSceneSequence subclass). Returns
+ *     master tracks, sections, possessables, spawnables, plus tick /
+ *     display frame rates and the playback range.
+ *   - `create_level_sequence`: create a new ULevelSequence asset at a
+ *     `/Game/...` package path with default tick / display rates and
+ *     an empty MovieScene through ULevelSequence::Initialize.
+ *   - `add_possessable`: bind a named editor-world actor to an
+ *     existing ULevelSequence. Wraps UMovieScene::AddPossessable +
+ *     UMovieSceneSequence::BindPossessableObject so the Sequencer UI
+ *     picks the binding up the next time the asset opens.
  *
- * Operation: single op (`inspect`, default).
+ * Edit-slice future work (track add, section add, section move,
+ * spawnable creation, camera-cut creation) stays on BACKLOG.md.
  *
- * Required input:
- *   - `sequence`: short asset name or full `/Game/...` Level Sequence
+ * Inputs (inspect):
+ *   - sequence: short asset name or full `/Game/...` Level Sequence
  *     path. Resolves through `UEditorAssetLibrary::LoadAsset` and
- *     accepts any UMovieSceneSequence subclass, not just ULevelSequence.
+ *     accepts any UMovieSceneSequence subclass.
+ *   - include_tracks / include_camera_cut_track / include_sections /
+ *     include_possessables / include_spawnables: see the read slice.
+ *   - max_sections_per_track: cap on per-track section emission.
  *
- * Optional inputs:
- *   - `include_tracks`: emit the master tracks array. Default True.
- *   - `include_camera_cut_track`: emit the camera-cut track stub when
- *     present. Default True.
- *   - `include_sections`: emit per-section start / end / duration on
- *     each track. Default True.
- *   - `include_possessables`: emit the possessables array. Default
- *     True.
- *   - `include_spawnables`: emit the spawnables array. Default True.
- *   - `max_sections_per_track`: cap on per-track section emission.
- *     Default 64; setting `section_truncated: true` on the offending
- *     track when the cap fires.
+ * Inputs (create_level_sequence):
+ *   - sequence: target `/Game/...` package path. Required.
+ *   - overwrite: replace an existing asset at the path. Default
+ *     False.
+ *   - save: save the new package after creation. Default True.
  *
- * Returns a structured payload with:
- *   - `name`, `path`, `class` for the resolved sequence asset.
- *   - `tick_resolution`, `display_rate` (each as `numerator` /
- *     `denominator` plus a numeric helper).
- *   - `playback_start_frame`, `playback_end_frame`,
- *     `playback_duration_frames` when the sequence has a bounded
- *     playback range.
- *   - `tracks`: array of master tracks. Each track carries `name`
- *     (FName), `display_name`, `class`, `class_path`,
- *     `section_count`, and an optional `sections` array. Each section
- *     dict reports `class`, `class_path`,
- *     `has_start_frame` / `has_end_frame`, the inclusive-start /
- *     exclusive-end frame numbers when bounded, and a
- *     `duration_frames` helper that always lands at zero for
- *     unbounded ranges.
- *   - `camera_cut_track` when present, with the same shape as a
- *     master track.
- *   - `possessables`: array of `{guid, name, class, class_path,
- *     parent_guid}`.
- *   - `spawnables`: array of `{guid, name, template_class,
- *     template_class_path}`.
+ * Inputs (add_possessable):
+ *   - sequence: short asset name or full `/Game/...` Level Sequence
+ *     path. Required.
+ *   - actor: actor name (matched against GetName() first and
+ *     GetActorLabel() second) for the editor-world actor to bind.
+ *     Required.
+ *   - binding_name: friendly name for the FMovieScenePossessable.
+ *     Optional; falls back to the actor's GetActorLabel() when
+ *     omitted.
+ *   - save: save the asset after the edit. Default True.
  *
- * Read-only. We do not mutate the asset and we do not save anything.
+ * Read-only `inspect` does not mutate the asset; the two edit ops
+ * touch the package and dirty it for save.
  *
  * Clean-room implementation derived from the public UE5 Sequencer API:
- *   - UMovieSceneSequence::GetMovieScene.
+ *   - UMovieSceneSequence::GetMovieScene / BindPossessableObject.
+ *   - ULevelSequence::Initialize for the default-rates empty
+ *     MovieScene that Sequencer expects.
  *   - UMovieScene::GetTracks / GetCameraCutTrack /
- *     GetTickResolution / GetDisplayRate / GetPlaybackRange.
- *   - UMovieSceneTrack::GetAllSections / GetDisplayName.
+ *     GetTickResolution / GetDisplayRate / GetPlaybackRange (read).
+ *   - UMovieScene::AddPossessable for the binding.
+ *   - UMovieSceneTrack::GetAllSections / GetDisplayName (read).
  *   - UMovieSceneSection::GetRange / HasStartFrame / HasEndFrame /
- *     GetInclusiveStartFrame / GetExclusiveEndFrame.
+ *     GetInclusiveStartFrame / GetExclusiveEndFrame (read).
  *   - UMovieScene::GetPossessableCount / GetPossessable /
- *     GetSpawnableCount / GetSpawnable.
+ *     GetSpawnableCount / GetSpawnable (read).
  *   - FMovieScenePossessable::GetGuid / GetName /
- *     GetPossessedObjectClass / GetParent.
- *   - FMovieSceneSpawnable::GetGuid / GetName / GetObjectTemplate.
+ *     GetPossessedObjectClass / GetParent (read).
+ *   - FMovieSceneSpawnable::GetGuid / GetName / GetObjectTemplate
+ *     (read).
+ *   - CreatePackage / NewObject / FAssetRegistryModule::AssetCreated /
+ *     UEditorAssetLibrary::SaveAsset for the create / save side.
  *
  * No code from the proprietary FlopAI plugin is used.
  */
@@ -85,4 +80,6 @@ public:
 
 private:
     TSharedPtr<FJsonObject> HandleSequencerInspect(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleCreateLevelSequence(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddPossessable(const TSharedPtr<FJsonObject>& Params);
 };
