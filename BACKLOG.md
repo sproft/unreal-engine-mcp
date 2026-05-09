@@ -804,6 +804,32 @@ ability" alongside `tag_registry_edit`.
   `UObjectHash.h`. Pairs with `cpp_source` for the "what does this
   UClass actually look like" question without leaving the
   reflection database.
+- `sound_asset_edit` (small) — Sound Cue authoring. Three ops keyed
+  by `op`:
+  - `create_sound_cue`: NewObject's a `USoundCue` at a `/Game/...`
+    path. Optional `sound_wave` parameter resolves the named
+    `USoundWave` and wires a single `USoundNodeWavePlayer` into the
+    cue's `FirstNode` slot, mirroring the editor's "right-click sound
+    wave -> Create Cue" shortcut. Without `sound_wave` the asset
+    ships with `FirstNode = nullptr` and a blank graph.
+  - `add_sound_node_wave_player`: resolves an existing
+    `USoundCue` and a target `USoundWave`, calls
+    `USoundCue::ConstructSoundNode<USoundNodeWavePlayer>`, binds the
+    wave through `USoundNodeWavePlayer::SetSoundWave`, and (when
+    `connect_to_root=true`, the default) writes the new node into
+    the cue's `FirstNode` slot. `LinkGraphNodesFromSoundNodes`
+    refreshes the editor graph so the SoundCue editor opens cleanly.
+  - `set_attenuation`: writes `AttenuationSettings` (the
+    `USoundAttenuation` ref on USoundBase) on a target `USoundCue`.
+    `attenuation` accepts a `/Game/...` path or null / empty string
+    to clear the override.
+  Cue + wave + attenuation lookups accept `/Game/...` paths or short
+  names (short-name resolution falls back to the asset registry's
+  per-class index). The full SoundCue node-graph authoring surface
+  (mixer, modulator, delay / loop / branch composites, attenuation
+  node, distance crossfade, random / sequence composites) remains
+  on the backlog. Backed entirely by classes from
+  `Engine/Classes/Sound/`; no new module deps required.
 
 ## Blueprint authoring (medium to large each)
 
@@ -1093,7 +1119,19 @@ helpers.
   `UMetaSoundBuilder` API), member defaults, preset support, and a
   `metasound_inspect` read-only counterpart that walks the asset's
   document and emits the node graph as a JSON edge list.
-- `sound_asset_edit` — SoundCue graphs.
+- `sound_asset_edit` (small variant ships in this fork) — three ops
+  on USoundCue assets: `create_sound_cue` (with optional initial
+  USoundNodeWavePlayer wired to a chosen USoundWave),
+  `add_sound_node_wave_player` (USoundCue::ConstructSoundNode +
+  SetSoundWave + optional FirstNode rebind), and `set_attenuation`
+  (USoundCue::AttenuationSettings rebind on the USoundBase shape).
+  Open follow-ons: the heavier graph-authoring branches (random /
+  sequence / mixer / modulator composites, attenuation-node
+  insertion with FAttenuationSettings overrides, delay / loop /
+  branch / concatenator composites, distance-crossfade authoring),
+  USoundClass + USoundMix asset edits, and a `sound_asset_inspect`
+  read-only counterpart that walks the cue's node graph and emits
+  it as a JSON tree.
 
 ## Procedural (large)
 

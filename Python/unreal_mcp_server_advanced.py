@@ -6506,6 +6506,100 @@ def unreal_api(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def sound_asset_edit(
+    op: str,
+    path: Optional[str] = None,
+    sound_cue: Optional[str] = None,
+    sound_wave: Optional[str] = None,
+    attenuation: Optional[str] = None,
+    connect_to_root: Optional[bool] = None,
+    overwrite: Optional[bool] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Sound Cue authoring (small variant).
+
+    Three ops, keyed by ``op``:
+
+        - ``create_sound_cue``: creates a new ``USoundCue`` at a
+          ``/Game/...`` package path. Optional ``sound_wave`` parameter
+          loads the named ``USoundWave`` and wires a single
+          ``USoundNodeWavePlayer`` into the cue's ``FirstNode`` slot,
+          mirroring the editor's "right-click sound wave -> Create Cue"
+          shortcut. Without ``sound_wave`` the asset ships with
+          ``FirstNode = nullptr`` and a blank graph.
+        - ``add_sound_node_wave_player``: resolves an existing
+          ``USoundCue`` and a target ``USoundWave``, calls the
+          ``USoundCue::ConstructSoundNode<USoundNodeWavePlayer>``
+          factory, binds the wave through ``SetSoundWave``, and
+          (when ``connect_to_root=true``, the default) writes the new
+          node into the cue's ``FirstNode`` slot.
+        - ``set_attenuation``: writes ``AttenuationSettings`` (the
+          ``USoundAttenuation`` ref on USoundBase) on a target
+          ``USoundCue``. ``attenuation`` accepts a ``/Game/...`` path
+          or null / empty string to clear the override.
+
+    The full SoundCue node-graph authoring surface (mixer, modulator,
+    delay / loop / branch composites, attenuation node, distance
+    crossfade) stays on the BACKLOG.
+
+    Args:
+        op: One of ``create_sound_cue`` (default),
+            ``add_sound_node_wave_player``, or ``set_attenuation``.
+        path: Target ``/Game/...`` package path. Required for
+            ``create_sound_cue``. For the other ops it can name the
+            target USoundCue.
+        sound_cue: Alternate name for the target USoundCue path. Used
+            by ``add_sound_node_wave_player`` and ``set_attenuation``
+            when ``path`` is not the cue.
+        sound_wave: ``/Game/...`` path or short name to a USoundWave.
+            Optional for ``create_sound_cue``; required for
+            ``add_sound_node_wave_player``.
+        attenuation: ``/Game/...`` path to a USoundAttenuation, or
+            null / empty string to clear. ``set_attenuation`` only.
+        connect_to_root: When true (default) the new wave player is
+            wired into FirstNode. False keeps it detached.
+        overwrite: Reuse an existing asset at the path on
+            ``create_sound_cue``. Default False.
+        save: Save the asset after the edit. Default True.
+
+    Returns:
+        Dict with ``operation`` + relevant id fields (``path`` /
+        ``sound_cue`` / ``sound_wave`` / ``attenuation``) +
+        ``saved`` flag. ``add_sound_node_wave_player`` also reports
+        the ``node_class`` / ``node_name`` of the constructed
+        wave-player node.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"op": op}
+    if path is not None:
+        params["path"] = path
+    if sound_cue is not None:
+        params["sound_cue"] = sound_cue
+    if sound_wave is not None:
+        params["sound_wave"] = sound_wave
+    if attenuation is not None:
+        # Empty string is the documented "clear the override" shape.
+        params["attenuation"] = attenuation
+    if connect_to_root is not None:
+        params["connect_to_root"] = connect_to_root
+    if overwrite is not None:
+        params["overwrite"] = overwrite
+    if save is not None:
+        params["save"] = save
+
+    try:
+        response = unreal.send_command("sound_asset_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"sound_asset_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

@@ -57,6 +57,7 @@
 #include "Commands/SproftPieTestBpCommands.h"
 #include "Commands/SproftMetaSoundEditCommands.h"
 #include "Commands/SproftUnrealApiCommands.h"
+#include "Commands/SproftSoundAssetEditCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -150,4 +151,5 @@ private:
 	TSharedPtr<FSproftPieTestBpCommands> SproftPieTestBp;
 	TSharedPtr<FSproftMetaSoundEditCommands> SproftMetaSoundEdit;
 	TSharedPtr<FSproftUnrealApiCommands> SproftUnrealApi;
+	TSharedPtr<FSproftSoundAssetEditCommands> SproftSoundAssetEdit;
 };
