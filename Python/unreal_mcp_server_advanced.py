@@ -3420,48 +3420,97 @@ def material_edit(
     value: Optional[Any] = None,
     save: bool = True,
     overwrite: bool = False,
+    material: Optional[str] = None,
+    expression_class: Optional[str] = None,
+    position: Optional[List[float]] = None,
+    properties: Optional[Dict[str, Any]] = None,
+    property: Optional[str] = None,
+    connect_to: Optional[str] = None,
+    connect_input: Optional[str] = None,
+    source: Optional[str] = None,
+    source_output: Optional[str] = None,
+    dest: Optional[str] = None,
+    dest_input: Optional[str] = None,
+    expression: Optional[str] = None,
+    recompile: bool = True,
 ) -> Dict[str, Any]:
     """
-    Small slice of material authoring: create materials and instances, or
-    set scalar / vector / texture overrides on a Material Instance Constant.
+    Material authoring. Supports asset creation, instance overrides, and
+    MaterialExpression-graph editing on a UMaterial.
 
-    Mirrors the constrained subset of the hosted Flop "material_edit" tool.
-    Three operations are supported in this first cut:
+    Operations:
 
         - "create_material": create a UMaterial with an optional Constant3
           base-colour driver wired into the BaseColor input.
-        - "create_material_instance_constant": create a UMaterialInstance
-          Constant pointing at a parent material or instance.
+        - "create_material_instance_constant": create a Material Instance
+          Constant pointing at a parent UMaterial / UMaterialInstance.
         - "set_instance_parameter": override scalar / vector / texture
-          parameters on a Material Instance Constant. The parameter type
-          is auto-detected from the supplied value, or pinned with the
-          parameter_type hint.
+          parameters on a Material Instance Constant.
+        - "add_expression": append a UMaterialExpression to a UMaterial.
+          Resolves the class from a short name ("multiply", "lerp",
+          "scalar_parameter", "texture_sample_parameter_2d", "time",
+          "panner", "constant", "constant3vector", "vector_parameter",
+          "one_minus", "saturate", "clamp", "fresnel", "power", "sine",
+          "cosine", "component_mask", "if", "make_material_attributes"),
+          a full ``/Script/Engine.UMaterialExpressionFoo`` path, or a
+          bare ``MaterialExpressionFoo`` class name. ``properties``
+          flat dict applies through ``FProperty::ImportText`` so callers
+          can land ``ConstA``, ``ConstB``, ``ParameterName``,
+          ``DefaultValue`` etc. on creation. Optional one-shot
+          connection: ``property`` connects the new expression to a
+          material attribute (BaseColor, EmissiveColor, etc.); or
+          ``connect_to`` + ``connect_input`` connects it into another
+          named expression's input pin.
+        - "connect_expressions": connect a source expression to either a
+          material attribute (``property``) or another expression
+          (``dest`` + ``dest_input``). ``source_output`` defaults to the
+          primary output.
+        - "set_expression_property": apply a flat property dict to a
+          named expression on the material (e.g. tweak ``ConstA`` on a
+          Multiply or ``ParameterName`` on a Scalar Parameter).
 
-    Authoring expression graphs and Material Parameter Collections is
-    deferred to a later pass; see BACKLOG.md.
+    Material Functions and Material Parameter Collections remain on the
+    backlog.
 
     Args:
-        operation: "create_material", "create_material_instance_constant",
-            or "set_instance_parameter".
-        package_path: For create operations: absolute /Game/ path for the
-            new asset, e.g. "/Game/Materials/M_Default".
-        base_color: For create_material: optional [r, g, b] or [r, g, b, a]
-            linear colour wired into BaseColor through a Constant3Vector
-            expression. Skip to leave BaseColor unwired.
-        parent_material: For create_material_instance_constant: absolute
-            path to the parent UMaterialInterface.
-        material_instance: For set_instance_parameter: absolute path to the
-            target UMaterialInstanceConstant.
-        parameter_name: For set_instance_parameter: parameter FName.
-        parameter_type: For set_instance_parameter: optional hint of
-            "scalar", "vector" / "color", or "texture". Defaults to
-            auto-detect from the value.
-        value: For set_instance_parameter: the override value. Accepts a
-            number (scalar), a [r, g, b, a] array or {"r":..,"g":..} dict
-            (vector), or a texture asset path string (texture).
+        operation: One of the operation names listed above.
+        package_path: For create operations: absolute /Game/ asset path.
+        base_color: For create_material: [r, g, b(, a)] linear colour wired
+            into BaseColor through a Constant3Vector expression.
+        parent_material: For create_material_instance_constant: parent
+            material asset path.
+        material_instance: For set_instance_parameter: target Material
+            Instance Constant path.
+        parameter_name: Parameter FName for set_instance_parameter.
+        parameter_type: Optional "scalar" / "vector" / "color" / "texture"
+            hint for set_instance_parameter.
+        value: Parameter value for set_instance_parameter.
         save: Save the asset after the change. Defaults True.
-        overwrite: For create operations: overwrite existing assets at
-            package_path. Defaults False.
+        overwrite: For create operations: overwrite existing assets.
+        material: Target UMaterial path for the expression-graph ops
+            (add_expression, connect_expressions, set_expression_property).
+        expression_class: Short name, full /Script path, or bare class
+            name for add_expression.
+        position: Optional [x, y] override for the new expression's
+            graph position. When omitted, the position cascades down so
+            stacked nodes do not pile up.
+        properties: Flat property dict applied through
+            ``FProperty::ImportText``. Used by add_expression and
+            set_expression_property.
+        property: For add_expression / connect_expressions: target
+            material attribute (BaseColor, Roughness, etc.).
+        connect_to: For add_expression: another named expression on the
+            material to connect into.
+        connect_input: For add_expression / connect_expressions:
+            destination input name on the connected expression.
+        source: For connect_expressions: source expression FName.
+        source_output: Output pin name on the source expression
+            (default: primary output).
+        dest: For connect_expressions: destination expression FName.
+        dest_input: Input pin name on the destination expression.
+        expression: For set_expression_property: target expression FName.
+        recompile: For expression-graph ops: recompile the material on
+            success. Defaults True.
 
     Returns:
         Dictionary with operation-specific metadata on success.
@@ -3485,6 +3534,33 @@ def material_edit(
         params["parameter_type"] = parameter_type
     if value is not None:
         params["value"] = value
+    if material is not None:
+        params["material"] = material
+    if expression_class is not None:
+        params["class"] = expression_class
+    if position is not None:
+        params["position"] = position
+    if properties is not None:
+        params["properties"] = properties
+    if property is not None:
+        params["property"] = property
+    if connect_to is not None:
+        params["connect_to"] = connect_to
+    if connect_input is not None:
+        params["connect_input"] = connect_input
+    if source is not None:
+        params["source"] = source
+    if source_output is not None:
+        params["source_output"] = source_output
+    if dest is not None:
+        params["dest"] = dest
+    if dest_input is not None:
+        params["dest_input"] = dest_input
+    if expression is not None:
+        params["expression"] = expression
+    if recompile is False:
+        # The C++ default is true; only forward when caller wants false.
+        params["recompile"] = False
 
     try:
         response = unreal.send_command("material_edit", params)

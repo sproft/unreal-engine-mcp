@@ -8,11 +8,12 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-This pass shipped `bp_nodes`, `bp_wire`, and `material_inspect`. Together
-they let a caller author non-trivial Blueprint logic in three calls
-(`bp_nodes` -> `bp_wire` -> `compile_blueprint`) and diagnose a
-material before mutating it, which closes the biggest two BACKLOG gaps
-flagged on the prior pass.
+The most recent pass shipped `search_assets`, `asset_references`, and the
+`material_edit` expression-graph trio (`add_expression`,
+`connect_expressions`, `set_expression_property`). Together they close
+the read-only "what assets exist / who references this asset" gaps and
+let a caller author a non-trivial UMaterial graph through narrow,
+declarative ops without touching `python_execution`.
 
 ## Shipped in this fork
 
@@ -49,12 +50,23 @@ flagged on the prior pass.
   `label_pattern`, single `tag`, and an optional spherical spatial filter
   with a result limit. Returns class / name / label / location / rotation /
   scale / tags / mobility / hidden flags per actor.
-- `material_edit` (small) — three operations: `create_material` (with an
+- `material_edit` (small) — six operations: `create_material` (with an
   optional `Constant3Vector` base-colour driver wired into `BaseColor`),
-  `create_material_instance_constant` from a parent UMaterialInterface, and
+  `create_material_instance_constant` from a parent UMaterialInterface,
   `set_instance_parameter` for scalar / vector / texture overrides on a
-  UMaterialInstanceConstant. Expression-graph authoring and Material
-  Parameter Collections remain in BACKLOG.md.
+  UMaterialInstanceConstant, plus the expression-graph trio
+  `add_expression` (short-name resolver against the most-used
+  UMaterialExpression* subclasses, optional `properties` dict applied
+  through `FProperty::ImportText`, optional one-shot connection to a
+  material attribute or another expression input),
+  `connect_expressions` (source expression output -> destination
+  expression input or material attribute through
+  `UMaterialEditingLibrary::ConnectMaterialExpressions` /
+  `ConnectMaterialProperty`), and `set_expression_property` (flat
+  property dict applied to a named expression). Each expression-graph
+  op recompiles + saves on success unless `recompile=false` or
+  `save=false` is passed. Material Functions and Material Parameter
+  Collections remain on the backlog.
 - `actor_inspect` (small) — read-only counterpart to `scene_query` for a
   single actor. Resolves the actor by `GetName()` first and then by
   Outliner label, returns transform / tags / replication snapshot / root
@@ -310,11 +322,14 @@ helpers.
   per-expression connected-output dump (which output of which child
   drives each input of this expression), and an `include_graph`
   toggle that returns the expression graph as an edge list.
-- `material_edit` (small variant ships in this fork: create material with
-  a Constant3Vector base colour, create material instance constant, and
-  set scalar / vector / texture parameters on an instance). Pending: full
-  MaterialExpression-graph authoring, Material Functions, and Material
-  Parameter Collections.
+- `material_edit` (small variant ships in this fork: create material
+  with a Constant3Vector base colour, create material instance
+  constant, set scalar / vector / texture parameters on an instance,
+  plus the expression-graph trio `add_expression` /
+  `connect_expressions` / `set_expression_property`). Pending:
+  Material Functions and Material Parameter Collections, plus a
+  bulk-add variant that creates several expressions in one call so a
+  caller can describe a small graph declaratively.
 
 ## VFX (large each)
 
@@ -400,25 +415,19 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`bp_nodes`, `bp_wire`, `material_inspect`), the
-next set should pick up:
+After the latest pass (`search_assets`, `asset_references`, plus the
+`material_edit` expression trio), the next set should pick up:
 
-1. `material_edit` (expressions) — extend the small variant with
-   MaterialExpression graph authoring. Three ops are the right cut:
-   `add_expression` (short-name resolver against
-   `UMaterialExpressionConstant3Vector` / `Multiply` / `Add` / `Lerp` /
-   `TextureSampleParameter2D` / `ScalarParameter` / etc., going
-   through `UMaterialEditingLibrary::CreateMaterialExpression`),
-   `connect_expressions` (source expression + output name -> dest
-   expression + input name, going through
-   `UMaterialEditingLibrary::ConnectMaterialExpressions`), and
-   `set_expression_property` (constant value, parameter name, default
-   scalar applied through `FProperty::ImportText`).
-2. `bp_function_create` — function-graph creation with typed inputs /
+1. `bp_function_create` — function-graph creation with typed inputs /
    outputs in a single call. The local repo has `create_function`
    plus `add_function_input` / `add_function_output`; the gap is a
    declarative one-call wrapper that lays the function down with its
    signature in one round trip.
+2. `material_edit` (bulk expressions) — extend the new expression-graph
+   ops with a single-call form that takes a list of expression specs
+   plus a list of edges and lays the small graph down in one shot. Cuts
+   the round-trip count for typical "build me a panner-driven UV chain"
+   asks.
 3. `niagara_inspect` — read-only Niagara dump (system / emitter list,
    module list per emitter, parameter readback). Pairs with
    `material_inspect` for the VFX side.
