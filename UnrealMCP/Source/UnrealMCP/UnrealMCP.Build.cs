@@ -64,7 +64,8 @@ public class UnrealMCP : ModuleRules
 				"IKRig",              // For UIKRetargeter / FRetargetChainMapping / FInstancedStruct ops (Sproft ik_retarget)
 				"GeometryCollectionEngine", // For UGeometryCollection (Sproft chaos_edit)
 				"Chaos",              // For FGeometryCollection / FTransformCollection managed-array data (Sproft chaos_edit)
-				"ImageWrapper"        // For IImageWrapperModule PNG decode (Sproft landscape_edit)
+				"ImageWrapper",       // For IImageWrapperModule PNG decode (Sproft landscape_edit)
+				"PCG"                 // For UPCGGraph / UPCGNode / UPCGPin / UPCGEdge (Sproft pcg_graph_edit)
 			}
 		);
 

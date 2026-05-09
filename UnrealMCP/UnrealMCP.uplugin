@@ -50,6 +50,10 @@
 		{
 			"Name": "IKRig",
 			"Enabled": true
+		},
+		{
+			"Name": "PCG",
+			"Enabled": true
 		}
 	]
 }

@@ -6950,6 +6950,81 @@ def landscape_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def pcg_graph_edit(
+    graph: str,
+    op: Optional[str] = None,
+    include_pins: Optional[bool] = None,
+    include_edges: Optional[bool] = None,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Inspect a UPCGGraph asset (read-only first slice).
+
+    Walks the graph's public node list, the per-node input / output
+    pins, the graph's exposed input / output pins, and a flat edge
+    list stitched from each pin's ``Edges`` array. Edge endpoints
+    are surfaced as ``from`` (upstream) / ``to`` (downstream) so
+    callers do not have to remember PCG's reversed pin label
+    convention (UPCGEdge::InputPin is the upstream side and
+    UPCGEdge::OutputPin is the downstream side).
+
+    One op (``inspect``, default). Edit-side ops (add / remove
+    node, add / remove edge, rename pin) stay in BACKLOG.
+
+    Args:
+        graph: Short asset name or ``/Game/...`` UPCGGraph path.
+            Required.
+        op: Operation discriminator. Only ``inspect`` (default) is
+            supported.
+        include_pins: When True (default), per-node ``inputs`` /
+            ``outputs`` arrays carry full pin descriptors. False
+            keeps only the pin counts.
+        include_edges: When True (default), the response carries a
+            top-level ``edges`` array.
+        max_nodes: Cap on the per-node walk. Default 1024.
+        max_edges: Cap on the edge walk. Default 4096.
+
+    Returns:
+        Dict with ``operation``, ``name``, ``path``, ``class``, the
+        ``nodes`` array (each with ``index``, ``name``, ``title``,
+        ``settings_class`` / ``settings_class_path``, ``position``
+        (``{x, y}``), ``input_pin_count`` / ``output_pin_count``,
+        plus optional ``inputs`` / ``outputs`` arrays), the
+        ``graph_inputs`` / ``graph_outputs`` blocks for the graph's
+        exposed pin surface, and the ``edges`` array (each row
+        ``{from_node, from_pin, to_node, to_pin}`` where
+        ``from_node`` / ``to_node`` are integer indices into
+        ``nodes`` (-1 for the graph input node, -2 for the graph
+        output node)). Aggregate counts (``node_count`` /
+        ``node_count_total`` / ``nodes_truncated`` plus the
+        ``edge_*`` parallel triple) sit alongside the arrays.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"graph": graph}
+    if op is not None:
+        params["op"] = op
+    if include_pins is not None:
+        params["include_pins"] = include_pins
+    if include_edges is not None:
+        params["include_edges"] = include_edges
+    if max_nodes is not None:
+        params["max_nodes"] = max_nodes
+    if max_edges is not None:
+        params["max_edges"] = max_edges
+
+    try:
+        response = unreal.send_command("pcg_graph_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"pcg_graph_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Sproft fork addition: skills (workflow-doc lookup)
 #

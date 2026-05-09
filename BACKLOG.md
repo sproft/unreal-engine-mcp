@@ -1020,6 +1020,31 @@ ability" alongside `tag_registry_edit`.
   `unreal_api` for the runtime-class side and `cpp_source` for the
   in-engine-source side; the workflow docs sit one level higher
   for "what is the canonical pattern for X" questions.
+- `pcg_graph_edit` (small, read-only first slice) — inspect a
+  `UPCGGraph` asset. Walks `UPCGGraph::GetNodes()`, the per-node
+  input / output pins, the graph's exposed input / output pin
+  surface (`GetInputNode` / `GetOutputNode`), and a flat edge
+  list stitched from each pin's `Edges` array. Edges are
+  surfaced as `from` (upstream) / `to` (downstream) so callers
+  do not have to remember PCG's reversed pin label convention
+  (UPCGEdge::InputPin is the upstream side, UPCGEdge::OutputPin
+  is the downstream side). Per-node fields cover `index`, `name`,
+  `title` through `UPCGNode::GetNodeTitle(EPCGNodeTitleType::ListView)`,
+  settings class + path through `UPCGNode::GetSettings()`, 2D
+  editor `position` through `GetNodePosition`, and a pin
+  descriptor list (`label`, `type` through
+  `FPCGDataTypeIdentifier::ToString()`, `usage` (normal / loop /
+  feedback / dependency_only), `status` (normal / required /
+  advanced / override_or_user_param), `multiple_data`,
+  `multiple_connections`, `invisible`, `edge_count`). The graph
+  IO node uses sentinel indices (-1 for `GetInputNode`, -2 for
+  `GetOutputNode`) so a downstream consumer can branch cleanly.
+  Filters: `include_pins` (default true), `include_edges`
+  (default true), `max_nodes` (default 1024), `max_edges`
+  (default 4096). Adds `PCG` to PublicDependencyModuleNames and
+  the PCG plugin to the uplugin manifest. Edit-side ops (add /
+  remove node, add / remove edge, rename pin, mutate per-node
+  settings) stay on this list.
 - `landscape_edit` (small variant retry) — multi-op tool for
   ALandscape authoring, keyed by `op`. Two ops:
   - `set_landscape_material`: writes the proxy's master
@@ -1407,7 +1432,19 @@ helpers.
 
 ## Procedural (large)
 
-- `pcg_graph_edit` — PCG graph authoring.
+- `pcg_graph_edit` (small read-only first slice ships in this fork) —
+  inspect a `UPCGGraph` asset. Walks `UPCGGraph::GetNodes` plus per-node
+  pins (with type / status / usage tokens off `FPCGPinProperties` and
+  `FPCGDataTypeIdentifier::ToString`), the graph's exposed input /
+  output pin surface, and a flat edge list with `from` / `to` edge
+  endpoints (PCG's UPCGEdge stores upstream as `InputPin` and
+  downstream as `OutputPin`; we normalise to the editor convention).
+  Open follow-ons: edit-side ops (add / remove node, add / remove
+  edge, rename pin, mutate per-node settings through the per-settings
+  reflection surface), graph parameter readout
+  (`UPCGGraph::UserParameters` instanced property bag), and a
+  follow-on read of the per-node `bIsDisabled` / `bDebug` editor
+  flags.
 
 ## Data assets (small to medium each, on the asset_factory umbrella)
 
