@@ -86,4 +86,5 @@ public:
 
 private:
     TSharedPtr<FJsonObject> HandleAnimationGraphInspect(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddState(const TSharedPtr<FJsonObject>& Params);
 };

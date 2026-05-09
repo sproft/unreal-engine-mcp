@@ -7500,41 +7500,50 @@ def animation_graph_edit(
     max_states_per_machine: Optional[int] = None,
     max_transitions_per_machine: Optional[int] = None,
     max_anim_nodes: Optional[int] = None,
+    state_machine: Optional[str] = None,
+    state_name: Optional[str] = None,
+    position: Optional[Dict[str, Any]] = None,
+    compile: Optional[bool] = None,
+    save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Inspect a UAnimBlueprint's compiled state machines plus the
-    flat anim-graph node list (read-only first slice).
+    Inspect or mutate a UAnimBlueprint's state machines (read +
+    edit slice).
 
     Pairs with ``animation_inspect``, which already returns a
     state-machine summary keyed off
     ``UAnimBlueprintGeneratedClass::BakedStateMachines``. This
-    slice goes one level deeper:
+    slice goes one level deeper for inspect, plus a focused-minimum
+    edit op for spawning a new state on a chosen state machine.
 
-    - per state machine: name + initial-state index + the per-
-      state details (FName, state-root-node index, notify
-      indices, conduit / always-reset flags, exit-transition
-      table) and the per-machine transitions array
-      (previous_state -> next_state with crossfade duration,
-      blend mode, logic type, custom curve / blend profile
-      paths).
-    - the flat AnimGraph node-property list off
-      ``UAnimBlueprintGeneratedClass::AnimNodeProperties``: each
-      entry is ``{index, struct_type, struct_path}`` with the
-      anim node's UScriptStruct (e.g. ``FAnimNode_StateMachine``,
-      ``FAnimNode_BlendListByEnum``, ``FAnimNode_SequencePlayer``).
+    Operations:
+        - ``inspect`` (default): per state machine returns name +
+          initial-state index + per-state details (FName, state-
+          root-node index, notify indices, conduit / always-reset
+          flags, exit-transition table) and the per-machine
+          transitions array. Plus the flat AnimGraph node-property
+          list off ``UAnimBlueprintGeneratedClass::AnimNodeProperties``.
+        - ``add_state``: spawns a new ``UAnimStateNode`` on the
+          chosen state machine's ``UAnimationStateMachineGraph``
+          through the public schema-action template
+          ``FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate``.
+          The node's ``BoundGraph`` (the per-state AnimGraph that
+          holds the state's pose subtree) is wired by
+          ``PostPlacedNewNode``. The duplicate-name guard surfaces
+          a clear error rather than silently spawning a same-named
+          state.
 
-    The AnimBP must compile at least once for the baked surface
-    to populate; uncompiled assets return a ``compiled=false``
-    flag with empty arrays.
-
-    One op (``inspect``, default). Edit-side ops (state machine
-    create / mutate, anim-graph node add / connect, link a Linked
-    Anim Graph by tag) stay in BACKLOG.
+    The AnimBP must compile at least once for the baked-state-
+    machine surface to populate; uncompiled assets return a
+    ``compiled=false`` flag with empty arrays. The ``add_state``
+    edit op walks the editor-only state-machine graph instead of
+    the baked struct table, so it works on uncompiled AnimBPs too.
 
     Args:
         anim_bp: Short asset name or ``/Game/...`` UAnimBlueprint
             path. Required.
-        op: Operation discriminator. Only ``inspect`` (default).
+        op: Operation discriminator. ``inspect`` (default) or
+            ``add_state``.
         include_state_machines: Default True.
         include_states: Default True. Per-state details.
         include_transitions: Default True. Per-machine transition
@@ -7549,15 +7558,28 @@ def animation_graph_edit(
             per machine. Default 1024.
         max_anim_nodes: Cap on the AnimGraph node walk. Default
             2048.
+        state_machine: ``add_state`` only. The target state
+            machine name (matched case-insensitive against
+            ``UAnimGraphNode_StateMachineBase::GetStateMachineName``).
+        state_name: ``add_state`` only. The new state's FName.
+        position: ``add_state`` only. ``{"x": 0, "y": 0}`` 2D
+            editor position. Defaults to 0,0.
+        compile: ``add_state`` only. Recompile the AnimBP after
+            the edit. Default True.
+        save: Mutating ops. Save the AnimBP to disk. Default True.
 
     Returns:
-        Dict with asset metadata (``name`` / ``path`` / ``class``
-        / ``parent_class`` / ``parent_class_path`` /
-        ``target_skeleton_path`` / ``is_template`` /
-        ``compiled``), aggregate counts (``state_machine_count``
-        / ``anim_node_count``), the ``state_machines`` array, and
-        the ``anim_nodes`` flat array. Each list carries a
-        parallel ``*_truncated`` flag.
+        For ``inspect``: dict with asset metadata (``name`` /
+        ``path`` / ``class`` / ``parent_class`` /
+        ``parent_class_path`` / ``target_skeleton_path`` /
+        ``is_template`` / ``compiled``), aggregate counts
+        (``state_machine_count`` / ``anim_node_count``), the
+        ``state_machines`` array, and the ``anim_nodes`` flat
+        array.
+        For ``add_state``: dict with ``operation`` /
+        ``anim_bp`` / ``state_machine`` / ``state_name`` /
+        ``state_label`` / ``bound_graph`` / ``compiled`` /
+        ``saved``.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -7582,6 +7604,16 @@ def animation_graph_edit(
         params["max_transitions_per_machine"] = max_transitions_per_machine
     if max_anim_nodes is not None:
         params["max_anim_nodes"] = max_anim_nodes
+    if state_machine is not None:
+        params["state_machine"] = state_machine
+    if state_name is not None:
+        params["state_name"] = state_name
+    if position is not None:
+        params["position"] = position
+    if compile is not None:
+        params["compile"] = compile
+    if save is not None:
+        params["save"] = save
 
     try:
         response = unreal.send_command("animation_graph_edit", params)
