@@ -5867,13 +5867,13 @@ def pie_test_scene(
     assertions: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    Scene-state assertion harness (minimum cut).
+    Scene-state assertion harness.
 
     Runs a list of assertion specs against the active editor world and
     returns a per-assertion pass / fail record plus aggregate counts.
-    The minimum cut we ship here does not drive Play in Editor; it
-    answers each supported assertion statically against the editor
-    world. Two assertion kinds are supported:
+    Does not drive Play in Editor. Answers each supported assertion
+    statically against the editor world. Four assertion kinds are
+    supported:
 
         - ``actor_exists``: ``target`` is an actor name. Pass = an actor
           with that ``GetName()`` or Outliner label is present.
@@ -5882,9 +5882,15 @@ def pie_test_scene(
           ``tolerance`` (default 1.0 cm) is the pass radius. Pass = the
           resolved actor's ``GetActorLocation`` is within ``tolerance``
           of ``expected``.
-
-    Future passes will add the kinds that need a running PIE world
-    (``var_equals``, ``actor_overlapping_tag``, etc.).
+        - ``actor_overlapping_tag``: ``target`` is an actor name,
+          ``expected`` is an FName tag string. Pass = the resolved
+          actor's ``Tags`` array contains that FName.
+        - ``var_equals``: ``target`` is an actor name, ``expected``
+          is a ``{var, value}`` dict. Pass = the resolved actor's
+          UPROPERTY (looked up by FName) ImportText-matches the
+          canonicalized representation of ``value``. Works against
+          transform fields, gameplay tags, FString fields, and any
+          other Blueprint-exposed variable.
 
     Args:
         assertions: Array of assertion specs. Each entry is a dict
@@ -5896,7 +5902,8 @@ def pie_test_scene(
         ``all_passed``, and a ``results`` array. Each result row
         carries ``index``, ``kind``, ``target``, ``passed`` flag,
         optional ``actual`` / ``expected`` / ``delta`` /
-        ``tolerance`` for distance-based kinds, and ``message``.
+        ``tolerance`` / ``var`` / ``property_class`` for the
+        relevant kinds, and ``message``.
     """
     unreal = get_unreal_connection()
     if not unreal:

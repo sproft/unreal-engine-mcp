@@ -4,13 +4,10 @@
 #include "Json.h"
 
 /**
- * Sproft fork addition: pie_test_scene (minimum cut)
+ * Sproft fork addition: pie_test_scene (assertion kinds)
  *
- * Scene-state assertion harness. The hosted Flop tool surface promised
- * a full PIE-driven scene assertion runner. The minimum cut we ship
- * here runs against the editor world directly, without driving Play in
- * Editor, and supports two assertion kinds that can both be answered
- * statically:
+ * Scene-state assertion harness. Runs against the editor world without
+ * driving Play in Editor. Four assertion kinds are supported:
  *
  *   - `actor_exists`: target = actor name (matched against GetName()
  *     first and then GetActorLabel() second). Pass = an actor with
@@ -19,11 +16,18 @@
  *     world-space location, optional `tolerance` = number (defaults
  *     to 1.0 cm). Pass = the resolved actor's GetActorLocation is
  *     within `tolerance` of the expected vector.
- *
- * The kinds that need a running PIE world (`var_equals` against a
- * Blueprint instance variable, `actor_overlapping_tag` for overlap-
- * driven gameplay assertions, etc.) are listed on BACKLOG.md and ship
- * in a later pass.
+ *   - `actor_overlapping_tag`: target = actor name, expected = an
+ *     FName tag string. Pass = the resolved actor's `Tags` array
+ *     contains that FName. Despite the historical "PIE-only" framing,
+ *     `AActor::Tags` is set in the editor world too, so this kind
+ *     answers statically against the loaded level.
+ *   - `var_equals`: target = actor name, expected = either a flat
+ *     `{var, value}` dict or a `{var, value}` row. Pass = the
+ *     resolved actor's UPROPERTY (looked up by FName) ImportText-
+ *     matches the canonicalized representation of `value`. Works
+ *     against any read-only actor property (transform fields,
+ *     Blueprint-exposed variables, gameplay tags, FString fields)
+ *     in the editor world without needing PIE.
  *
  * Inputs:
  *   - `assertions`: array of assertion specs. Each entry is a dict
@@ -49,6 +53,9 @@
  *   - AActor::GetName / GetActorLabel for the resolution path used by
  *     `scene_compose` / `actor_inspect`.
  *   - AActor::GetActorLocation for the location read.
+ *   - AActor::Tags array contains() check for the tag overlap.
+ *   - FProperty::FindPropertyByName + ImportText / ExportText for the
+ *     var_equals path.
  *
  * No code from the proprietary FlopAI plugin is used.
  */
