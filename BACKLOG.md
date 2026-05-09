@@ -8,8 +8,51 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped three new tool families that go wider
-into the remaining categories: `unreal_api` (reflection-driven query
+The most recent pass shipped four new tool families that go wider
+into the remaining categories: `ik_rig_edit` (read-only first slice
+over `UIKRigDefinition` paired with the existing `ik_retarget`),
+`chaos_edit` (read-only first slice over `UGeometryCollection`),
+`skills` (workflow-doc lookup over a curated `Python/skills/` index
+with `replication` / `enhanced-input` / `gameplay-tags` /
+`crafting-data-tables` pre-baked), and `niagara_edit` (ultra-minimum
+cut: one op `create_niagara_system` through
+`UNiagaraSystemFactoryNew::InitializeSystem(System, false)` — no
+emitters, no parameter store, no module / sim-stage authoring;
+breaks the persistent four-skip on the Niagara write side, the
+broader authoring surface stays on this list). `ik_rig_edit` walks
+the asset's public surface (preview mesh, retarget root, retarget
+chains with `start_bone` / `end_bone` / `ik_goal_name`, IK goals
+with current + initial transforms and position / rotation alpha)
+plus the polymorphic solver stack (each solver's struct type,
+enabled flag, optional `start_bone` / `end_bone`, a
+reflection-driven `settings` dict reflected off `GetSolverSettings()`
+plus the settings struct type, and a `bone_settings` array for
+solvers that gate `UsesCustomBoneSettings()` true). Filters:
+`include_solver_settings` / `include_bone_settings` / `max_chains` /
+`max_goals` / `max_solvers`. `chaos_edit` walks both the
+`UGeometryCollection` asset surface (geometry sources, simulation
+block with clustering / damage model / mass + density / removal
+surface, materials, Nanite block) and the underlying
+`FGeometryCollection` managed-array data (vertex / face / geometry /
+transform counts, per-fracture-level histogram with parallel
+cluster counts, max level + bone hierarchy depth, per-element
+SimulationType counts). Reaches through `FindAttribute<int32>(LevelAttribute, TransformGroup)`
+on the managed-array collection so legacy assets without level
+data degrade to "level info missing" rather than crashing. Adds
+GeometryCollectionEngine and Chaos to PublicDependencyModuleNames.
+`skills` indexes flat markdown files under `Python/skills/`; the
+`get` op returns one body, `list` returns every entry's slug + first
+H1, `search` is a case-insensitive substring filter over slug +
+title. Adding a new skill entry is a file-add, not a code change.
+`niagara_edit` ships the create-only branch through the editor-only
+`NiagaraEditor` PrivateDependencyModuleName so we link
+`UNiagaraSystemFactoryNew::InitializeSystem` without pulling
+`FNiagaraStackGraphUtilities` (NiagaraEditor private) into our
+public surface; an emitter-less system opens with a "no emitter"
+warning on the asset banner, which is the documented behaviour for
+this minimum-cut slice.
+
+The pass before that shipped three new tool families: `unreal_api` (reflection-driven query
 of the live UE5 type database), `sound_asset_edit` (small variant
 covering Sound Cue creation, wave-player append, and attenuation
 rebind), and `ik_retarget` (read-only first slice over the
@@ -884,6 +927,99 @@ ability" alongside `tag_registry_edit`.
   manifest. Edit-side ops (rebind source / target IK Rig, append op
   / remove op, set chain mapping pair, override retarget pose,
   profile management) remain on the backlog.
+- `ik_rig_edit` (small, read-only first slice) — inspect a
+  `UIKRigDefinition` asset. Pairs with `ik_retarget` for the rig
+  side of the retargeting pipeline. The 5.6 IK Rig refactor moved
+  the solver list onto a polymorphic op stack (`FInstancedStruct`
+  of `FIKRigSolverBase`-derived structs); the read-only slice walks
+  the asset's public surface plus the solver stack and reports
+  asset path / class, preview skeletal mesh path (when set),
+  retarget root bone (`Pelvis`), retarget chain list (each chain
+  `chain_name` / `start_bone` / `end_bone` / `ik_goal_name`),
+  IK goal list (each goal `goal_name` / `bone_name` / position
+  alpha / rotation alpha / current + initial transforms), the
+  solver stack (per-solver `index` / `struct_type` / `struct_path` /
+  `enabled` plus optional `start_bone` / `end_bone` for solvers
+  that use them, plus a reflection-driven `settings` dict reflected
+  off `GetSolverSettings()` and a `bone_settings` array for solvers
+  that use custom bone settings), and aggregate counts
+  (`chain_count`, `goal_count`, `solver_count`, `bone_setting_count`).
+  Filters: `include_solver_settings` (default true),
+  `include_bone_settings` (default true), `max_chains` /
+  `max_goals` / `max_solvers`. Reuses the IKRig dep already pulled
+  in for `ik_retarget`. Edit-side ops (rebind preview mesh, append /
+  remove solver, append / remove chain, rename retarget root,
+  override goal transform, mutate bone settings) remain on the
+  backlog.
+- `chaos_edit` (small, read-only first slice) — inspect a
+  `UGeometryCollection` asset. Walks both the asset's public
+  surface and the underlying `FGeometryCollection` managed-array
+  data and reports asset path / class, `is_empty` /
+  `has_visible_geometry` / `root_index` flags, the
+  `geometry_sources` array (each `{source_path, local_transform,
+  source_materials, split_components,
+  set_internal_from_material_index, add_internal_materials}`),
+  aggregate transform counts (`vertex_count` / `face_count` /
+  `geometry_count` / `transform_count` / `cluster_count` /
+  `rigid_count` / `none_sim_count`), the `max_level` + parallel
+  `bone_hierarchy_depth`, the per-fracture-level histogram
+  (`count_per_level` and parallel `cluster_count_per_level`), the
+  `simulation` block (clustering toggle, cluster group index, max
+  cluster level, `cluster_connection_type` token, `damage_model`
+  token, damage threshold list, per-cluster-only damage threshold
+  flag, minimum mass clamp, total mass, mass-as-density flag,
+  density toggles, removal surface with scale-on-removal /
+  remove-on-max-sleep / sleep + removal duration intervals, slow-
+  moving-as-sleeping toggle), the `materials` array (each entry's
+  path + class), the `nanite` block (enable + fallback + minimum
+  residency), and `embedded_geometry_count` /
+  `auto_instance_mesh_count` / `size_specific_data_count`
+  aggregates. Reaches the per-fracture-level data through
+  `FindAttribute<int32>(FTransformCollection::LevelAttribute,
+  FTransformCollection::TransformGroup)` on the managed-array
+  collection so legacy assets without level data degrade to "level
+  info missing" rather than crashing. Filters:
+  `include_geometry_sources` (default true),
+  `include_per_level_histogram` (default true), `max_sources` /
+  `max_materials`. Adds `GeometryCollectionEngine` + `Chaos` to
+  PublicDependencyModuleNames. Edit-side ops (the fracture /
+  authoring write side, dataflow driver) remain on the backlog.
+- `niagara_edit` (small, ultra-minimum cut) — one op:
+  `create_niagara_system`. NewObject's a `UNiagaraSystem` at a
+  `/Game/...` path through
+  `UNiagaraSystemFactoryNew::InitializeSystem(System, /*bCreateDefaultNodes=*/false)`.
+  No emitters, no parameter store mutations, no module / sim-stage
+  authoring. The bar this slice clears is "the persistent four-skip
+  is broken"; the broader Niagara authoring surface stays on this
+  list. Editor-side warning: a Niagara System with no emitters
+  opens cleanly in the Niagara editor but produces a "no emitter"
+  warning in the asset's status banner. That is by design for this
+  minimum-cut slice. Adds `NiagaraEditor` to the editor-only
+  `PrivateDependencyModuleNames` for the `InitializeSystem`
+  linkage; we deliberately bypass the
+  `bCreateDefaultNodes=true` path so we never have to pull
+  `FNiagaraStackGraphUtilities` (NiagaraEditor private) into our
+  public surface.
+- `skills` (small) — fetch on-demand workflow docs over a curated
+  index of short markdown files baked into this fork
+  (`Python/skills/*.md`). Each doc follows a four-section shape
+  (when to use, the canonical UE5 path, our wrappers in this fork,
+  gotchas) sized at 200 to 400 words. Three ops keyed by `op`:
+  `get` (default; returns the markdown body of one skill, with
+  topic-name normalisation handling `replication` /
+  `enhanced_input` / `Enhanced Input` / `replication.md`
+  interchangeably), `list` (returns every available topic with its
+  slug + first H1), and `search` (case-insensitive substring
+  search across topic slug + first H1). Pre-baked entries:
+  `replication` (multiplayer state sync, RPCs, lifetime props),
+  `enhanced-input` (Enhanced Input action / context / mapping),
+  `gameplay-tags` (Gameplay Tag registry and runtime queries), and
+  `crafting-data-tables` (DataTable + row struct patterns). The
+  tool reads markdown at request time so adding a new entry is a
+  file-add under `Python/skills/`, not a code change. Pairs with
+  `unreal_api` for the runtime-class side and `cpp_source` for the
+  in-engine-source side; the workflow docs sit one level higher
+  for "what is the canonical pattern for X" questions.
 
 ## Blueprint authoring (medium to large each)
 
@@ -1034,9 +1170,29 @@ helpers.
   readback (lit-sprite / mesh / ribbon settings), data-interface
   configuration dump beyond the type kind, and per-script binding
   list for the rapid-iteration parameter set.
-- `niagara_edit` — Niagara particle system editing.
+- `niagara_edit` (small ultra-minimum-cut variant ships in this fork) —
+  one op: `create_niagara_system` through
+  `UNiagaraSystemFactoryNew::InitializeSystem(System, /*bCreateDefaultNodes=*/false)`.
+  No emitters, no parameter store, no module / sim-stage authoring;
+  the asset opens in the Niagara editor with the documented "no
+  emitter" warning. Open follow-ons: emitter add (the
+  `FNiagaraEditorUtilities::AddEmitterToSystem` path that the
+  factory's `EmittersToAddToNewSystem` branch takes), parameter-
+  store mutations (`UNiagaraSystem::GetExposedParameters()` write
+  side), per-emitter sim-target / determinism flag writes, module
+  add through the per-emitter spawn / update script source, and a
+  `request_compile` op that drives `UNiagaraSystem::RequestCompile`
+  after the writes.
 - `niagara_script_edit` — reusable Niagara module authoring.
-- `chaos_edit` — Geometry Collection destruction setup.
+- `chaos_edit` (small read-only variant ships in this fork) —
+  inspect a `UGeometryCollection` asset. Returns geometry-source
+  list + per-fracture-level histogram + cluster info + bone
+  hierarchy depth + simulation block + materials + Nanite block.
+  Open follow-ons: the fracture / authoring write side (driver via
+  the `FFractureToolContext` API or the dataflow side under the
+  asset's `DataflowInstance`), per-instance damage threshold
+  override, fracture-level mutate / re-cluster ops, and per-bone
+  damage propagation tweaks.
 
 ## Animation (large each)
 
@@ -1064,7 +1220,21 @@ helpers.
   composite section authoring on UAnimMontage (slot tracks,
   sections, transitions), and per-notify property dict on add.
 - `animation_graph_edit` — AnimBP state machines, transitions, blend nodes.
-- `ik_rig_edit` — IK rig setup.
+- `ik_rig_edit` (small read-only first slice ships in this fork) —
+  inspect a `UIKRigDefinition` asset. Walks asset public surface
+  (preview mesh, retarget root, retarget chains with start / end
+  bone + IK goal name, IK goals with current / initial transforms +
+  position / rotation alpha) plus the polymorphic solver stack
+  (per-solver struct type, enabled flag, optional `start_bone` /
+  `end_bone`, reflection-driven `settings` dict reflected off
+  `GetSolverSettings()` plus the settings struct type, and a
+  `bone_settings` array for solvers gating `UsesCustomBoneSettings()`
+  true). Open follow-ons: the edit side (rebind preview mesh
+  through `IIKRigController`, append / remove solver via
+  `AddSolverToStack`, append / remove chain through
+  `AddRetargetChain`, rename retarget root, override goal
+  transform, mutate per-solver bone settings via
+  `SetBoneSettings`).
 - `ik_retarget` (small read-only variant ships in this fork) —
   inspect a UIKRetargeter asset. Walks the asset's public surface
   (source / target IK Rig paths, current source / target retarget
@@ -1282,62 +1452,94 @@ helpers.
   the full reflection surface for the project's enabled modules, and
   a `class_diff` op that compares two related UClasses (parent vs
   child, or two cousins) and emits the property / function delta.
-- `skills` — fetch on-demand workflow docs.
+- `skills` (small variant ships in this fork) — fetch on-demand
+  workflow docs over a curated `Python/skills/*.md` index. Three
+  ops keyed by `op`: `get` (default; returns one skill body),
+  `list` (returns every entry's slug + first H1), `search`
+  (case-insensitive substring filter). Pre-baked entries:
+  `replication`, `enhanced-input`, `gameplay-tags`,
+  `crafting-data-tables`. Open follow-ons: more pre-baked entries
+  (multiplayer-replication-graph, materials-mvvm, perf-budget),
+  per-skill front-matter for difficulty / area tags, and a
+  cross-skill `related` array so callers chain related docs in one
+  walk.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`unreal_api`, `sound_asset_edit` small
-variant, `ik_retarget` small read-only first slice), the next set
-should pick up:
+After the latest pass (`ik_rig_edit`, `chaos_edit`, `skills`,
+`niagara_edit` ultra-minimum cut), the next set should pick up:
 
-1. `ik_retarget` edit slice — rebind source / target IK Rig through
-   `UIKRetargeterController`, append op / remove op (the polymorphic
-   `FInstancedStruct` array on the asset), set chain mapping pair
-   on a chosen op, override retarget pose, and profile management
-   through `UIKRetargeter::GetProfileByName`. Plus the IK Rig side
-   for the same shape (chain definitions, goals, solvers, retarget
-   chain configuration) since both sit behind the IKRig dep we
-   just pulled in.
-2. `sound_asset_edit` heavier ops — composite-node insertion
+1. `ik_rig_edit` edit slice — rebind preview mesh, append /
+   remove solver via `UIKRigController::AddSolverToStack`, append /
+   remove retarget chain through `AddRetargetChain`, rename
+   retarget root, override goal transform, and mutate per-solver
+   bone settings via `SetBoneSettings`. Pairs with the
+   already-shipped `ik_retarget` read side and the IKRig dep we
+   already pulled in.
+2. `chaos_edit` edit slice — set / mutate per-fracture-level
+   damage threshold list, toggle clustering / per-cluster-only
+   damage threshold, write the simulation block (mass, density,
+   removal surface), and the heavier fracture authoring side
+   (driver via the dataflow asset under `DataflowInstance` or the
+   `FFractureToolContext` API).
+3. `niagara_edit` next-cut — emitter add through
+   `FNiagaraEditorUtilities::AddEmitterToSystem`, parameter store
+   write via `UNiagaraSystem::GetExposedParameters()`, per-emitter
+   sim-target / determinism flag writes, module add through the
+   per-emitter spawn / update script source, and a
+   `request_compile` op that drives `RequestCompile` after the
+   writes.
+4. `ik_retarget` edit slice — rebind source / target IK Rig
+   through `UIKRetargeterController`, append op / remove op (the
+   polymorphic `FInstancedStruct` array on the asset), set chain
+   mapping pair on a chosen op, override retarget pose, and
+   profile management through `UIKRetargeter::GetProfileByName`.
+5. `sound_asset_edit` heavier ops — composite-node insertion
    (random / sequence / mixer / modulator / delay / loop / branch /
    concatenator), attenuation-node insertion with FAttenuationSettings
    overrides, and distance-crossfade authoring. Plus a
    `sound_asset_inspect` read-only counterpart that walks the cue's
    node graph and emits it as a JSON tree paired with the existing
    create surface.
-3. `unreal_api` follow-ons — a `list_classes` op that enumerates
+6. `unreal_api` follow-ons — a `list_classes` op that enumerates
    every loaded UClass under a `/Script/Module.` namespace prefix,
    a recursive `find_in_subclasses` pass that aggregates properties /
    functions across one root class plus all its descendants, and a
    `class_diff` op that compares two related UClasses (parent vs
    child, or two cousins) and emits the property / function delta.
-4. `gas_edit` heavier ops — append a modifier to a UGameplayEffect
+7. `gas_edit` heavier ops — append a modifier to a UGameplayEffect
    with attribute target + ModifierOp + scalable-float magnitude,
    rebind cost / cooldown classes on a UGameplayAbility through the
    CDO, an attribute-default override path that writes through the
    CDO and recompiles the Blueprint, and a GameplayCue authoring
    slice (cue-tag set + level range + magnitude attribute).
-5. `behavior_tree` heavier edit ops — append a child task /
+8. `behavior_tree` heavier edit ops — append a child task /
    composite to a chosen parent, insert a decorator on a chosen
    child slot, append a service on a composite, and the full
    Blackboard key edit surface. Reuses the AIModule dep already
    pulled in.
-6. `sequencer_edit` heavier edit ops — track add (a chosen
+9. `sequencer_edit` heavier edit ops — track add (a chosen
    UMovieSceneTrack subclass), section add (with an explicit frame
    range), section move, spawnable creation, and camera-cut track
    creation. Reuses the MovieScene + LevelSequence deps.
-7. `metasound_edit` graph-authoring slice — add nodes / connect
-   pins through the `UMetaSoundBuilder` API, member-default writes,
-   and a `metasound_inspect` read-only counterpart that walks the
-   asset's document and emits the node graph as a JSON edge list.
-8. `pie_test_bp` heavier kinds — `function_returns` (invoke a
-   Blueprint function in PIE and assert on its return value),
-   `event_fired` (custom-event broadcast assertion in PIE), and
-   `component_default_equals` (one level deeper to a named
-   UActorComponent's UPROPERTY).
-9. `performance_audit` deep-dive captures — `stat startfile` /
-   `stat stopfile` for an offline `.ue4stats` chart, the FPSChart
-   histogram surface, and an Insights `.utrace` capture wrapper.
+10. `metasound_edit` graph-authoring slice — add nodes / connect
+    pins through the `UMetaSoundBuilder` API, member-default writes,
+    and a `metasound_inspect` read-only counterpart that walks the
+    asset's document and emits the node graph as a JSON edge list.
+11. `pie_test_bp` heavier kinds — `function_returns` (invoke a
+    Blueprint function in PIE and assert on its return value),
+    `event_fired` (custom-event broadcast assertion in PIE), and
+    `component_default_equals` (one level deeper to a named
+    UActorComponent's UPROPERTY).
+12. `performance_audit` deep-dive captures — `stat startfile` /
+    `stat stopfile` for an offline `.ue4stats` chart, the FPSChart
+    histogram surface, and an Insights `.utrace` capture wrapper.
+13. `skills` index expansion — pre-bake more workflow docs
+    (multiplayer-replication-graph, materials-mvvm, perf-budget,
+    landscape-painting, pcg-graph-essentials), per-skill front-
+    matter for difficulty / area tags, and a cross-skill
+    `related` array so callers can chain related docs in one
+    walk.
 
 `python_execution` still covers any operation we have not wrapped
 natively; prefer wrapping the high-frequency calls as dedicated tools
