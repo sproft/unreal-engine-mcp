@@ -6322,6 +6322,86 @@ def pie_test_bp(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def metasound_edit(
+    op: str,
+    path: str,
+    output_format: Optional[str] = None,
+    sample_rate: Optional[int] = None,
+    block_rate: Optional[float] = None,
+    overwrite: Optional[bool] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    MetaSound asset authoring (small variant).
+
+    Two ops, keyed by ``op``:
+
+        - ``create_metasound_source``: creates a new
+          ``UMetaSoundSource`` (an audio-output MetaSound) at a
+          ``/Game/...`` path. Optional ``output_format`` token
+          (``mono`` / ``stereo`` / ``quad`` / ``5_1`` / ``7_1``;
+          default stereo) plus optional ``sample_rate`` and
+          ``block_rate`` overrides land on the asset's OutputFormat /
+          SampleRateOverride / BlockRateOverride before InitAsset
+          wires the document.
+        - ``create_metasound_patch``: creates a new
+          ``UMetaSoundPatch`` (a reusable graph asset, no audio
+          output) at a ``/Game/...`` path.
+
+    Both ops route through ``UMetaSoundEditorSubsystem::GetChecked()``'s
+    public ``InitAsset`` + ``RegisterGraphWithFrontend`` so the new
+    asset has a fresh document plus an editor graph that opens cleanly
+    in the MetaSound editor.
+
+    The graph-authoring surface (add nodes, connect pins, set member
+    defaults) stays on the BACKLOG. That surface lives behind the
+    UMetaSoundBuilder API which has its own learning curve.
+
+    Args:
+        op: One of ``create_metasound_source`` (default) or
+            ``create_metasound_patch``.
+        path: Target ``/Game/...`` package path. Required.
+        output_format: One of ``mono`` / ``stereo`` / ``quad`` /
+            ``5_1`` / ``7_1``. Default stereo. ``create_source`` only.
+        sample_rate: Optional integer Hz. ``create_source`` only.
+            Zero keeps the device default.
+        block_rate: Optional float Hz. ``create_source`` only. Zero
+            keeps the device default.
+        overwrite: Reuse an existing asset at the path instead of
+            erroring. Default False.
+        save: Save the asset after the edit. Default True.
+
+    Returns:
+        Dict with ``operation`` + ``name`` + ``path`` + ``class`` +
+        the relevant create-op echo (``output_format`` /
+        ``sample_rate`` / ``block_rate`` for the source path) +
+        ``saved``.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"op": op, "path": path}
+    if output_format is not None:
+        params["output_format"] = output_format
+    if sample_rate is not None:
+        params["sample_rate"] = sample_rate
+    if block_rate is not None:
+        params["block_rate"] = block_rate
+    if overwrite is not None:
+        params["overwrite"] = overwrite
+    if save is not None:
+        params["save"] = save
+
+    try:
+        response = unreal.send_command("metasound_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"metasound_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

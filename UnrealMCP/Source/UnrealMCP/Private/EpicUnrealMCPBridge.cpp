@@ -96,6 +96,7 @@
 #include "Commands/SproftFoliageEditCommands.h"
 #include "Commands/SproftPerformanceAuditCommands.h"
 #include "Commands/SproftPieTestBpCommands.h"
+#include "Commands/SproftMetaSoundEditCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -150,6 +151,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftFoliageEdit = MakeShared<FSproftFoliageEditCommands>();
     SproftPerformanceAudit = MakeShared<FSproftPerformanceAuditCommands>();
     SproftPieTestBp = MakeShared<FSproftPieTestBpCommands>();
+    SproftMetaSoundEdit = MakeShared<FSproftMetaSoundEditCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -201,6 +203,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftFoliageEdit.Reset();
     SproftPerformanceAudit.Reset();
     SproftPieTestBp.Reset();
+    SproftMetaSoundEdit.Reset();
 }
 
 // Initialize subsystem
@@ -567,6 +570,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("pie_test_bp"))
             {
                 ResultJson = SproftPieTestBp->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("metasound_edit"))
+            {
+                ResultJson = SproftMetaSoundEdit->HandleCommand(CommandType, Params);
             }
             else
             {

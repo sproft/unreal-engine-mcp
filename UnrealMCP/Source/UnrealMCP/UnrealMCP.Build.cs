@@ -59,7 +59,8 @@ public class UnrealMCP : ModuleRules
 				"LevelSequence",      // For ULevelSequence (Sproft sequencer_edit)
 				"EngineSettings",     // For UGameMapsSettings (Sproft project_context); Projects is already in PrivateDependencyModuleNames below
 				"RenderCore",         // For GGameThreadTime / GRenderThreadTime / GRHIThreadTime (Sproft performance_audit)
-				"RHI"                 // For GGPUFrameTime (Sproft performance_audit)
+				"RHI",                // For GGPUFrameTime (Sproft performance_audit)
+				"MetasoundEngine"     // For UMetaSoundSource / UMetaSoundPatch (Sproft metasound_edit)
 			}
 		);
 
@@ -87,7 +88,8 @@ public class UnrealMCP : ModuleRules
 					"BlueprintEditorLibrary", // For Blueprint utilities
 					"MaterialEditor",      // For UMaterialEditingLibrary (Sproft material_edit)
 					"GameplayTagsEditor",  // For IGameplayTagsEditorModule (Sproft tag_registry_edit)
-					"AnimationBlueprintLibrary" // For UAnimationBlueprintLibrary (Sproft animation_edit)
+					"AnimationBlueprintLibrary", // For UAnimationBlueprintLibrary (Sproft animation_edit)
+					"MetasoundEditor"      // For UMetaSoundEditorSubsystem (Sproft metasound_edit)
 				}
 			);
 		}
