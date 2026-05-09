@@ -4720,6 +4720,100 @@ def bp_commit(
 
 
 @mcp.tool()
+def bp_function_create(
+    blueprint: str,
+    function_name: str,
+    inputs: Optional[List[Dict[str, Any]]] = None,
+    outputs: Optional[List[Dict[str, Any]]] = None,
+    pure: Optional[bool] = None,
+    category: Optional[str] = None,
+    keywords: Optional[str] = None,
+    tooltip: Optional[str] = None,
+    call_in_editor: Optional[bool] = None,
+    compile: Optional[bool] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Create a new Blueprint function with a typed signature in one call.
+
+    Wraps `FBlueprintEditorUtils::CreateNewGraph` plus the
+    FunctionEntry / FunctionResult pin authoring so a designer does not
+    need to round-trip through ``create_function`` followed by N
+    ``add_function_input`` / ``add_function_output`` calls.
+
+    Args:
+        blueprint: Short asset name or full ``/Game/...`` Blueprint path.
+        function_name: FName for the new graph. Must be a valid C++
+            identifier (alpha or underscore start, alphanumeric or
+            underscore body).
+        inputs: Optional list of ``{name, type}`` entries placed on the
+            FunctionEntry node. Each entry may also include
+            ``is_array``, ``is_reference``, and ``default``.
+        outputs: Optional list of ``{name, type}`` entries placed on the
+            FunctionResult node. Same extras as ``inputs``.
+        pure: When True marks the function as Pure
+            (``FUNC_BlueprintPure`` on the FunctionEntry's extra flags).
+        category: Sets the function's Category metadata.
+        keywords: Sets the function's Keywords metadata.
+        tooltip: Sets the function's tooltip metadata.
+        call_in_editor: When True, sets the FunctionEntry's
+            ``bCallInEditor`` flag.
+        compile: Compile the Blueprint after the function is laid down.
+            Defaults True.
+        save: Save the asset to disk after compile. Defaults True.
+
+    Type tokens accepted (mirrors ``bp_variable``):
+        - Scalars: bool, int, int64, byte, float, double, string, name, text.
+        - Built-in structs: vector, vector2d, rotator, transform, color,
+          linear_color.
+        - Object refs: full ``/Script/Module.ClassName`` paths.
+        - Blueprint class refs: ``/Game/...`` paths (auto-suffixed ``_C``).
+        - Struct paths: ``struct:/Script/...`` or ``struct:/Game/...``.
+
+    Returns:
+        Dict with ``function_name``, ``graph_name`` (the engine
+        auto-suffixes when a collision sneaks in, though this tool
+        rejects exact name collisions up front), ``entry_node``,
+        ``result_node`` (when outputs were declared), plus
+        ``inputs_added`` / ``outputs_added`` arrays describing each
+        requested pin.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "blueprint": blueprint,
+        "function_name": function_name,
+    }
+    if inputs is not None:
+        params["inputs"] = inputs
+    if outputs is not None:
+        params["outputs"] = outputs
+    if pure is not None:
+        params["pure"] = pure
+    if category is not None:
+        params["category"] = category
+    if keywords is not None:
+        params["keywords"] = keywords
+    if tooltip is not None:
+        params["tooltip"] = tooltip
+    if call_in_editor is not None:
+        params["call_in_editor"] = call_in_editor
+    if compile is not None:
+        params["compile"] = compile
+    if save is not None:
+        params["save"] = save
+
+    try:
+        response = unreal.send_command("bp_function_create", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_function_create error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
 def material_inspect(material: str) -> Dict[str, Any]:
     """
     Read-only counterpart to ``material_edit``.
