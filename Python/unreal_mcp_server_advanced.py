@@ -6027,6 +6027,100 @@ def animation_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def foliage_edit(
+    op: str,
+    foliage_type: str,
+    level: Optional[str] = None,
+    density: Optional[float] = None,
+    density_adjustment_factor: Optional[float] = None,
+    radius: Optional[float] = None,
+    scale_x_min: Optional[float] = None,
+    scale_x_max: Optional[float] = None,
+    scale_y_min: Optional[float] = None,
+    scale_y_max: Optional[float] = None,
+    scale_z_min: Optional[float] = None,
+    scale_z_max: Optional[float] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Foliage authoring (small variant).
+
+    Two ops on AInstancedFoliageActor / UFoliageType, keyed by ``op``:
+
+        - ``add_foliage_type``: register a UFoliageType asset on the
+          AInstancedFoliageActor for a chosen level. Resolves (or
+          spawns) the IFA through ``AInstancedFoliageActor::Get`` and
+          binds the type through ``AInstancedFoliageActor::AddFoliageType``.
+          Reuses an existing FFoliageInfo when the type is already
+          registered.
+        - ``set_foliage_density``: write ``Density``,
+          ``DensityAdjustmentFactor``, ``Radius``, and the per-axis
+          ``ScaleX`` / ``ScaleY`` / ``ScaleZ`` FFloatInterval pairs
+          on a UFoliageType asset. All fields are optional; only
+          the ones present in the call are written.
+
+    Args:
+        op: One of ``add_foliage_type`` / ``set_foliage_density``.
+            Required.
+        foliage_type: Short asset name or ``/Game/...`` UFoliageType
+            path. Required.
+        level: Optional substring on owning ULevel name. Used by
+            ``add_foliage_type`` to pick a sublevel; defaults to
+            the persistent level when omitted.
+        density / density_adjustment_factor / radius: Optional floats
+            for ``set_foliage_density``.
+        scale_x_min / scale_x_max / scale_y_min / scale_y_max /
+        scale_z_min / scale_z_max: Optional floats for
+            ``set_foliage_density``. Each axis interval requires both
+            min and max to be present together.
+        save: Persist on success. Default True for
+            ``set_foliage_density``; False for ``add_foliage_type``
+            (the IFA is a level actor, not an asset).
+
+    Returns:
+        Op-specific dict. ``add_foliage_type`` reports the IFA's
+        ``actor_path``, ``level``, ``created_actor``, and
+        ``type_already_bound`` flags;
+        ``set_foliage_density`` reports the previous and new values
+        for every field actually written.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"op": op, "foliage_type": foliage_type}
+    if level is not None:
+        params["level"] = level
+    if density is not None:
+        params["density"] = density
+    if density_adjustment_factor is not None:
+        params["density_adjustment_factor"] = density_adjustment_factor
+    if radius is not None:
+        params["radius"] = radius
+    if scale_x_min is not None:
+        params["scale_x_min"] = scale_x_min
+    if scale_x_max is not None:
+        params["scale_x_max"] = scale_x_max
+    if scale_y_min is not None:
+        params["scale_y_min"] = scale_y_min
+    if scale_y_max is not None:
+        params["scale_y_max"] = scale_y_max
+    if scale_z_min is not None:
+        params["scale_z_min"] = scale_z_min
+    if scale_z_max is not None:
+        params["scale_z_max"] = scale_z_max
+    if save is not None:
+        params["save"] = save
+
+    try:
+        response = unreal.send_command("foliage_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"foliage_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
