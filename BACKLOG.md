@@ -8,13 +8,15 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped `bp_commit`, `bp_function_create`, the
-`material_edit` bulk `add_expressions` op, and a read-only
-`niagara_inspect` tool. Together they close the standard
-end-of-edit Blueprint commit cycle as a single call, lay down a typed
-function graph in one round trip, cut the round-trip count for small
-material graph authoring, and add a structured Niagara System dump to
-pair with `material_inspect`.
+The most recent pass shipped `bp_export`, `behavior_tree` (read-only
+slice), the `widget_edit` slot-property surface, and `gas_edit`
+(read-only slice). Together they close the canonical Blueprint
+snapshot for diffable round-trips, give the agent a structured AI
+asset dump that pairs with `niagara_inspect`, and make UMG slot
+authoring reflective without us spelling out every UPanelSlot
+subclass. `gas_edit` reads UGameplayAbility / UGameplayEffect /
+UAttributeSet assets so a caller can answer "what tags drive what
+ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
@@ -262,6 +264,73 @@ pair with `material_inspect`.
   (niagara_edit / niagara_script_edit) remain on the backlog. Adds
   Niagara to UnrealMCP's PublicDependencyModuleNames and the
   uplugin manifest.
+- `bp_export` (small, read-only) — canonical Blueprint snapshot.
+  Returns name + path + parent class + blueprint type, the
+  variables array (with type, default, friendly name, category,
+  flag set), the SCS components array (with relative transform +
+  optional `FProperty::ExportText` defaults dump), the implemented-
+  interfaces array, and a `graphs` array covering every event /
+  function / macro / interface graph. Each graph carries name +
+  kind + node count + a node list (class, title, position, GUID,
+  optional event / custom-event signature, capped pin list with
+  default value / default object / link count) plus a flat edge
+  list (source / target node + pin name + is_exec). Per-node pin
+  output is capped at `max_pins_per_node` (default 64) and tagged
+  `pins_truncated` when the cap fires. Sits next to the read-only
+  `bp_brief` / `bp_inspect` / `bp_graph` triad and is the primary
+  diff-able payload for verifying that an MCP-driven authoring
+  session left a Blueprint in the expected state.
+- `behavior_tree` (small, read-only) — structured dump of a
+  UBehaviorTree asset. Returns the full tree (composite root +
+  recursive children + per-child decorator chain + per-composite
+  service chain), the tree-level RootDecorators, plus the linked
+  Blackboard (path, parent path, key list with name + type token +
+  inner BaseClass / EnumType / Struct path for typed Object / Class
+  / Enum / Struct keys, instance-sync flag, parent-inherited flag).
+  SimpleParallel composites also report their FinishMode (immediate
+  / delayed). The recursive walk caps at `max_depth` (default 32) and
+  flips `children_truncated` on the offending composite. Pairs with
+  `niagara_inspect` for AI assets. Edit-side ops (re-rooting,
+  decorator insertion, blackboard key edits) remain on the backlog.
+  Adds AIModule to PublicDependencyModuleNames.
+- `widget_edit` slot-property surface — a third op `set_slot_property`
+  on the existing `widget_edit` tool. Takes a target widget FName plus
+  a flat property dict and applies the dict to the widget's UPanelSlot
+  through `FProperty::ImportText_InContainer`. Covers UCanvasPanelSlot
+  anchors / offsets / size / ZOrder, UVerticalBoxSlot /
+  UHorizontalBoxSlot padding / fill / alignment, UOverlaySlot /
+  UGridSlot, and any other UPanelSlot-derived class without us
+  spelling out each property by name. Each entry that fails to
+  resolve as a UPROPERTY or refuses ImportText is reported under
+  `skipped` with a reason. After applying the dict the slot's
+  `SynchronizeProperties()` runs so a re-layout tick picks the change
+  up.
+- `gas_edit` (small, read-only) — Gameplay Ability System dump for
+  three asset shapes:
+  - UGameplayAbility (or a Blueprint with a UGameplayAbility CDO):
+    ability tags + cancel / block / activation owned / required /
+    blocked tags + source / target required / blocked tags, cost +
+    cooldown gameplay-effect class paths, AbilityTriggers.
+  - UGameplayEffect (or a Blueprint with a UGameplayEffect CDO):
+    DurationPolicy + DurationMagnitude / MaxDurationMagnitude when
+    Has-Duration, modifier list (each with attribute name + owning
+    AttributeSet class + ModifierOp + literal magnitude when
+    scalable), executions list with calculation classes,
+    GameplayCues with tag set + level range + magnitude attribute,
+    plus the cached asset / granted / blocked-ability tag
+    containers through the public accessors that the GE component
+    model migrated to in 5.3+. Includes stack limit + stack
+    expiration policy.
+  - UAttributeSet (or a Blueprint with a UAttributeSet CDO): walks
+    the CDO's FProperty list filtering on
+    `FGameplayAttribute::IsSupportedProperty` and dumps each
+    attribute's name, CPP type, base / current default value, and
+    storage mode (legacy float vs. FGameplayAttributeData).
+  Pairs with `tag_registry_edit` so a caller can answer "what tags
+  drive what ability" in two read-only calls. Edit-side ops (tag
+  mutation, modifier add / remove, cost / cooldown rebind, attribute
+  default override) remain on the backlog. Adds GameplayAbilities to
+  PublicDependencyModuleNames.
 
 ## Blueprint authoring (medium to large each)
 
@@ -332,7 +401,14 @@ helpers.
   `list_functions`, `list_events`, `list_components`, `find_node`. Open
   follow-ons: per-pin readback for matched nodes, per-function
   parameter-list readout, and timeline / sequencer node summaries.
-- `bp_export` — full GraphSpec JSON export.
+- `bp_export` (small variant ships in this fork) — canonical
+  Blueprint-to-JSON snapshot covering every graph plus components,
+  variables, defaults, interfaces, and pin-level edges. Open
+  follow-ons: a deeper component default-overrides-only mode
+  (compare against the parent CDO and only emit deltas), a graph
+  filter param so a caller can restrict the dump to a single named
+  graph, and a `compact` mode that returns the snapshot as a
+  graphviz-style edge dump for one-shot rendering.
 
 ## Scene & level (medium each)
 
@@ -413,14 +489,32 @@ helpers.
 - `widget_inspect` — the small variant ships in this fork. The remaining
   hosted-Flop scope (style readback, MVVM binding readback) is still
   outstanding.
-- `widget_edit` — the small variant ships in this fork. The remaining
-  hosted-Flop scope (animations, MVVM bindings, advanced styles, event
-  binding, slot-property assignment beyond defaults) is still on the table.
+- `widget_edit` — the small variant plus the slot-property surface
+  ship in this fork. `set_slot_property` covers UCanvasPanelSlot /
+  UVerticalBoxSlot / UHorizontalBoxSlot / UOverlaySlot etc. without
+  spelling out each subclass. The remaining hosted-Flop scope
+  (animations, MVVM bindings, advanced styles, event binding) is
+  still on the table.
 
 ## AI & abilities (large each)
 
-- `behavior_tree` — BTs, Blackboards, AI Controllers, EQS.
-- `gas_edit` — Gameplay Abilities, Effects, Attribute Sets.
+- `behavior_tree` (small read-only variant ships in this fork) —
+  structured dump of a UBehaviorTree (composite root + decorators +
+  services) plus the linked Blackboard (key list + types).
+  Open follow-ons: edit-side ops (re-root, insert decorator,
+  insert service, append child to a chosen composite), Blackboard
+  key edits (add / remove / type change / sync flag toggle), and an
+  AI Controller / EQS slice with the same read-only structure for
+  the Run Behavior Tree -> Make Decision flow. AIModule is already
+  pulled in.
+- `gas_edit` (small read-only slice ships in this fork) —
+  UGameplayAbility / UGameplayEffect / UAttributeSet dump (tags,
+  modifiers, attribute defaults). Open follow-ons: tag-container
+  mutation through GE components, GE modifier add / remove,
+  ability cost / cooldown class rebind, and an attribute-default
+  override path that writes through the CDO and recompiles the
+  Blueprint. Native AbilityTask classes and GameplayCue assets
+  remain unscoped. GameplayAbilities is already pulled in.
 - `tag_registry_edit` (small variant ships in this fork) — `add_tag`,
   `remove_tag`, `list_tags` through `IGameplayTagsEditorModule`. Open
   follow-ons: rename through `RenameTagInINI`, restricted-tag source
@@ -481,24 +575,26 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`bp_commit`, `bp_function_create`, the
-`material_edit` bulk `add_expressions` op, and read-only
-`niagara_inspect`), the next set should pick up:
+After the latest pass (`bp_export`, `behavior_tree` read-only,
+`widget_edit` slot-property surface, and `gas_edit` read-only), the
+next set should pick up:
 
-1. `bp_export` — full GraphSpec JSON export. Sits next to the read-only
-   `bp_brief` / `bp_inspect` / `bp_graph` triad and lets a caller
-   round-trip a Blueprint's authored content through a single
-   structured payload.
-2. `behavior_tree` (small read-only slice) — list a UBehaviorTree's
-   root composite, decorator chain, services, and the bound
-   Blackboard. Symmetric with `niagara_inspect` for AI assets.
-3. `widget_edit` slot-property surface — alignment / fill / padding
-   on UVerticalBox / UHorizontalBox / UCanvasPanel children. Closes
-   the most frequent UMG smoke-test gap.
-4. `gas_edit` (small read-only slice) — list Gameplay Abilities,
-   Effects, Attribute Sets on a Blueprint or DataAsset. Pairs with
-   `tag_registry_edit` so a caller can answer "what tags drive what
-   ability" without round-tripping through Python.
+1. `behavior_tree` edit slice — append a child task / composite to
+   a chosen parent, insert a decorator on a chosen child slot, and
+   add a Blackboard key. Pairs with the read-only slice already
+   shipped.
+2. `gas_edit` edit slice — append a modifier to a UGameplayEffect,
+   set DurationPolicy / DurationMagnitude through CDO writes +
+   recompile, rebind cost / cooldown classes on a UGameplayAbility.
+   Reuses the existing GameplayAbilities dep.
+3. `niagara_edit` (small variant) — toggle emitter enabled flag,
+   set system / emitter user-exposed parameters through the
+   existing FNiagaraParameterStore surface, and append a renderer
+   to an emitter. Pairs with `niagara_inspect`.
+4. `sequencer_edit` (read-only first slice) — list a Level
+   Sequence's tracks (transform, audio, event), bound objects, and
+   track sections. Cinematics has been pending since the first
+   pass.
 
 `python_execution` still covers any operation we have not wrapped
 natively; prefer wrapping the high-frequency calls as dedicated tools
