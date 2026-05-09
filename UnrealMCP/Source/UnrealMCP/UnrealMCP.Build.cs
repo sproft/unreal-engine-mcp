@@ -53,7 +53,8 @@ public class UnrealMCP : ModuleRules
 				"Niagara",            // For UNiagaraSystem / UNiagaraEmitter (Sproft niagara_inspect)
 				"AIModule",           // For UBehaviorTree / UBlackboardData (Sproft behavior_tree)
 				"GameplayAbilities",  // For UGameplayAbility / UGameplayEffect / UAttributeSet (Sproft gas_edit)
-				"Landscape"           // For ALandscape / ULandscapeInfo / ULandscapeLayerInfoObject (Sproft landscape_inspect)
+				"Landscape",          // For ALandscape / ULandscapeInfo / ULandscapeLayerInfoObject (Sproft landscape_inspect)
+				"Foliage"             // For AInstancedFoliageActor / UFoliageType (Sproft foliage_inspect)
 			}
 		);
 

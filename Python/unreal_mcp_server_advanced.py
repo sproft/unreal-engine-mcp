@@ -5402,6 +5402,72 @@ def landscape_inspect(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def foliage_inspect(
+    name_pattern: Optional[str] = None,
+    level_filter: Optional[str] = None,
+    sample_locations: Optional[int] = None,
+    sample_seed: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only structured dump of every AInstancedFoliageActor in the editor world.
+
+    For each IFA: actor name, label, transform, and a foliage_types
+    array. Each foliage_type carries the type asset path, source mesh
+    or actor class path, density, density adjustment factor, radius,
+    per-axis scale interval, instance count, and (in editor) the
+    approximated bounds of all its instances. Pairs with
+    ``landscape_inspect`` for terrain reasoning.
+
+    Args:
+        name_pattern: Case-insensitive substring filter against the
+            IFA's actor name and outliner label.
+        level_filter: Case-insensitive substring filter on the owning
+            ULevel name.
+        sample_locations: Include up to N per-foliage-type instance
+            world-space locations. Default 0 (omit). Capped at 1024 to
+            keep responses bounded.
+        sample_seed: Seed for the sampling RNG when
+            ``sample_locations`` > 0. Default 0 (deterministic).
+
+    Returns:
+        Dict with ``level_name`` / ``level_path`` and a
+        ``foliage_actors`` array. Each entry carries ``name``,
+        ``label``, ``class``, ``class_path``, ``level``, ``location``,
+        ``foliage_type_count``, ``total_instance_count``, and a
+        ``foliage_types`` list with per-type ``foliage_type_name`` /
+        ``foliage_type_path`` / ``foliage_type_class`` / ``source_kind``
+        (``static_mesh`` / ``actor`` / ``unknown``) /
+        ``source_path`` / ``density`` / ``density_adjustment_factor`` /
+        ``radius`` / ``scale_x_min`` / ``scale_x_max`` / ``scale_y_min``
+        / ``scale_y_max`` / ``scale_z_min`` / ``scale_z_max`` /
+        ``instance_count`` / ``placed_instance_count``, plus optional
+        ``approximated_bounds_min`` / ``approximated_bounds_max`` /
+        ``approximated_bounds_size`` and ``sample_locations`` (each
+        sample is ``{index, location: [x, y, z]}``).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {}
+    if name_pattern is not None:
+        params["name_pattern"] = name_pattern
+    if level_filter is not None:
+        params["level_filter"] = level_filter
+    if sample_locations is not None:
+        params["sample_locations"] = sample_locations
+    if sample_seed is not None:
+        params["sample_seed"] = sample_seed
+
+    try:
+        response = unreal.send_command("foliage_inspect", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"foliage_inspect error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
