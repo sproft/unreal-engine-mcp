@@ -978,8 +978,9 @@ ability" alongside `tag_registry_edit`.
   `PrivateDependencyModuleNames`. The remove-side ops
   (chain remove, goal remove, solver mutation, bone-settings
   writes) stay on this list.
-- `chaos_edit` (small, read-only first slice) — inspect a
-  `UGeometryCollection` asset. Walks both the asset's public
+- `chaos_edit` (small, read + edit slice) — inspect or mutate
+  a `UGeometryCollection` asset. Default op `inspect` walks both
+  the asset's public
   surface and the underlying `FGeometryCollection` managed-array
   data and reports asset path / class, `is_empty` /
   `has_visible_geometry` / `root_index` flags, the
@@ -1009,8 +1010,26 @@ ability" alongside `tag_registry_edit`.
   `include_geometry_sources` (default true),
   `include_per_level_histogram` (default true), `max_sources` /
   `max_materials`. Adds `GeometryCollectionEngine` + `Chaos` to
-  PublicDependencyModuleNames. Edit-side ops (the fracture /
-  authoring write side, dataflow driver) remain on the backlog.
+  PublicDependencyModuleNames. Edit ops: `set_simulation_settings`
+  (writes a flat `properties` dict against the asset's reflected
+  simulation surface (`Mass`, `MinimumMassClamp`, `bMassAsDensity`,
+  `EnableClustering`, `MaxClusterLevel`, `DamageModel`, etc.)
+  through `FProperty::ImportText_InContainer`; failed entries
+  surface under `skipped` with a reason; `InvalidateCollection`
+  runs after the writes so the cached simulation data rebuilds),
+  and `import_static_mesh` (appends a UStaticMesh into the
+  collection through the editor-only
+  `FGeometryCollectionConversion::AppendStaticMesh(StaticMesh,
+  Materials, Transform, Collection, ReindexMaterials)`; optional
+  `transform` lays the mesh down at a chosen world-space
+  transform; the source mesh's static materials inherit by
+  default). Each mutating op runs `MarkPackageDirty` and saves
+  the asset by default unless `save=false`. Adds
+  `GeometryCollectionEditor` to the editor-only
+  `PrivateDependencyModuleNames` for the conversion API. The
+  fracture / authoring write side beyond mesh append, dataflow
+  driver, per-instance damage threshold override, and the
+  re-cluster ops stay on this list.
 - `niagara_edit` (small, system + emitter authoring) — two ops
   keyed by `op`. Default op `create_niagara_system` NewObject's a
   `UNiagaraSystem` at a `/Game/...` path through

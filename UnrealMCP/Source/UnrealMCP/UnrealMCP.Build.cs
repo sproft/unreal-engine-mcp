@@ -96,7 +96,8 @@ public class UnrealMCP : ModuleRules
 					"AnimationBlueprintLibrary", // For UAnimationBlueprintLibrary (Sproft animation_edit)
 					"MetasoundEditor",     // For UMetaSoundEditorSubsystem (Sproft metasound_edit)
 					"NiagaraEditor",       // For UNiagaraSystemFactoryNew::InitializeSystem (Sproft niagara_edit)
-					"IKRigEditor"          // For UIKRigController::SetRetargetRoot / AddRetargetChain / AddNewGoal (Sproft ik_rig_edit)
+					"IKRigEditor",         // For UIKRigController::SetRetargetRoot / AddRetargetChain / AddNewGoal (Sproft ik_rig_edit)
+					"GeometryCollectionEditor" // For FGeometryCollectionConversion::AppendStaticMesh (Sproft chaos_edit)
 				}
 			);
 		}

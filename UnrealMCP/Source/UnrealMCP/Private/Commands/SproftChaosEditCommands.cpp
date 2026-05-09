@@ -4,11 +4,14 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Chaos/ChaosSolverActor.h"
 #include "EditorAssetLibrary.h"
+#include "Engine/StaticMesh.h"
 #include "GeometryCollection/GeometryCollection.h"
+#include "GeometryCollection/GeometryCollectionConversion.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "GeometryCollection/GeometryCollectionSimulationTypes.h"
 #include "GeometryCollection/TransformCollection.h"
 #include "Materials/MaterialInterface.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -119,8 +122,16 @@ TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleCommand(const FString& C
     {
         return HandleInspect(Params);
     }
+    if (Op.Equals(TEXT("set_simulation_settings"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetSimulationSettings(Params);
+    }
+    if (Op.Equals(TEXT("import_static_mesh"), ESearchCase::IgnoreCase))
+    {
+        return HandleImportStaticMesh(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("chaos_edit: unsupported op '%s'. Supported: inspect"), *Op));
+        FString::Printf(TEXT("chaos_edit: unsupported op '%s'. Supported: inspect, set_simulation_settings, import_static_mesh"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleInspect(const TSharedPtr<FJsonObject>& Params)
@@ -381,5 +392,227 @@ TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleInspect(const TSharedPtr
     // and stays on the BACKLOG).
     Out->SetNumberField(TEXT("size_specific_data_count"), Collection->SizeSpecificData.Num());
 
+    return Out;
+}
+
+namespace
+{
+    /** Resolve a UStaticMesh by `/Game/...` path or short asset name.
+     *  Mirrors the registry-fallback shape the existing inspect tools
+     *  use. */
+    UStaticMesh* ResolveStaticMesh(const FString& Token)
+    {
+        if (Token.IsEmpty()) return nullptr;
+        if (Token.StartsWith(TEXT("/")))
+        {
+            return Cast<UStaticMesh>(UEditorAssetLibrary::LoadAsset(Token));
+        }
+        FAssetRegistryModule& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        TArray<FAssetData> Found;
+        AssetRegistry.Get().GetAssetsByClass(UStaticMesh::StaticClass()->GetClassPathName(), Found);
+        for (const FAssetData& Data : Found)
+        {
+            if (Data.AssetName.ToString().Equals(Token, ESearchCase::IgnoreCase))
+            {
+                return Cast<UStaticMesh>(Data.GetAsset());
+            }
+        }
+        return nullptr;
+    }
+
+    /** Convert a JsonValue to a string token suitable for
+     *  FProperty::ImportText_InContainer. Booleans get the engine
+     *  spelling ("true" / "false"), numbers ride a printf-style
+     *  formatter, strings pass through as-is, and arrays / objects
+     *  emit their JSON serialization (which ImportText accepts for
+     *  most struct types). */
+    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    {
+        if (!Value.IsValid()) return FString();
+        switch (Value->Type)
+        {
+        case EJson::Boolean:
+            return Value->AsBool() ? TEXT("true") : TEXT("false");
+        case EJson::Number:
+            return FString::SanitizeFloat(Value->AsNumber());
+        case EJson::String:
+            return Value->AsString();
+        case EJson::Array:
+        case EJson::Object:
+        {
+            FString Out;
+            TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
+            FJsonSerializer::Serialize(Value.ToSharedRef(), FString(), Writer);
+            return Out;
+        }
+        default:
+            return FString();
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleSetSimulationSettings(const TSharedPtr<FJsonObject>& Params)
+{
+    UGeometryCollection* Collection = ResolveCollection(Params);
+    if (!Collection)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UGeometryCollection (provide 'collection' or 'path' as /Game/... or short name)"));
+    }
+
+    const TSharedPtr<FJsonObject>* PropDictPtr = nullptr;
+    if (!Params->TryGetObjectField(TEXT("properties"), PropDictPtr) || !PropDictPtr || !PropDictPtr->IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'properties' dict"));
+    }
+    const TSharedPtr<FJsonObject>& PropDict = *PropDictPtr;
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    UClass* CollectionClass = Collection->GetClass();
+    TArray<TSharedPtr<FJsonValue>> AppliedArr;
+    TArray<TSharedPtr<FJsonValue>> SkippedArr;
+
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : PropDict->Values)
+    {
+        const FString& KeyName = Pair.Key;
+        FProperty* Prop = CollectionClass->FindPropertyByName(FName(*KeyName));
+        if (!Prop)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), KeyName);
+            Skip->SetStringField(TEXT("reason"), TEXT("property not found"));
+            SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+        const FString TextValue = JsonValueToImportText(Pair.Value);
+        const TCHAR* Result = Prop->ImportText_InContainer(*TextValue, Collection, Collection, PPF_None);
+        if (Result == nullptr)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), KeyName);
+            Skip->SetStringField(TEXT("reason"), FString::Printf(TEXT("ImportText refused '%s'"), *TextValue));
+            SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+        TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+        Applied->SetStringField(TEXT("name"), KeyName);
+        Applied->SetStringField(TEXT("value"), TextValue);
+        Applied->SetStringField(TEXT("property_class"), Prop->GetClass()->GetName());
+        AppliedArr.Add(MakeShared<FJsonValueObject>(Applied));
+    }
+
+    // Refresh the cached simulation data so the next sim or display
+    // tick picks the writes up. InvalidateCollection rebuilds the
+    // managed-array cache lazily.
+    Collection->InvalidateCollection();
+    Collection->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Collection->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_simulation_settings"));
+    Out->SetStringField(TEXT("collection"), Collection->GetPathName());
+    Out->SetArrayField(TEXT("applied"), AppliedArr);
+    Out->SetArrayField(TEXT("skipped"), SkippedArr);
+    Out->SetNumberField(TEXT("applied_count"), AppliedArr.Num());
+    Out->SetNumberField(TEXT("skipped_count"), SkippedArr.Num());
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleImportStaticMesh(const TSharedPtr<FJsonObject>& Params)
+{
+    UGeometryCollection* Collection = ResolveCollection(Params);
+    if (!Collection)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UGeometryCollection (provide 'collection' or 'path' as /Game/... or short name)"));
+    }
+
+    FString MeshToken;
+    if (!Params->TryGetStringField(TEXT("static_mesh"), MeshToken)
+        && !Params->TryGetStringField(TEXT("mesh"), MeshToken)
+        && !Params->TryGetStringField(TEXT("source_mesh"), MeshToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'static_mesh' parameter"));
+    }
+    UStaticMesh* StaticMesh = ResolveStaticMesh(MeshToken);
+    if (!StaticMesh)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UStaticMesh '%s'"), *MeshToken));
+    }
+
+    // Optional transform. Default identity. We read flat
+    // location / rotation / scale arrays so the JSON shape mirrors
+    // scene_compose / actor_inspect.
+    FTransform Transform = FTransform::Identity;
+    const TSharedPtr<FJsonObject>* XfObj = nullptr;
+    if (Params->TryGetObjectField(TEXT("transform"), XfObj) && XfObj && XfObj->IsValid())
+    {
+        const TSharedPtr<FJsonObject>& Xf = *XfObj;
+        const TArray<TSharedPtr<FJsonValue>>* LocArr = nullptr;
+        if (Xf->TryGetArrayField(TEXT("location"), LocArr) && LocArr && LocArr->Num() == 3)
+        {
+            Transform.SetLocation(FVector(
+                (*LocArr)[0]->AsNumber(),
+                (*LocArr)[1]->AsNumber(),
+                (*LocArr)[2]->AsNumber()));
+        }
+        const TArray<TSharedPtr<FJsonValue>>* RotArr = nullptr;
+        if (Xf->TryGetArrayField(TEXT("rotation"), RotArr) && RotArr && RotArr->Num() == 3)
+        {
+            const FRotator R(
+                (*RotArr)[0]->AsNumber(),
+                (*RotArr)[1]->AsNumber(),
+                (*RotArr)[2]->AsNumber());
+            Transform.SetRotation(R.Quaternion());
+        }
+        const TArray<TSharedPtr<FJsonValue>>* SclArr = nullptr;
+        if (Xf->TryGetArrayField(TEXT("scale"), SclArr) && SclArr && SclArr->Num() == 3)
+        {
+            Transform.SetScale3D(FVector(
+                (*SclArr)[0]->AsNumber(),
+                (*SclArr)[1]->AsNumber(),
+                (*SclArr)[2]->AsNumber()));
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    bool bReindexMaterials = true;
+    Params->TryGetBoolField(TEXT("reindex_materials"), bReindexMaterials);
+
+    // Pull the static mesh's static materials so the appended geometry
+    // inherits its materials. Pass a flat UMaterialInterface* array
+    // because the conversion API does not accept FStaticMaterial.
+    TArray<UMaterialInterface*> MaterialList;
+    MaterialList.Reserve(StaticMesh->GetStaticMaterials().Num());
+    for (const FStaticMaterial& Mat : StaticMesh->GetStaticMaterials())
+    {
+        MaterialList.Add(Mat.MaterialInterface);
+    }
+
+    FGeometryCollectionConversion::AppendStaticMesh(StaticMesh, MaterialList, Transform, Collection, bReindexMaterials);
+
+    Collection->InvalidateCollection();
+    Collection->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Collection->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("import_static_mesh"));
+    Out->SetStringField(TEXT("collection"), Collection->GetPathName());
+    Out->SetStringField(TEXT("static_mesh"), StaticMesh->GetPathName());
+    Out->SetObjectField(TEXT("transform"), TransformToJson(Transform));
+    Out->SetBoolField(TEXT("reindex_materials"), bReindexMaterials);
+    Out->SetBoolField(TEXT("saved"), bSave);
     return Out;
 }

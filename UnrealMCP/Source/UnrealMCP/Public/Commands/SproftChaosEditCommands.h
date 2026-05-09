@@ -4,12 +4,12 @@
 #include "Json.h"
 
 /**
- * Sproft fork addition: chaos_edit (read-only first slice)
+ * Sproft fork addition: chaos_edit (read + edit slice)
  *
- * Inspect a `UGeometryCollection` asset. Geometry Collections drive
- * Chaos destruction and authoring; the read-only slice walks the
- * asset's public surface plus the underlying `FGeometryCollection`
- * managed-array data and reports:
+ * Inspect or mutate a `UGeometryCollection` asset. Geometry
+ * Collections drive Chaos destruction and authoring; the inspect
+ * slice walks the asset's public surface plus the underlying
+ * `FGeometryCollection` managed-array data and reports:
  *
  *   - asset path / name / class
  *   - geometry source list (each `{source_path, transform,
@@ -36,7 +36,20 @@
  *     `cluster_count`, `rigid_count`, `none_sim_count`,
  *     `embedded_geometry_count`, `auto_instance_mesh_count`).
  *
- * One op (`inspect`, default).
+ * Operations:
+ *   - `inspect` (default): the read-only walk above.
+ *   - `set_simulation_settings`: writes a flat property dict against
+ *     the asset's reflected simulation surface (`Mass`,
+ *     `MinimumMassClamp`, `bMassAsDensity`, `EnableClustering`,
+ *     `MaxClusterLevel`, `DamageModel`, etc.). Each entry routes
+ *     through `FProperty::ImportText_InContainer`. After the writes
+ *     `InvalidateCollection` runs so the cached simulation data
+ *     rebuilds on the next access.
+ *   - `import_static_mesh`: appends a UStaticMesh into the
+ *     collection through
+ *     `FGeometryCollectionConversion::AppendStaticMesh`. Editor-only
+ *     API. Optional `transform` lays the mesh down at a chosen
+ *     world-space transform; the default is identity.
  *
  * Inputs:
  *   - collection / path / asset / asset_path: required. Accepts a
@@ -46,12 +59,24 @@
  *   - include_per_level_histogram: default true.
  *   - max_sources / max_materials: per-list caps.
  *
- * Returns the structure described above.
+ * Op-specific inputs:
+ *   - set_simulation_settings: `properties` (flat dict). Keys are
+ *     UPROPERTY FNames; values are JSON literals routed through
+ *     `FProperty::ImportText_InContainer`.
+ *   - import_static_mesh: `static_mesh` (`/Game/...` path or short
+ *     name) plus optional `transform` (`{location, rotation, scale}`
+ *     dict; missing components default to zero / zero / one).
  *
- * Read-only. We never mutate the asset.
+ * Optional inputs (mutating ops):
+ *   - `save`: default true.
  *
- * Edit-side ops (the fracture / authoring write side, dataflow
- * driver) remain on the BACKLOG.
+ * Returns the inspect structure for the inspect op, or a per-op
+ * dict carrying `operation`, `collection`, op-specific fields, and
+ * a `saved` flag.
+ *
+ * Edit-side ops still on the BACKLOG: the fracture / authoring
+ * write side beyond mesh append, dataflow driver, per-instance
+ * damage threshold override, and the re-cluster ops.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - `UGeometryCollection` from
@@ -74,4 +99,6 @@ public:
 
 private:
     TSharedPtr<FJsonObject> HandleInspect(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetSimulationSettings(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleImportStaticMesh(const TSharedPtr<FJsonObject>& Params);
 };

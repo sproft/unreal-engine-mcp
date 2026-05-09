@@ -6782,50 +6782,74 @@ def chaos_edit(
     include_per_level_histogram: Optional[bool] = None,
     max_sources: Optional[int] = None,
     max_materials: Optional[int] = None,
+    properties: Optional[Dict[str, Any]] = None,
+    static_mesh: Optional[str] = None,
+    transform: Optional[Dict[str, Any]] = None,
+    reindex_materials: Optional[bool] = None,
+    save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Inspect a UGeometryCollection asset (read-only first slice).
+    Inspect or mutate a UGeometryCollection asset (read + edit slice).
 
-    Geometry Collections drive Chaos destruction; this read-only
-    slice walks the asset's public surface plus the underlying
+    Geometry Collections drive Chaos destruction; the inspect op
+    walks the asset's public surface plus the underlying
     ``FGeometryCollection`` managed-array data and reports geometry
     sources, fracture-level histogram, cluster info, bone hierarchy
     depth, simulation settings, materials, Nanite block, and
     aggregate counts.
 
-    One op (``inspect``, default).
+    Operations:
+        - ``inspect`` (default): the read-only walk.
+        - ``set_simulation_settings``: writes a flat property dict
+          against the asset's reflected simulation surface
+          (``Mass``, ``MinimumMassClamp``, ``bMassAsDensity``,
+          ``EnableClustering``, ``MaxClusterLevel``, ``DamageModel``,
+          etc.). Each entry routes through
+          ``FProperty::ImportText_InContainer``. After the writes
+          ``InvalidateCollection`` runs so the cached simulation
+          data rebuilds on the next access.
+        - ``import_static_mesh``: appends a UStaticMesh into the
+          collection through
+          ``FGeometryCollectionConversion::AppendStaticMesh``.
+          Editor-only API. Optional ``transform`` lays the mesh
+          down at a chosen world-space transform; the default is
+          identity.
 
     Args:
         collection: Path or short name of a UGeometryCollection
             asset. Required.
-        op: Operation discriminator. Only ``inspect`` (default) is
-            supported.
-        include_geometry_sources: When True (default), the response
-            carries the ``geometry_sources`` array. False keeps the
-            counts only.
-        include_per_level_histogram: When True (default), the
-            response carries ``count_per_level`` and
-            ``cluster_count_per_level`` arrays.
-        max_sources: Cap on the geometry-source walk. Default 64.
-        max_materials: Cap on the material walk. Default 256.
+        op: Operation discriminator. ``inspect`` /
+            ``set_simulation_settings`` / ``import_static_mesh``.
+            Default ``inspect``.
+        include_geometry_sources: Inspect-only. Default True.
+        include_per_level_histogram: Inspect-only. Default True.
+        max_sources: Inspect-only cap. Default 64.
+        max_materials: Inspect-only cap. Default 256.
+        properties: set_simulation_settings. Flat dict whose keys
+            are UPROPERTY FNames on UGeometryCollection (e.g.
+            ``Mass``, ``MinimumMassClamp``, ``bMassAsDensity``,
+            ``EnableClustering``).
+        static_mesh: import_static_mesh. ``/Game/...`` path or
+            short name of the source UStaticMesh.
+        transform: import_static_mesh optional. ``{"location":
+            [x, y, z], "rotation": [pitch, yaw, roll], "scale":
+            [x, y, z]}``. Defaults to identity.
+        reindex_materials: import_static_mesh optional. Default
+            True. Re-indexes the collection's material array after
+            the append.
+        save: Mutating ops only. Default True.
 
     Returns:
-        Dict with asset metadata (``name`` / ``path`` / ``class``),
-        ``is_empty``, ``has_visible_geometry``, ``root_index``, the
-        ``geometry_sources`` array (each with ``source_path`` /
-        ``local_transform`` / ``source_materials`` / ``split_components``
-        / ``set_internal_from_material_index`` /
-        ``add_internal_materials``), aggregate transform counts
-        (``vertex_count`` / ``face_count`` / ``geometry_count`` /
-        ``transform_count`` / ``cluster_count`` / ``rigid_count`` /
-        ``none_sim_count`` / ``max_level`` / ``bone_hierarchy_depth``),
-        per-level histograms (``count_per_level`` /
-        ``cluster_count_per_level``), the ``simulation`` block
-        (clustering, damage model + thresholds, mass / density
-        toggles, removal surface, collision toggles), the
-        ``materials`` array, the ``nanite`` block, and the
-        ``embedded_geometry_count`` / ``auto_instance_mesh_count`` /
-        ``size_specific_data_count`` aggregates.
+        For ``inspect``: dict with asset metadata, geometry sources,
+        aggregate counts, simulation block, materials, Nanite block.
+        For ``set_simulation_settings``: dict with ``operation``,
+        ``collection``, ``applied`` (per-property record array),
+        ``skipped`` (per-property reject record array), and
+        ``saved``.
+        For ``import_static_mesh``: dict with ``operation``,
+        ``collection``, ``static_mesh`` (the source mesh path),
+        ``transform`` (the applied transform), ``reindex_materials``,
+        and ``saved``.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -6842,6 +6866,16 @@ def chaos_edit(
         params["max_sources"] = max_sources
     if max_materials is not None:
         params["max_materials"] = max_materials
+    if properties is not None:
+        params["properties"] = properties
+    if static_mesh is not None:
+        params["static_mesh"] = static_mesh
+    if transform is not None:
+        params["transform"] = transform
+    if reindex_materials is not None:
+        params["reindex_materials"] = reindex_materials
+    if save is not None:
+        params["save"] = save
 
     try:
         response = unreal.send_command("chaos_edit", params)
