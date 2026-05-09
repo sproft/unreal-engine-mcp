@@ -36,18 +36,19 @@
  *     effect's ScalableFloat magnitude) writes through the CDO before
  *     the first compile.
  *   - `set_gameplay_tags`: tag-container mutation on either asset shape.
- *     For UGameplayAbility writes through the public properties
- *     `AbilityTags` / `CancelAbilitiesWithTag` / `BlockAbilitiesWithTag`
- *     directly. For UGameplayEffect routes through
- *     `FindOrAddComponent<UAssetTagsGameplayEffectComponent>` /
- *     `FindOrAddComponent<UTargetTagsGameplayEffectComponent>` /
- *     `FindOrAddComponent<UBlockAbilityTagsGameplayEffectComponent>`,
- *     setting each component's `Added` inheritable container through
- *     the public `SetAndApplyAssetTagChanges` /
- *     `SetAndApplyTargetTagChanges` /
- *     `SetAndApplyBlockedAbilityTagChanges` mutator. The component
- *     model migrated in 5.3+; the public mutator surface is what the GE
- *     editor itself drives.
+ *   - `add_modifier`: append an FGameplayModifierInfo to a GE's
+ *     `Modifiers` array. `attribute` accepts `<attribute_set_path>:<attr_name>`
+ *     or a separate `attribute_set` + `attribute_name` pair; the
+ *     resolver falls back to a substring match across loaded
+ *     UAttributeSet subclasses for the canonical short-name case.
+ *     `modifier_op` accepts `Add` / `Additive` / `add_base` /
+ *     `Multiply` / `multiply_additive` / `Override` /
+ *     `Division` / `divide_additive` / `multiply_compound` /
+ *     `add_final` (case-insensitive). `magnitude` is a literal float
+ *     wrapped into an FScalableFloat.
+ *   - `remove_modifier_at`: remove an FGameplayModifierInfo at index.
+ *   - `set_attribute_default`: write the base value of an attribute
+ *     on a UAttributeSet (or its Blueprint CDO).
  *
  * Inputs (op-dependent):
  *   - asset:           short asset name or full `/Game/...` path (inspect, set_gameplay_tags).
@@ -81,4 +82,7 @@ private:
     TSharedPtr<FJsonObject> HandleCreateGameplayAbility(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleCreateGameplayEffect(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetGameplayTags(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddModifier(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveModifierAt(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetAttributeDefault(const TSharedPtr<FJsonObject>& Params);
 };

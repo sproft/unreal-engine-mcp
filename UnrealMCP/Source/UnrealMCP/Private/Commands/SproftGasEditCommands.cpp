@@ -433,6 +433,176 @@ namespace
         Out->SetNumberField(TEXT("attribute_count"), AttrArr.Num());
     }
 
+    /** Map a user-facing modifier-op token onto EGameplayModOp. Accepts
+     *  the canonical 5.x names (`add_base` / `multiply_additive` /
+     *  `divide_additive` / `override` / `multiply_compound` / `add_final`)
+     *  plus the short tokens the backlog spec calls out (`Add` /
+     *  `Multiply` / `Override` / `Division`). */
+    bool ParseModOp(const FString& Token, EGameplayModOp::Type& Out)
+    {
+        const FString Lower = Token.ToLower();
+        if (Lower == TEXT("add") || Lower == TEXT("additive") || Lower == TEXT("add_base"))
+        {
+            Out = EGameplayModOp::AddBase;
+            return true;
+        }
+        if (Lower == TEXT("multiply") || Lower == TEXT("multiply_additive")
+            || Lower == TEXT("multiplyadditive") || Lower == TEXT("multiplicitive"))
+        {
+            Out = EGameplayModOp::MultiplyAdditive;
+            return true;
+        }
+        if (Lower == TEXT("divide") || Lower == TEXT("division") || Lower == TEXT("divide_additive")
+            || Lower == TEXT("divideadditive"))
+        {
+            Out = EGameplayModOp::DivideAdditive;
+            return true;
+        }
+        if (Lower == TEXT("override"))
+        {
+            Out = EGameplayModOp::Override;
+            return true;
+        }
+        if (Lower == TEXT("multiply_compound") || Lower == TEXT("multiplycompound"))
+        {
+            Out = EGameplayModOp::MultiplyCompound;
+            return true;
+        }
+        if (Lower == TEXT("add_final") || Lower == TEXT("addfinal"))
+        {
+            Out = EGameplayModOp::AddFinal;
+            return true;
+        }
+        return false;
+    }
+
+    /** Resolve a UAttributeSet subclass + attribute name from an input
+     *  expressed as either:
+     *    - `<set_path>:<attribute_name>` colon-separated single string,
+     *    - separate `attribute_set` + `attribute_name` parameters.
+     *  Returns nullptr / empty name if either side is unresolvable. */
+    UClass* ResolveAttributeSetClass(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        if (Token.StartsWith(TEXT("/Script/")))
+        {
+            if (UClass* Loaded = LoadClass<UAttributeSet>(nullptr, *Token))
+            {
+                return Loaded;
+            }
+        }
+        if (Token.StartsWith(TEXT("/Game/")))
+        {
+            FString WithSuffix = Token;
+            if (!WithSuffix.EndsWith(TEXT("_C")))
+            {
+                WithSuffix += TEXT("_C");
+            }
+            if (UClass* Loaded = LoadClass<UAttributeSet>(nullptr, *WithSuffix))
+            {
+                return Loaded;
+            }
+        }
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            if (Found->IsChildOf(UAttributeSet::StaticClass()))
+            {
+                return Found;
+            }
+        }
+        return nullptr;
+    }
+
+    /** Build an FGameplayAttribute from "Set:Name" or "/Path/Set_C:Name"
+     *  tokens, falling back to a substring match across loaded
+     *  UAttributeSet subclasses for short-name shapes. */
+    bool ResolveAttribute(const FString& AttributeToken, const FString& SetTokenOpt,
+                          const FString& NameTokenOpt, FGameplayAttribute& Out, FString& OutError)
+    {
+        FString SetToken = SetTokenOpt;
+        FString NameToken = NameTokenOpt;
+        if (!AttributeToken.IsEmpty())
+        {
+            int32 ColonIdx = INDEX_NONE;
+            if (AttributeToken.FindLastChar(':', ColonIdx))
+            {
+                SetToken = AttributeToken.Left(ColonIdx);
+                NameToken = AttributeToken.Mid(ColonIdx + 1);
+            }
+            else if (NameToken.IsEmpty())
+            {
+                NameToken = AttributeToken;
+            }
+        }
+        if (NameToken.IsEmpty())
+        {
+            OutError = TEXT("attribute name was empty (use 'attribute_name' or '<set_path>:<name>')");
+            return false;
+        }
+
+        UClass* SetClass = ResolveAttributeSetClass(SetToken);
+        if (!SetClass && !SetToken.IsEmpty())
+        {
+            OutError = FString::Printf(TEXT("Could not resolve UAttributeSet class '%s'"), *SetToken);
+            return false;
+        }
+
+        // Without a set hint, sweep loaded UAttributeSet subclasses for
+        // the named attribute. The first matching FProperty wins; this
+        // is the "I just typed Health" case.
+        if (!SetClass)
+        {
+            for (TObjectIterator<UClass> It; It; ++It)
+            {
+                UClass* Candidate = *It;
+                if (!Candidate || !Candidate->IsChildOf(UAttributeSet::StaticClass())
+                    || Candidate == UAttributeSet::StaticClass())
+                {
+                    continue;
+                }
+                if (FProperty* Prop = FindFProperty<FProperty>(Candidate, FName(*NameToken)))
+                {
+                    if (FGameplayAttribute::IsSupportedProperty(Prop))
+                    {
+                        Out.SetUProperty(Prop);
+                        return true;
+                    }
+                }
+            }
+            OutError = FString::Printf(TEXT("No loaded UAttributeSet has attribute '%s'"), *NameToken);
+            return false;
+        }
+        FProperty* Prop = FindFProperty<FProperty>(SetClass, FName(*NameToken));
+        if (!Prop || !FGameplayAttribute::IsSupportedProperty(Prop))
+        {
+            OutError = FString::Printf(TEXT("Attribute '%s' on '%s' is not a supported FGameplayAttribute property"),
+                *NameToken, *SetClass->GetPathName());
+            return false;
+        }
+        Out.SetUProperty(Prop);
+        return true;
+    }
+
+    /** Token mirror of `ModOpToString` used in the inspect side, but
+     *  dropping the legacy underscore in favour of the canonical spelling
+     *  the new tokens map onto. */
+    const TCHAR* ModOpToCanonical(EGameplayModOp::Type Op)
+    {
+        switch (Op)
+        {
+        case EGameplayModOp::AddBase:           return TEXT("add_base");
+        case EGameplayModOp::MultiplyAdditive:  return TEXT("multiply_additive");
+        case EGameplayModOp::DivideAdditive:    return TEXT("divide_additive");
+        case EGameplayModOp::MultiplyCompound:  return TEXT("multiply_compound");
+        case EGameplayModOp::AddFinal:          return TEXT("add_final");
+        case EGameplayModOp::Override:          return TEXT("override");
+        default: return TEXT("unknown");
+        }
+    }
+
     /** Common Blueprint-creation back end used by both create ops. */
     UBlueprint* CreateGasBlueprint(const FString& AssetPath, UClass* ParentClass, bool bOverwrite, FString& OutError)
     {
@@ -529,6 +699,18 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCommand(const FString& Com
     if (Op == TEXT("set_gameplay_tags"))
     {
         return HandleSetGameplayTags(Params);
+    }
+    if (Op == TEXT("add_modifier"))
+    {
+        return HandleAddModifier(Params);
+    }
+    if (Op == TEXT("remove_modifier_at") || Op == TEXT("remove_modifier"))
+    {
+        return HandleRemoveModifierAt(Params);
+    }
+    if (Op == TEXT("set_attribute_default"))
+    {
+        return HandleSetAttributeDefault(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("gas_edit: unsupported op '%s'"), *Op));
@@ -934,6 +1116,298 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleSetGameplayTags(const TSha
     Result->SetStringField(TEXT("resolved_class"), AssetClass->GetName());
     Result->SetArrayField(TEXT("applied"), AppliedArr);
     Result->SetArrayField(TEXT("skipped"), SkippedArr);
+    Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleAddModifier(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("effect"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset' / 'effect' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not load asset at '%s'"), *AssetPath));
+    }
+    UClass* AssetClass = ResolveAssetClass(Asset);
+    UObject* CDO = ResolveCDO(Asset);
+    UGameplayEffect* Effect = CDO ? Cast<UGameplayEffect>(CDO) : nullptr;
+    if (!Effect)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UGameplayEffect (resolved class: %s)"),
+                *AssetPath, AssetClass ? *AssetClass->GetName() : TEXT("null")));
+    }
+
+    FString AttributeToken;
+    Params->TryGetStringField(TEXT("attribute"), AttributeToken);
+    FString AttributeSetToken;
+    Params->TryGetStringField(TEXT("attribute_set"), AttributeSetToken);
+    FString AttributeNameToken;
+    Params->TryGetStringField(TEXT("attribute_name"), AttributeNameToken);
+
+    FGameplayAttribute Attribute;
+    FString ResolveError;
+    if (!ResolveAttribute(AttributeToken, AttributeSetToken, AttributeNameToken, Attribute, ResolveError))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    FString ModOpToken;
+    if (!Params->TryGetStringField(TEXT("modifier_op"), ModOpToken)
+        && !Params->TryGetStringField(TEXT("op"), ModOpToken))
+    {
+        ModOpToken = TEXT("Add");
+    }
+    EGameplayModOp::Type ModOp;
+    if (!ParseModOp(ModOpToken, ModOp))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unrecognised modifier_op '%s' (use add / multiply / override / division / add_final / multiply_compound)"),
+                *ModOpToken));
+    }
+
+    double MagnitudeRaw = 0.0;
+    if (!Params->TryGetNumberField(TEXT("magnitude"), MagnitudeRaw))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'magnitude' (literal float for the FScalableFloat magnitude)"));
+    }
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    FGameplayModifierInfo NewMod;
+    NewMod.Attribute = Attribute;
+    NewMod.ModifierOp = ModOp;
+    FScalableFloat Scale;
+    Scale.Value = static_cast<float>(MagnitudeRaw);
+    NewMod.ModifierMagnitude = FGameplayEffectModifierMagnitude(Scale);
+
+    Effect->Modifiers.Add(NewMod);
+    const int32 NewIndex = Effect->Modifiers.Num() - 1;
+
+    UBlueprint* OwningBP = Cast<UBlueprint>(Asset);
+    if (OwningBP)
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsModified(OwningBP);
+        if (bCompile)
+        {
+            FKismetEditorUtilities::CompileBlueprint(OwningBP);
+        }
+    }
+    Effect->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_modifier"));
+    Result->SetStringField(TEXT("path"), Asset->GetPathName());
+    Result->SetStringField(TEXT("attribute_name"), Attribute.GetName());
+    if (UClass* OwnerClass = Attribute.IsValid() ? Attribute.GetAttributeSetClass() : nullptr)
+    {
+        Result->SetStringField(TEXT("attribute_set_class"), OwnerClass->GetPathName());
+    }
+    Result->SetStringField(TEXT("modifier_op"), ModOpToCanonical(ModOp));
+    Result->SetNumberField(TEXT("magnitude"), MagnitudeRaw);
+    Result->SetNumberField(TEXT("modifier_index"), NewIndex);
+    Result->SetNumberField(TEXT("modifier_count"), Effect->Modifiers.Num());
+    Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleRemoveModifierAt(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("effect"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset' / 'effect' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not load asset at '%s'"), *AssetPath));
+    }
+    UObject* CDO = ResolveCDO(Asset);
+    UGameplayEffect* Effect = CDO ? Cast<UGameplayEffect>(CDO) : nullptr;
+    if (!Effect)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UGameplayEffect"), *AssetPath));
+    }
+
+    int32 Index = INDEX_NONE;
+    if (!Params->TryGetNumberField(TEXT("index"), Index))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'index' (integer; the entry in the GE's Modifiers array)"));
+    }
+    if (!Effect->Modifiers.IsValidIndex(Index))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Index %d out of bounds (GE has %d modifiers)"),
+                Index, Effect->Modifiers.Num()));
+    }
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    const FGameplayModifierInfo Removed = Effect->Modifiers[Index];
+    Effect->Modifiers.RemoveAt(Index);
+
+    UBlueprint* OwningBP = Cast<UBlueprint>(Asset);
+    if (OwningBP)
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsModified(OwningBP);
+        if (bCompile)
+        {
+            FKismetEditorUtilities::CompileBlueprint(OwningBP);
+        }
+    }
+    Effect->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("remove_modifier_at"));
+    Result->SetStringField(TEXT("path"), Asset->GetPathName());
+    Result->SetNumberField(TEXT("removed_index"), Index);
+    Result->SetStringField(TEXT("removed_attribute"), Removed.Attribute.GetName());
+    Result->SetStringField(TEXT("removed_modifier_op"), ModOpToCanonical(Removed.ModifierOp));
+    Result->SetNumberField(TEXT("modifier_count"), Effect->Modifiers.Num());
+    Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleSetAttributeDefault(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("attribute_set"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'asset' / 'attribute_set' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not load asset at '%s'"), *AssetPath));
+    }
+    UClass* AssetClass = ResolveAssetClass(Asset);
+    UObject* CDO = ResolveCDO(Asset);
+    UAttributeSet* AttributeSet = CDO ? Cast<UAttributeSet>(CDO) : nullptr;
+    if (!AttributeSet || !AssetClass || !AssetClass->IsChildOf(UAttributeSet::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UAttributeSet (resolved class: %s)"),
+                *AssetPath, AssetClass ? *AssetClass->GetName() : TEXT("null")));
+    }
+
+    FString AttributeName;
+    if (!Params->TryGetStringField(TEXT("attribute_name"), AttributeName)
+        && !Params->TryGetStringField(TEXT("attribute"), AttributeName)
+        && !Params->TryGetStringField(TEXT("name"), AttributeName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'attribute_name' parameter"));
+    }
+    double BaseValueRaw = 0.0;
+    if (!Params->TryGetNumberField(TEXT("base_value"), BaseValueRaw)
+        && !Params->TryGetNumberField(TEXT("value"), BaseValueRaw))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'base_value' (literal float)"));
+    }
+
+    FProperty* Prop = FindFProperty<FProperty>(AssetClass, FName(*AttributeName));
+    if (!Prop || !FGameplayAttribute::IsSupportedProperty(Prop))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Attribute '%s' on '%s' is not a supported FGameplayAttribute property"),
+                *AttributeName, *AssetClass->GetName()));
+    }
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    const float NewValue = static_cast<float>(BaseValueRaw);
+    FString StorageKind;
+    if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+    {
+        if (StructProp->Struct == FGameplayAttributeData::StaticStruct()
+            || StructProp->Struct->IsChildOf(FGameplayAttributeData::StaticStruct()))
+        {
+            FGameplayAttributeData* Data =
+                StructProp->ContainerPtrToValuePtr<FGameplayAttributeData>(AttributeSet);
+            if (!Data)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Could not access FGameplayAttributeData on '%s'"), *AttributeName));
+            }
+            Data->SetBaseValue(NewValue);
+            Data->SetCurrentValue(NewValue);
+            StorageKind = TEXT("attribute_data");
+        }
+    }
+    else if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Prop))
+    {
+        if (float* Slot = FloatProp->ContainerPtrToValuePtr<float>(AttributeSet))
+        {
+            *Slot = NewValue;
+            StorageKind = TEXT("float");
+        }
+    }
+    if (StorageKind.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Attribute '%s' has unsupported storage type '%s'"),
+                *AttributeName, *Prop->GetCPPType()));
+    }
+
+    UBlueprint* OwningBP = Cast<UBlueprint>(Asset);
+    if (OwningBP)
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsModified(OwningBP);
+        if (bCompile)
+        {
+            FKismetEditorUtilities::CompileBlueprint(OwningBP);
+        }
+    }
+    Asset->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("set_attribute_default"));
+    Result->SetStringField(TEXT("path"), Asset->GetPathName());
+    Result->SetStringField(TEXT("attribute_name"), AttributeName);
+    Result->SetStringField(TEXT("storage"), StorageKind);
+    Result->SetNumberField(TEXT("base_value"), NewValue);
     Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
