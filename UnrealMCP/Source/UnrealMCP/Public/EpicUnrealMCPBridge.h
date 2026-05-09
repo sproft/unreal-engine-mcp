@@ -65,6 +65,7 @@
 #include "Commands/SproftLandscapeEditCommands.h"
 #include "Commands/SproftPcgGraphEditCommands.h"
 #include "Commands/SproftNiagaraScriptEditCommands.h"
+#include "Commands/SproftAnimationGraphEditCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -166,4 +167,5 @@ private:
 	TSharedPtr<FSproftLandscapeEditCommands> SproftLandscapeEdit;
 	TSharedPtr<FSproftPcgGraphEditCommands> SproftPcgGraphEdit;
 	TSharedPtr<FSproftNiagaraScriptEditCommands> SproftNiagaraScriptEdit;
+	TSharedPtr<FSproftAnimationGraphEditCommands> SproftAnimationGraphEdit;
 };

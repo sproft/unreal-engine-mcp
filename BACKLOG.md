@@ -1020,6 +1020,37 @@ ability" alongside `tag_registry_edit`.
   `unreal_api` for the runtime-class side and `cpp_source` for the
   in-engine-source side; the workflow docs sit one level higher
   for "what is the canonical pattern for X" questions.
+- `animation_graph_edit` (small, read-only first slice) — inspect
+  a `UAnimBlueprint`'s compiled state machines plus the flat
+  AnimGraph node list. Pairs with `animation_inspect`, which
+  already returns a state-machine summary keyed off
+  `UAnimBlueprintGeneratedClass::BakedStateMachines`; this slice
+  goes one level deeper: per state machine returns name +
+  initial-state index + per-state details (FName, state-root-node
+  index, notify indices, entry-rule node index, always-reset /
+  conduit flags, per-state exit-transition table) and the
+  per-machine transitions array (each row with `previous_state`
+  / `next_state` / `previous_state_name` / `next_state_name` /
+  `crossfade_duration` / `min_time_before_reentry` /
+  `blend_mode` token (linear / cubic_in / hermite_cubic /
+  sinusoidal / quadratic_in_out / cubic_in_out / quartic_in_out /
+  quintic_in_out / circular_in / circular_out / circular_in_out /
+  exp_in / exp_out / exp_in_out / custom) / `logic_type` token
+  (standard_blend / inertialization / custom) / start / end /
+  interrupt notify indices). The flat AnimGraph node-property
+  list off `UAnimBlueprintGeneratedClass::AnimNodeProperties`
+  emits `{index, struct_type, struct_path}` rows per node so a
+  downstream consumer can answer "what AnimGraph nodes does this
+  AnimBP have" without needing the editor-only AnimGraph module.
+  Filters: `include_state_machines` / `include_states` /
+  `include_transitions` / `include_anim_nodes` (default true)
+  plus per-list caps (`max_state_machines` (64) /
+  `max_states_per_machine` (256) /
+  `max_transitions_per_machine` (1024) / `max_anim_nodes`
+  (2048)). Uncompiled AnimBPs report `compiled=false` with empty
+  arrays. Edit-side ops (state machine create / mutate, anim-
+  graph node add / connect, link a Linked Anim Graph by tag) stay
+  on this list.
 - `niagara_script_edit` (small, read-only first slice) — inspect
   a `UNiagaraScript` asset. Pairs with `niagara_inspect` (system /
   emitter side) and `material_inspect` (renderer side). Walks the
@@ -1303,7 +1334,19 @@ helpers.
   the IAnimationDataController surface, sync-marker authoring,
   composite section authoring on UAnimMontage (slot tracks,
   sections, transitions), and per-notify property dict on add.
-- `animation_graph_edit` — AnimBP state machines, transitions, blend nodes.
+- `animation_graph_edit` (small read-only first slice ships in this
+  fork) — inspect a `UAnimBlueprint`'s compiled state machines
+  plus the flat AnimGraph node list off
+  `UAnimBlueprintGeneratedClass::BakedStateMachines` and
+  `AnimNodeProperties`. Open follow-ons: state machine create /
+  mutate (add / remove state, add / remove transition, set
+  initial state, override per-transition crossfade / blend
+  mode), AnimGraph node add / connect / disconnect, link a
+  Linked Anim Graph by tag, sub-state-machine / nested-state-
+  machine surface, and an editor-only walker that emits the
+  AnimGraph node titles + per-node UPROPERTY defaults so a caller
+  can reason about an existing AnimBP without round-tripping the
+  raw FStructProperty list.
 - `ik_rig_edit` (small read-only first slice ships in this fork) —
   inspect a `UIKRigDefinition` asset. Walks asset public surface
   (preview mesh, retarget root, retarget chains with start / end

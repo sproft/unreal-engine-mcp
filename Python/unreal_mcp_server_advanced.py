@@ -7117,6 +7117,109 @@ def niagara_script_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def animation_graph_edit(
+    anim_bp: str,
+    op: Optional[str] = None,
+    include_state_machines: Optional[bool] = None,
+    include_states: Optional[bool] = None,
+    include_transitions: Optional[bool] = None,
+    include_anim_nodes: Optional[bool] = None,
+    max_state_machines: Optional[int] = None,
+    max_states_per_machine: Optional[int] = None,
+    max_transitions_per_machine: Optional[int] = None,
+    max_anim_nodes: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Inspect a UAnimBlueprint's compiled state machines plus the
+    flat anim-graph node list (read-only first slice).
+
+    Pairs with ``animation_inspect``, which already returns a
+    state-machine summary keyed off
+    ``UAnimBlueprintGeneratedClass::BakedStateMachines``. This
+    slice goes one level deeper:
+
+    - per state machine: name + initial-state index + the per-
+      state details (FName, state-root-node index, notify
+      indices, conduit / always-reset flags, exit-transition
+      table) and the per-machine transitions array
+      (previous_state -> next_state with crossfade duration,
+      blend mode, logic type, custom curve / blend profile
+      paths).
+    - the flat AnimGraph node-property list off
+      ``UAnimBlueprintGeneratedClass::AnimNodeProperties``: each
+      entry is ``{index, struct_type, struct_path}`` with the
+      anim node's UScriptStruct (e.g. ``FAnimNode_StateMachine``,
+      ``FAnimNode_BlendListByEnum``, ``FAnimNode_SequencePlayer``).
+
+    The AnimBP must compile at least once for the baked surface
+    to populate; uncompiled assets return a ``compiled=false``
+    flag with empty arrays.
+
+    One op (``inspect``, default). Edit-side ops (state machine
+    create / mutate, anim-graph node add / connect, link a Linked
+    Anim Graph by tag) stay in BACKLOG.
+
+    Args:
+        anim_bp: Short asset name or ``/Game/...`` UAnimBlueprint
+            path. Required.
+        op: Operation discriminator. Only ``inspect`` (default).
+        include_state_machines: Default True.
+        include_states: Default True. Per-state details.
+        include_transitions: Default True. Per-machine transition
+            table.
+        include_anim_nodes: Default True. Flat AnimGraph node-
+            property list.
+        max_state_machines: Cap on state machines emitted. Default
+            64.
+        max_states_per_machine: Cap on states emitted per machine.
+            Default 256.
+        max_transitions_per_machine: Cap on transitions emitted
+            per machine. Default 1024.
+        max_anim_nodes: Cap on the AnimGraph node walk. Default
+            2048.
+
+    Returns:
+        Dict with asset metadata (``name`` / ``path`` / ``class``
+        / ``parent_class`` / ``parent_class_path`` /
+        ``target_skeleton_path`` / ``is_template`` /
+        ``compiled``), aggregate counts (``state_machine_count``
+        / ``anim_node_count``), the ``state_machines`` array, and
+        the ``anim_nodes`` flat array. Each list carries a
+        parallel ``*_truncated`` flag.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"anim_bp": anim_bp}
+    if op is not None:
+        params["op"] = op
+    if include_state_machines is not None:
+        params["include_state_machines"] = include_state_machines
+    if include_states is not None:
+        params["include_states"] = include_states
+    if include_transitions is not None:
+        params["include_transitions"] = include_transitions
+    if include_anim_nodes is not None:
+        params["include_anim_nodes"] = include_anim_nodes
+    if max_state_machines is not None:
+        params["max_state_machines"] = max_state_machines
+    if max_states_per_machine is not None:
+        params["max_states_per_machine"] = max_states_per_machine
+    if max_transitions_per_machine is not None:
+        params["max_transitions_per_machine"] = max_transitions_per_machine
+    if max_anim_nodes is not None:
+        params["max_anim_nodes"] = max_anim_nodes
+
+    try:
+        response = unreal.send_command("animation_graph_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"animation_graph_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Sproft fork addition: skills (workflow-doc lookup)
 #

@@ -106,6 +106,7 @@
 #include "Commands/SproftLandscapeEditCommands.h"
 #include "Commands/SproftPcgGraphEditCommands.h"
 #include "Commands/SproftNiagaraScriptEditCommands.h"
+#include "Commands/SproftAnimationGraphEditCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -170,6 +171,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftLandscapeEdit = MakeShared<FSproftLandscapeEditCommands>();
     SproftPcgGraphEdit = MakeShared<FSproftPcgGraphEditCommands>();
     SproftNiagaraScriptEdit = MakeShared<FSproftNiagaraScriptEditCommands>();
+    SproftAnimationGraphEdit = MakeShared<FSproftAnimationGraphEditCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -231,6 +233,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftLandscapeEdit.Reset();
     SproftPcgGraphEdit.Reset();
     SproftNiagaraScriptEdit.Reset();
+    SproftAnimationGraphEdit.Reset();
 }
 
 // Initialize subsystem
@@ -637,6 +640,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("niagara_script_edit"))
             {
                 ResultJson = SproftNiagaraScriptEdit->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("animation_graph_edit"))
+            {
+                ResultJson = SproftAnimationGraphEdit->HandleCommand(CommandType, Params);
             }
             else
             {
