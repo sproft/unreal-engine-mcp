@@ -9,7 +9,7 @@
  * Two ops keyed by `op`:
  *   - `create_niagara_system` (default, ultra-minimum cut): NewObject's
  *     a `UNiagaraSystem` at a `/Game/...` path through
- *     `UNiagaraSystemFactoryNew::InitializeSystem(System, /*bCreateDefaultNodes=*/false)`.
+ *     `UNiagaraSystemFactoryNew::InitializeSystem(System, bCreateDefaultNodes=false)`.
  *     No emitters, no parameter store, no module / sim-stage authoring.
  *     A system with no emitters opens with a "no emitter" warning in
  *     the asset's status banner; that is by design for the minimum-cut

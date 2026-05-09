@@ -11,7 +11,7 @@
  *   - `add_foliage_type`: register a UFoliageType asset on the
  *     AInstancedFoliageActor for a chosen level. Resolves (or
  *     spawns) the IFA through
- *     `AInstancedFoliageActor::Get(World, /*bCreateIfNone=*/true,
+ *     `AInstancedFoliageActor::Get(World, bCreateIfNone=true,
  *     Level)` and binds the type through
  *     `AInstancedFoliageActor::AddFoliageType`. Reuses an existing
  *     FFoliageInfo when the type is already registered. Returns

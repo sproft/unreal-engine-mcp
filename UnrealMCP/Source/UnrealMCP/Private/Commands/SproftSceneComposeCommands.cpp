@@ -56,15 +56,17 @@ namespace
             }
         }
 
-        const TArray<FString> Namespaces = {
-            TEXT("/Script/Engine.%s"),
-            TEXT("/Script/EnhancedInput.%s"),
+        // UE 5.7 tightened FString::Printf format-string handling;
+        // build the path through string concatenation instead.
+        static const TCHAR* const Namespaces[] = {
+            TEXT("/Script/Engine."),
+            TEXT("/Script/EnhancedInput."),
         };
         for (const FString& Candidate : Candidates)
         {
-            for (const FString& Format : Namespaces)
+            for (const TCHAR* Namespace : Namespaces)
             {
-                const FString Path = FString::Printf(*Format, *Candidate);
+                const FString Path = FString(Namespace) + Candidate;
                 if (UClass* Loaded = LoadClass<AActor>(nullptr, *Path))
                 {
                     return Loaded;

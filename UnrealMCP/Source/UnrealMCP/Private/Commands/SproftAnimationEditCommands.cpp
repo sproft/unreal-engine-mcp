@@ -79,17 +79,19 @@ namespace
             }
         }
 
-        // 4. Engine namespace fallback.
-        const TArray<FString> Namespaces = {
-            TEXT("/Script/Engine.%s"),
-            TEXT("/Script/AnimGraph.%s"),
-            TEXT("/Script/AnimGraphRuntime.%s"),
+        // 4. Engine namespace fallback. UE 5.7 tightened FString::Printf
+        // to reject runtime format strings; concatenate the prefix + name
+        // manually so the lookup avoids the format-string check.
+        static const TCHAR* const Namespaces[] = {
+            TEXT("/Script/Engine."),
+            TEXT("/Script/AnimGraph."),
+            TEXT("/Script/AnimGraphRuntime."),
         };
         for (const FString& Variant : Variants)
         {
-            for (const FString& Format : Namespaces)
+            for (const TCHAR* Namespace : Namespaces)
             {
-                const FString Path = FString::Printf(*Format, *Variant);
+                const FString Path = FString(Namespace) + Variant;
                 if (UClass* Loaded = LoadClass<UObject>(nullptr, *Path))
                 {
                     if (UClass* OK = AcceptClass(Loaded)) return OK;
