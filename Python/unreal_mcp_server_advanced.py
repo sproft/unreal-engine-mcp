@@ -5810,6 +5810,56 @@ def cpp_source(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def pie_test_scene(
+    assertions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Scene-state assertion harness (minimum cut).
+
+    Runs a list of assertion specs against the active editor world and
+    returns a per-assertion pass / fail record plus aggregate counts.
+    The minimum cut we ship here does not drive Play in Editor; it
+    answers each supported assertion statically against the editor
+    world. Two assertion kinds are supported:
+
+        - ``actor_exists``: ``target`` is an actor name. Pass = an actor
+          with that ``GetName()`` or Outliner label is present.
+        - ``actor_at_location``: ``target`` is an actor name,
+          ``expected`` is a ``[x, y, z]`` world-space location, and
+          ``tolerance`` (default 1.0 cm) is the pass radius. Pass = the
+          resolved actor's ``GetActorLocation`` is within ``tolerance``
+          of ``expected``.
+
+    Future passes will add the kinds that need a running PIE world
+    (``var_equals``, ``actor_overlapping_tag``, etc.).
+
+    Args:
+        assertions: Array of assertion specs. Each entry is a dict
+            ``{kind, target, expected?, tolerance?}``. Required;
+            non-empty.
+
+    Returns:
+        Dict with ``total``, ``passed``, ``failed``, ``unsupported``,
+        ``all_passed``, and a ``results`` array. Each result row
+        carries ``index``, ``kind``, ``target``, ``passed`` flag,
+        optional ``actual`` / ``expected`` / ``delta`` /
+        ``tolerance`` for distance-based kinds, and ``message``.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"assertions": assertions}
+
+    try:
+        response = unreal.send_command("pie_test_scene", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"pie_test_scene error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

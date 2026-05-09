@@ -91,6 +91,7 @@
 #include "Commands/SproftProjectContextCommands.h"
 #include "Commands/SproftAnimationInspectCommands.h"
 #include "Commands/SproftCppSourceCommands.h"
+#include "Commands/SproftPieTestSceneCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -140,6 +141,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftProjectContext = MakeShared<FSproftProjectContextCommands>();
     SproftAnimationInspect = MakeShared<FSproftAnimationInspectCommands>();
     SproftCppSource = MakeShared<FSproftCppSourceCommands>();
+    SproftPieTestScene = MakeShared<FSproftPieTestSceneCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -186,6 +188,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftProjectContext.Reset();
     SproftAnimationInspect.Reset();
     SproftCppSource.Reset();
+    SproftPieTestScene.Reset();
 }
 
 // Initialize subsystem
@@ -532,6 +535,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("cpp_source"))
             {
                 ResultJson = SproftCppSource->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("pie_test_scene"))
+            {
+                ResultJson = SproftPieTestScene->HandleCommand(CommandType, Params);
             }
             else
             {
