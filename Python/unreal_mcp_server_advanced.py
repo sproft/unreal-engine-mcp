@@ -3008,6 +3008,7 @@ def widget_edit(
     widget_name: Optional[str] = None,
     parent_name: Optional[str] = None,
     text: Optional[str] = None,
+    properties: Optional[Dict[str, Any]] = None,
     expose_as_variable: bool = True,
     save: bool = True,
     overwrite: bool = False,
@@ -3015,20 +3016,28 @@ def widget_edit(
     """
     Edit a Widget Blueprint asset.
 
-    Mirrors a small slice of the hosted Flop "widget_edit" tool. Two operations
-    are supported in this first cut:
+    Mirrors a small slice of the hosted Flop "widget_edit" tool. Three
+    operations are supported:
         - "create_widget_blueprint": create a UWidgetBlueprint at a path with
           a parent UUserWidget class and an optional root panel class.
         - "add_child_widget": construct a named widget (e.g. vertical_box,
           progress_bar, text_block, button, image) and attach it to an
           existing parent panel inside an existing Widget Blueprint.
+        - "set_slot_property": apply a flat property dict to the UPanelSlot
+          of an existing widget. Covers UCanvasPanelSlot anchors / offsets /
+          size, UVerticalBoxSlot / UHorizontalBoxSlot padding / fill, and
+          any other UPanelSlot-derived class without us spelling out each
+          property by name. Properties go through
+          ``FProperty::ImportText_InContainer``.
 
     Args:
-        operation: "create_widget_blueprint" or "add_child_widget".
+        operation: "create_widget_blueprint", "add_child_widget", or
+            "set_slot_property".
         package_path: For create: the absolute content-browser path for the
             new asset, e.g. "/Game/UI/WBP_CraftingMenu".
-        widget_blueprint: For add_child_widget: the absolute path to the
-            existing widget blueprint, e.g. "/Game/UI/WBP_CraftingMenu".
+        widget_blueprint: For add_child_widget / set_slot_property: the
+            absolute path to the existing widget blueprint, e.g.
+            "/Game/UI/WBP_CraftingMenu".
         parent_class: For create: a UUserWidget subclass path or short name.
             Defaults to UUserWidget.
         root_panel_class: For create: a UPanelWidget subclass path or short
@@ -3037,16 +3046,41 @@ def widget_edit(
             of vertical_box, horizontal_box, canvas_panel, overlay, scroll_box,
             border, size_box, spacer, progress_bar, text_block, button, image,
             or a fully qualified UWidget class path.
-        widget_name: For add_child_widget: the FName for the new widget. Must
-            be unique within the asset.
+        widget_name: For add_child_widget / set_slot_property: the FName of
+            the target widget. For add_child_widget the name must be unique
+            inside the asset. For set_slot_property it must resolve through
+            ``UWidgetTree::FindWidget``.
         parent_name: For add_child_widget: the FName of the parent panel
             inside the asset. If omitted, the asset's root panel is used.
         text: For add_child_widget: optional initial text for text_block.
+        properties: For set_slot_property: the flat property dict applied to
+            the widget's Slot. Examples:
+                UCanvasPanelSlot:
+                    {"Anchors": "(Minimum=(X=0.5,Y=0.5),Maximum=(X=0.5,Y=0.5))",
+                     "Offsets": "(Left=-100,Top=-50,Right=200,Bottom=100)",
+                     "Alignment": "(X=0.5,Y=0.5)",
+                     "ZOrder": 1}
+                UVerticalBoxSlot:
+                    {"Padding": "(Left=4,Top=4,Right=4,Bottom=4)",
+                     "Size": "(SizeRule=Fill,Value=1.0)",
+                     "HorizontalAlignment": "HAlign_Fill",
+                     "VerticalAlignment": "VAlign_Top"}
+            Each entry that fails to resolve as a UPROPERTY or refuses
+            ``ImportText`` is reported under the response's ``skipped`` array
+            with a reason.
         expose_as_variable: For add_child_widget: mark the new widget as a
             Blueprint variable so other graphs can bind to it. Defaults True.
         save: Save the asset after the change. Defaults True.
         overwrite: For create: overwrite an existing asset at package_path.
             Defaults False.
+
+    Returns:
+        For set_slot_property: dict with ``slot_class`` /
+        ``slot_class_path`` (the resolved UPanelSlot subclass), ``applied``
+        (per-property name + reflected CPP type), ``skipped`` (per-property
+        reason such as ``not_a_uproperty`` or ``import_text_failed`` plus
+        the attempted ImportText input), ``applied_count`` /
+        ``skipped_count``, and ``saved``.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -3069,6 +3103,8 @@ def widget_edit(
         params["parent_name"] = parent_name
     if text is not None:
         params["text"] = text
+    if properties is not None:
+        params["properties"] = properties
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite

@@ -18,11 +18,16 @@
 #include "Components/Spacer.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
+#include "Components/PanelSlot.h"
 #include "Components/Widget.h"
 #include "EditorAssetLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/OutputDeviceNull.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "UObject/Package.h"
+#include "UObject/UnrealType.h"
 #include "WidgetBlueprint.h"
 
 namespace
@@ -124,6 +129,36 @@ namespace
             return UMG;
         }
         return nullptr;
+    }
+
+    /** Render a JSON value as ImportText input. Mirrors the helper used
+     *  in bp_component / scene_compose so the slot-property surface
+     *  accepts the same dict shape as the rest of the property tools. */
+    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    {
+        if (!Value.IsValid())
+        {
+            return FString();
+        }
+        switch (Value->Type)
+        {
+            case EJson::String:
+                return Value->AsString();
+            case EJson::Number:
+                return LexToString(Value->AsNumber());
+            case EJson::Boolean:
+                return Value->AsBool() ? TEXT("true") : TEXT("false");
+            case EJson::Null:
+                return TEXT("None");
+            default:
+            {
+                FString Buffer;
+                TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+                    TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Buffer);
+                FJsonSerializer::Serialize(Value.ToSharedRef(), TEXT(""), Writer);
+                return Buffer;
+            }
+        }
     }
 
     /** Map a short widget-type string to its UClass. Returns nullptr if unknown. */
@@ -242,9 +277,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return AddChildWidget(Params);
     }
+    if (Operation == TEXT("set_slot_property") || Operation == TEXT("set_slot")
+        || Operation == TEXT("slot_set") || Operation == TEXT("set_slot_properties"))
+    {
+        return SetSlotProperty(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -493,6 +533,133 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddChildWidget(const TSharedP
     ResultObj->SetStringField(TEXT("widget_class"), ChildClass->GetPathName());
     ResultObj->SetStringField(TEXT("parent_name"), ParentPanel->GetName());
     ResultObj->SetBoolField(TEXT("expose_as_variable"), bExposeAsVariable);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetSlotProperty(const TSharedPtr<FJsonObject>& Params)
+{
+    FString WidgetBlueprintPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WidgetBlueprintPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+
+    FString WidgetName;
+    if (!Params->TryGetStringField(TEXT("widget_name"), WidgetName)
+        && !Params->TryGetStringField(TEXT("target"), WidgetName)
+        && !Params->TryGetStringField(TEXT("name"), WidgetName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_name' parameter"));
+    }
+
+    const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+    if (!Params->TryGetObjectField(TEXT("properties"), PropsObj) || !PropsObj || !(*PropsObj).IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'properties' object"));
+    }
+    if ((*PropsObj)->Values.Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'properties' object is empty"));
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    UObject* Loaded = UEditorAssetLibrary::LoadAsset(WidgetBlueprintPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(Loaded);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WidgetBlueprintPath));
+    }
+    if (!WBP->WidgetTree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("WidgetBlueprint has no WidgetTree"));
+    }
+
+    UWidget* Found = WBP->WidgetTree->FindWidget(FName(*WidgetName));
+    if (!Found)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find widget '%s' in %s"), *WidgetName, *WidgetBlueprintPath));
+    }
+
+    UPanelSlot* Slot = Found->Slot;
+    if (!Slot)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Widget '%s' has no Slot. The root widget has no parent panel; only children of a panel widget carry a slot."), *WidgetName));
+    }
+
+    UClass* SlotClass = Slot->GetClass();
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    FOutputDeviceNull NullDevice;
+    for (const auto& Pair : (*PropsObj)->Values)
+    {
+        const FString& PropName = Pair.Key;
+        const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
+
+        FProperty* Prop = FindFProperty<FProperty>(SlotClass, *PropName);
+        if (!Prop)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), PropName);
+            Skip->SetStringField(TEXT("reason"), TEXT("not_a_uproperty"));
+            SkippedJson.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+
+        const FString TextValue = JsonValueToImportText(JsonVal);
+        const TCHAR* TextPtr = *TextValue;
+        const TCHAR* Result = Prop->ImportText_InContainer(
+            TextPtr, Slot, Slot, PPF_None, &NullDevice);
+        if (Result == nullptr)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), PropName);
+            Skip->SetStringField(TEXT("reason"), TEXT("import_text_failed"));
+            Skip->SetStringField(TEXT("attempted_value"), TextValue);
+            SkippedJson.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+        Applied->SetStringField(TEXT("name"), PropName);
+        Applied->SetStringField(TEXT("type"), Prop->GetCPPType());
+        AppliedJson.Add(MakeShared<FJsonValueObject>(Applied));
+    }
+
+    // Push the slot's edits back through the runtime hook so a re-layout
+    // tick picks them up. Most slot classes implement SynchronizeProperties()
+    // to copy serialised state onto the live SObjectWidget; the base
+    // UPanelSlot calls it from PostEditChangeProperty, so we replicate that
+    // here for the reflective dict path.
+    Slot->SynchronizeProperties();
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (UPackage* Package = WBP->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WidgetBlueprintPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_slot_property"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WidgetBlueprintPath);
+    ResultObj->SetStringField(TEXT("widget_name"), WidgetName);
+    ResultObj->SetStringField(TEXT("slot_class"), SlotClass->GetName());
+    ResultObj->SetStringField(TEXT("slot_class_path"), SlotClass->GetPathName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetArrayField(TEXT("skipped"), SkippedJson);
+    ResultObj->SetNumberField(TEXT("applied_count"), AppliedJson.Num());
+    ResultObj->SetNumberField(TEXT("skipped_count"), SkippedJson.Num());
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }
