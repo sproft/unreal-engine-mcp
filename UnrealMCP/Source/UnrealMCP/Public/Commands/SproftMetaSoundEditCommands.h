@@ -4,44 +4,52 @@
 #include "Json.h"
 
 /**
- * Sproft fork addition: metasound_edit (small variant)
+ * Sproft fork addition: metasound_edit (small + graph authoring slice)
  *
- * Two ops, keyed by `op`:
+ * Multi-op tool keyed by `op`:
  *   - `create_metasound_source`: creates a new UMetaSoundSource at a
- *     `/Game/...` package path. Optional `output_format` token
- *     (`mono` / `stereo` / `quad` / `5_1` / `7_1`) plus optional
- *     `sample_rate` and `block_rate` overrides land on the asset's
- *     OutputFormat / SampleRateOverride / BlockRateOverride
- *     (per-platform) before InitAsset wires the document.
- *   - `create_metasound_patch`: creates a new UMetaSoundPatch (a
- *     reusable graph asset, no audio output) at a `/Game/...` path.
+ *     `/Game/...` package path.
+ *   - `create_metasound_patch`: creates a new UMetaSoundPatch.
+ *   - `add_node`: append a node to a MetaSound asset's document
+ *     through `UMetaSoundBuilderBase::AddNodeByClassName`. The node
+ *     class is identified by `class_name` (e.g.
+ *     `Audio.Add` / `Add` / `Mix`) and the canonical UE5 metasound
+ *     namespace lookup. Returns the new node handle GUID.
+ *   - `connect_nodes`: connect a named output of one node to a named
+ *     input of another via
+ *     `UMetaSoundBuilderBase::ConnectNodes(SourceNode, OutputName,
+ *     DestinationNode, InputName)`.
  *
- * Both ops route through `UMetaSoundEditorSubsystem::GetChecked()`'s
- * public `InitAsset` + `RegisterGraphWithFrontend` so the new asset
- * has a fresh document plus an editor graph that opens cleanly in
- * the MetaSound editor.
- *
- * The graph-authoring surface (add nodes, connect pins, set member
- * defaults) stays on the BACKLOG; that surface lives behind the
- * UMetaSoundBuilder API which has its own learning curve.
+ * Both create ops route through
+ * `UMetaSoundEditorSubsystem::GetChecked()`'s public `InitAsset` +
+ * `RegisterGraphWithFrontend`. The graph-authoring ops route through
+ * `UMetaSoundBuilderSubsystem::AttachBuilderToAssetChecked` to obtain
+ * a `UMetaSoundBuilderBase` over an existing asset; the builder's
+ * `AddNodeByClassName` / `ConnectNodes` are the BlueprintCallable
+ * public APIs.
  *
  * Inputs (op-dependent):
- *   - path:           target /Game/... package path. Required.
- *   - output_format:  one of `mono` / `stereo` / `quad` / `5_1` /
- *                     `7_1`. Default `stereo`. (create_source only.)
- *   - sample_rate:    integer, in Hz. 0 keeps the device default.
- *                     (create_source only.)
- *   - block_rate:     float, in Hz. 0 keeps the device default.
- *                     (create_source only.)
- *   - overwrite:      reuse an existing asset at the path.
+ *   - path / asset:   target asset (create / graph ops). Required.
+ *   - class_name:     `Namespace.Name[.Variant]` token for add_node.
+ *                     Mirrors the editor's class palette names. Required.
+ *   - major_version:  integer (default 1) major class version.
+ *   - from_node / to_node: GUID strings (from add_node return) or a
+ *                     case-insensitive substring match on the node's
+ *                     class name. Required for connect_nodes.
+ *   - from_output / to_input: FName strings for the pin names. Required.
+ *   - overwrite:      reuse an existing asset at the path. Default false
+ *                     (create only).
  *   - save:           save after the edit. Default true.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - `UMetaSoundSource` / `UMetaSoundPatch` from MetasoundEngine.
+ *   - `UMetaSoundBuilderSubsystem::AttachBuilderToAssetChecked` for
+ *     the existing-asset builder lookup.
+ *   - `UMetaSoundBuilderBase::AddNodeByClassName` /
+ *     `ConnectNodes(SourceNode, OutputName, DestinationNode, InputName)`
+ *     for the graph mutations.
  *   - `UMetaSoundEditorSubsystem::InitAsset` /
  *     `RegisterGraphWithFrontend` from MetasoundEditor.
- *   - `EMetaSoundOutputAudioFormat` from
- *     `MetasoundOutputFormatInterfaces.h`.
  *
  * No code from the proprietary FlopAI plugin is used.
  */
@@ -55,4 +63,6 @@ public:
 private:
     TSharedPtr<FJsonObject> HandleCreateSource(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleCreatePatch(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddNode(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleConnectNodes(const TSharedPtr<FJsonObject>& Params);
 };

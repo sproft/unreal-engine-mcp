@@ -3,9 +3,14 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "EditorAssetLibrary.h"
+#include "Engine/Engine.h"
 #include "Interfaces/MetasoundOutputFormatInterfaces.h"
 #include "Metasound.h"
+#include "MetasoundBuilderBase.h"
+#include "MetasoundBuilderSubsystem.h"
+#include "MetasoundDocumentInterface.h"
 #include "MetasoundEditorSubsystem.h"
+#include "MetasoundFrontendDocument.h"
 #include "MetasoundSource.h"
 #include "PerPlatformProperties.h"
 #include "UObject/Package.h"
@@ -95,8 +100,16 @@ TSharedPtr<FJsonObject> FSproftMetaSoundEditCommands::HandleCommand(const FStrin
     {
         return HandleCreatePatch(Params);
     }
+    if (Op == TEXT("add_node"))
+    {
+        return HandleAddNode(Params);
+    }
+    if (Op == TEXT("connect_nodes"))
+    {
+        return HandleConnectNodes(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("metasound_edit: unsupported op '%s'. Supported: create_metasound_source, create_metasound_patch"), *Op));
+        FString::Printf(TEXT("metasound_edit: unsupported op '%s'. Supported: create_metasound_source, create_metasound_patch, add_node, connect_nodes"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftMetaSoundEditCommands::HandleCreateSource(const TSharedPtr<FJsonObject>& Params)
@@ -276,6 +289,214 @@ TSharedPtr<FJsonObject> FSproftMetaSoundEditCommands::HandleCreatePatch(const TS
     Result->SetStringField(TEXT("name"), AssetName);
     Result->SetStringField(TEXT("path"), AssetObjectPath);
     Result->SetStringField(TEXT("class"), NewPatch->GetClass()->GetName());
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+namespace
+{
+    /** Resolve a target MetaSound asset (UMetaSoundSource / UMetaSoundPatch
+     *  or any UObject implementing IMetaSoundDocumentInterface) and
+     *  return the attached UMetaSoundBuilderBase. Errors land on
+     *  OutError. */
+    UMetaSoundBuilderBase* ResolveBuilderForAsset(const FString& AssetPath, UObject*& OutAsset, FString& OutError)
+    {
+        OutAsset = nullptr;
+        UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+        if (!Asset)
+        {
+            OutError = FString::Printf(TEXT("Could not load asset at '%s'"), *AssetPath);
+            return nullptr;
+        }
+        if (!Asset->Implements<UMetaSoundDocumentInterface>())
+        {
+            OutError = FString::Printf(TEXT("Asset at '%s' does not implement IMetaSoundDocumentInterface"), *AssetPath);
+            return nullptr;
+        }
+        UMetaSoundBuilderSubsystem* Subsystem = GEngine ? GEngine->GetEngineSubsystem<UMetaSoundBuilderSubsystem>() : nullptr;
+        if (!Subsystem)
+        {
+            OutError = TEXT("UMetaSoundBuilderSubsystem is not available");
+            return nullptr;
+        }
+        UMetaSoundBuilderBase& Builder = Subsystem->AttachBuilderToAssetChecked(*Asset);
+        OutAsset = Asset;
+        return &Builder;
+    }
+
+    /** Build an FMetasoundFrontendClassName from a `Namespace.Name` /
+     *  `Namespace.Name.Variant` token. The public Parse function on the
+     *  struct does the parse. */
+    bool ParseClassNameToken(const FString& Token, FMetasoundFrontendClassName& OutClassName, FString& OutError)
+    {
+        if (Token.IsEmpty())
+        {
+            OutError = TEXT("class_name was empty");
+            return false;
+        }
+        if (FMetasoundFrontendClassName::Parse(Token, OutClassName))
+        {
+            return true;
+        }
+        // Fall back: bare name with empty namespace.
+        OutClassName.Namespace = NAME_None;
+        OutClassName.Name = FName(*Token);
+        OutClassName.Variant = NAME_None;
+        return true;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftMetaSoundEditCommands::HandleAddNode(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset' parameter"));
+    }
+    FString ClassNameToken;
+    if (!Params->TryGetStringField(TEXT("class_name"), ClassNameToken)
+        && !Params->TryGetStringField(TEXT("node_class"), ClassNameToken)
+        && !Params->TryGetStringField(TEXT("class"), ClassNameToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'class_name' parameter"));
+    }
+    int32 MajorVersion = 1;
+    Params->TryGetNumberField(TEXT("major_version"), MajorVersion);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    UObject* Asset = nullptr;
+    FString ResolveError;
+    UMetaSoundBuilderBase* Builder = ResolveBuilderForAsset(AssetPath, Asset, ResolveError);
+    if (!Builder)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+    FMetasoundFrontendClassName ClassName;
+    FString ParseError;
+    if (!ParseClassNameToken(ClassNameToken, ClassName, ParseError))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ParseError);
+    }
+
+    EMetaSoundBuilderResult BuildResult = EMetaSoundBuilderResult::Failed;
+    FMetaSoundNodeHandle NodeHandle = Builder->AddNodeByClassName(ClassName, BuildResult, MajorVersion);
+    if (BuildResult != EMetaSoundBuilderResult::Succeeded)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UMetaSoundBuilderBase::AddNodeByClassName failed for '%s' (major %d)"),
+                *ClassNameToken, MajorVersion));
+    }
+
+    Asset->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_node"));
+    Result->SetStringField(TEXT("asset"), Asset->GetPathName());
+    Result->SetStringField(TEXT("class_name"), ClassName.GetFullName().ToString());
+    Result->SetStringField(TEXT("namespace"), ClassName.Namespace.ToString());
+    Result->SetStringField(TEXT("name"), ClassName.Name.ToString());
+    if (!ClassName.Variant.IsNone())
+    {
+        Result->SetStringField(TEXT("variant"), ClassName.Variant.ToString());
+    }
+    Result->SetNumberField(TEXT("major_version"), MajorVersion);
+    Result->SetStringField(TEXT("node_id"), NodeHandle.NodeID.ToString());
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftMetaSoundEditCommands::HandleConnectNodes(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset' parameter"));
+    }
+    FString FromNodeIdString;
+    if (!Params->TryGetStringField(TEXT("from_node"), FromNodeIdString)
+        && !Params->TryGetStringField(TEXT("from_node_id"), FromNodeIdString)
+        && !Params->TryGetStringField(TEXT("source_node"), FromNodeIdString))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'from_node' parameter (node ID GUID)"));
+    }
+    FString ToNodeIdString;
+    if (!Params->TryGetStringField(TEXT("to_node"), ToNodeIdString)
+        && !Params->TryGetStringField(TEXT("to_node_id"), ToNodeIdString)
+        && !Params->TryGetStringField(TEXT("destination_node"), ToNodeIdString))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'to_node' parameter (node ID GUID)"));
+    }
+    FString OutputName;
+    if (!Params->TryGetStringField(TEXT("from_output"), OutputName)
+        && !Params->TryGetStringField(TEXT("output_name"), OutputName)
+        && !Params->TryGetStringField(TEXT("from_pin"), OutputName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'from_output' parameter"));
+    }
+    FString InputName;
+    if (!Params->TryGetStringField(TEXT("to_input"), InputName)
+        && !Params->TryGetStringField(TEXT("input_name"), InputName)
+        && !Params->TryGetStringField(TEXT("to_pin"), InputName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'to_input' parameter"));
+    }
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    UObject* Asset = nullptr;
+    FString ResolveError;
+    UMetaSoundBuilderBase* Builder = ResolveBuilderForAsset(AssetPath, Asset, ResolveError);
+    if (!Builder)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    FGuid FromGuid;
+    if (!FGuid::Parse(FromNodeIdString, FromGuid))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Invalid 'from_node' GUID '%s'"), *FromNodeIdString));
+    }
+    FGuid ToGuid;
+    if (!FGuid::Parse(ToNodeIdString, ToGuid))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Invalid 'to_node' GUID '%s'"), *ToNodeIdString));
+    }
+    FMetaSoundNodeHandle FromNode;
+    FromNode.NodeID = FromGuid;
+    FMetaSoundNodeHandle ToNode;
+    ToNode.NodeID = ToGuid;
+
+    EMetaSoundBuilderResult BuildResult = EMetaSoundBuilderResult::Failed;
+    Builder->ConnectNodes(FromNode, FName(*OutputName), ToNode, FName(*InputName), BuildResult);
+    if (BuildResult != EMetaSoundBuilderResult::Succeeded)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UMetaSoundBuilderBase::ConnectNodes failed (from %s.%s -> to %s.%s)"),
+                *FromNodeIdString, *OutputName, *ToNodeIdString, *InputName));
+    }
+
+    Asset->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("connect_nodes"));
+    Result->SetStringField(TEXT("asset"), Asset->GetPathName());
+    Result->SetStringField(TEXT("from_node"), FromNodeIdString);
+    Result->SetStringField(TEXT("from_output"), OutputName);
+    Result->SetStringField(TEXT("to_node"), ToNodeIdString);
+    Result->SetStringField(TEXT("to_input"), InputName);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }
