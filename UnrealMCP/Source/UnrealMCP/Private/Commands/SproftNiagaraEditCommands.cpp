@@ -11,7 +11,7 @@
 
 namespace
 {
-    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    void NiagaraEdit_SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
     {
         FString Trim = InPath;
         Trim.TrimEndInline();
@@ -108,7 +108,7 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSh
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    NiagaraEdit_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

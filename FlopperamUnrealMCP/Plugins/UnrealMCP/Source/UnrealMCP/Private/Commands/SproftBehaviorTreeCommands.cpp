@@ -227,7 +227,7 @@ namespace
     /** Split a `/Game/Subdir/AssetName` path into directory + asset
      *  name. Mirrors the helper in `SproftAssetFactoryCommands` so the
      *  edit slice does not fight the asset-creation flow. */
-    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    void BehaviorTree_SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
     {
         FString Trim = InPath;
         Trim.TrimEndInline();
@@ -399,7 +399,7 @@ namespace
 
     /** Convert an FJsonValue into a textual form FProperty::ImportText
      *  accepts. Mirrors the helper in SproftBpComponentCommands. */
-    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    FString BehaviorTree_JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
     {
         if (!Value.IsValid())
         {
@@ -453,7 +453,7 @@ namespace
                 OutSkipped.Add(MakeShared<FJsonValueObject>(Skip));
                 continue;
             }
-            const FString TextValue = JsonValueToImportText(JsonVal);
+            const FString TextValue = BehaviorTree_JsonValueToImportText(JsonVal);
             const TCHAR* TextPtr = *TextValue;
             const TCHAR* Result = Prop->ImportText_InContainer(
                 TextPtr, Target, Target, PPF_None, &NullDevice);
@@ -771,7 +771,7 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCreateBehaviorTree(co
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    BehaviorTree_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

@@ -71,7 +71,7 @@ namespace
         }
     }
 
-    TSharedPtr<FJsonObject> TransformToJson(const FTransform& Xf)
+    TSharedPtr<FJsonObject> ChaosEdit_TransformToJson(const FTransform& Xf)
     {
         TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
         const FVector L = Xf.GetLocation();
@@ -174,7 +174,7 @@ TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleInspect(const TSharedPtr
             TSharedPtr<FJsonObject> SrcObj = MakeShared<FJsonObject>();
             SrcObj->SetNumberField(TEXT("index"), SrcIdx);
             SrcObj->SetStringField(TEXT("source_path"), Source.SourceGeometryObject.ToString());
-            SrcObj->SetObjectField(TEXT("local_transform"), TransformToJson(Source.LocalTransform));
+            SrcObj->SetObjectField(TEXT("local_transform"), ChaosEdit_TransformToJson(Source.LocalTransform));
             SrcObj->SetBoolField(TEXT("split_components"), Source.bSplitComponents);
             SrcObj->SetBoolField(TEXT("set_internal_from_material_index"), Source.bSetInternalFromMaterialIndex);
             SrcObj->SetBoolField(TEXT("add_internal_materials"), Source.bAddInternalMaterials);
@@ -426,7 +426,7 @@ namespace
      *  formatter, strings pass through as-is, and arrays / objects
      *  emit their JSON serialization (which ImportText accepts for
      *  most struct types). */
-    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    FString ChaosEdit_JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
     {
         if (!Value.IsValid()) return FString();
         switch (Value->Type)
@@ -486,7 +486,7 @@ TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleSetSimulationSettings(co
             SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
             continue;
         }
-        const FString TextValue = JsonValueToImportText(Pair.Value);
+        const FString TextValue = ChaosEdit_JsonValueToImportText(Pair.Value);
         const TCHAR* Result = Prop->ImportText_InContainer(*TextValue, Collection, Collection, PPF_None);
         if (Result == nullptr)
         {
@@ -611,7 +611,7 @@ TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleImportStaticMesh(const T
     Out->SetStringField(TEXT("operation"), TEXT("import_static_mesh"));
     Out->SetStringField(TEXT("collection"), Collection->GetPathName());
     Out->SetStringField(TEXT("static_mesh"), StaticMesh->GetPathName());
-    Out->SetObjectField(TEXT("transform"), TransformToJson(Transform));
+    Out->SetObjectField(TEXT("transform"), ChaosEdit_TransformToJson(Transform));
     Out->SetBoolField(TEXT("reindex_materials"), bReindexMaterials);
     Out->SetBoolField(TEXT("saved"), bSave);
     return Out;

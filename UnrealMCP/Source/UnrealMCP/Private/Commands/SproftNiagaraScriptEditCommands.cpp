@@ -35,7 +35,7 @@ namespace
     /** Same usage map as the niagara_inspect implementation; kept private
      *  per file so the two readers do not have to share a translation
      *  helper. */
-    const TCHAR* UsageToString(ENiagaraScriptUsage Usage)
+    const TCHAR* NiagaraScriptEdit_UsageToString(ENiagaraScriptUsage Usage)
     {
         switch (Usage)
         {
@@ -73,7 +73,7 @@ namespace
 
     /** Categorise a Niagara variable as primitive / data_interface / object
      *  so a downstream consumer does not need to peek at the type def. */
-    const TCHAR* VariableKind(const FNiagaraVariableBase& Var)
+    const TCHAR* NiagaraScriptEdit_VariableKind(const FNiagaraVariableBase& Var)
     {
         if (Var.IsDataInterface()) { return TEXT("data_interface"); }
         if (Var.IsUObject())       { return TEXT("object"); }
@@ -99,7 +99,7 @@ namespace
         {
             Out->SetStringField(TEXT("type_path"), TypeDef.GetEnum()->GetPathName());
         }
-        Out->SetStringField(TEXT("kind"), VariableKind(Var));
+        Out->SetStringField(TEXT("kind"), NiagaraScriptEdit_VariableKind(Var));
         return Out;
     }
 }
@@ -172,7 +172,7 @@ TSharedPtr<FJsonObject> FSproftNiagaraScriptEditCommands::HandleNiagaraScriptIns
     Result->SetStringField(TEXT("name"), Script->GetName());
     Result->SetStringField(TEXT("path"), Script->GetPathName());
     Result->SetStringField(TEXT("class"), Script->GetClass()->GetName());
-    Result->SetStringField(TEXT("usage"), UsageToString(Script->GetUsage()));
+    Result->SetStringField(TEXT("usage"), NiagaraScriptEdit_UsageToString(Script->GetUsage()));
     Result->SetStringField(TEXT("usage_id"), Script->GetUsageId().ToString());
 
     const FNiagaraVMExecutableData& VMData = Script->GetVMExecutableData();

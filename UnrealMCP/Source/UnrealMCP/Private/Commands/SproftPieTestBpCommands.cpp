@@ -14,7 +14,7 @@ namespace
      *  the standard Json writer so callers see a stable canonicalised
      *  representation when ImportText fails. Mirrors the helper in
      *  `pie_test_scene`. */
-    FString JsonValueToString(const TSharedPtr<FJsonValue>& Value)
+    FString PieTestBp_JsonValueToString(const TSharedPtr<FJsonValue>& Value)
     {
         if (!Value.IsValid())
         {
@@ -189,7 +189,7 @@ TSharedPtr<FJsonObject> FSproftPieTestBpCommands::HandlePieTestBp(const TSharedP
             Scratch.SetNumZeroed(Prop->GetSize());
             Prop->InitializeValue(Scratch.GetData());
 
-            const FString ExpectedRaw = JsonValueToString(ExpectedField);
+            const FString ExpectedRaw = PieTestBp_JsonValueToString(ExpectedField);
             const TCHAR* ImportPtr = *ExpectedRaw;
             const TCHAR* ImportResult =
                 Prop->ImportText_Direct(ImportPtr, Scratch.GetData(), CDO, PPF_None);

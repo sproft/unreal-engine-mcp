@@ -13,7 +13,7 @@
 
 namespace
 {
-    UBlueprint* ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
+    UBlueprint* BpWire_ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
     {
         FString Input;
         if (!Params->TryGetStringField(TEXT("blueprint"), Input)
@@ -31,7 +31,7 @@ namespace
     }
 
     template <typename FnType>
-    void ForEachGraph(UBlueprint* Blueprint, FnType Callback)
+    void BpWire_ForEachGraph(UBlueprint* Blueprint, FnType Callback)
     {
         for (UEdGraph* G : Blueprint->UbergraphPages)     { if (G) { Callback(G); } }
         for (UEdGraph* G : Blueprint->FunctionGraphs)     { if (G) { Callback(G); } }
@@ -42,21 +42,21 @@ namespace
         }
     }
 
-    UEdGraph* ResolveGraph(UBlueprint* Blueprint, const FString& InName)
+    UEdGraph* BpWire_ResolveGraph(UBlueprint* Blueprint, const FString& InName)
     {
         if (InName.IsEmpty())
         {
             return Blueprint->UbergraphPages.Num() > 0 ? Blueprint->UbergraphPages[0] : nullptr;
         }
         UEdGraph* Match = nullptr;
-        ForEachGraph(Blueprint, [&](UEdGraph* G)
+        BpWire_ForEachGraph(Blueprint, [&](UEdGraph* G)
         {
             if (Match) { return; }
             if (G->GetName().Equals(InName, ESearchCase::IgnoreCase)) { Match = G; }
         });
         if (Match) { return Match; }
         const FString Lower = InName.ToLower();
-        ForEachGraph(Blueprint, [&](UEdGraph* G)
+        BpWire_ForEachGraph(Blueprint, [&](UEdGraph* G)
         {
             if (Match) { return; }
             if (G->GetName().ToLower().Contains(Lower)) { Match = G; }
@@ -64,7 +64,7 @@ namespace
         return Match;
     }
 
-    UEdGraphNode* ResolveNode(UEdGraph* Graph, const FString& InName)
+    UEdGraphNode* BpWire_ResolveNode(UEdGraph* Graph, const FString& InName)
     {
         if (InName.IsEmpty()) { return nullptr; }
         // Pass 1: GUID match.
@@ -151,7 +151,7 @@ TSharedPtr<FJsonObject> FSproftBpWireCommands::HandleBpWire(const TSharedPtr<FJs
             FString::Printf(TEXT("Unsupported bp_wire op '%s'. Supported: connect, disconnect"), *Operation));
     }
 
-    UBlueprint* Blueprint = ResolveBlueprintParam(Params);
+    UBlueprint* Blueprint = BpWire_ResolveBlueprintParam(Params);
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -161,7 +161,7 @@ TSharedPtr<FJsonObject> FSproftBpWireCommands::HandleBpWire(const TSharedPtr<FJs
     FString GraphName;
     Params->TryGetStringField(TEXT("graph"), GraphName);
     Params->TryGetStringField(TEXT("graph_name"), GraphName);
-    UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+    UEdGraph* Graph = BpWire_ResolveGraph(Blueprint, GraphName);
     if (!Graph)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -271,7 +271,7 @@ TSharedPtr<FJsonObject> FSproftBpWireCommands::HandleBpWire(const TSharedPtr<FJs
             continue;
         }
 
-        UEdGraphNode* SourceNode = ResolveNode(Graph, SourceNodeName);
+        UEdGraphNode* SourceNode = BpWire_ResolveNode(Graph, SourceNodeName);
         if (!SourceNode)
         {
             TSharedPtr<FJsonObject> Fail = MakeShared<FJsonObject>();
@@ -280,7 +280,7 @@ TSharedPtr<FJsonObject> FSproftBpWireCommands::HandleBpWire(const TSharedPtr<FJs
             Failures.Add(MakeShared<FJsonValueObject>(Fail));
             continue;
         }
-        UEdGraphNode* DestNode = ResolveNode(Graph, DestNodeName);
+        UEdGraphNode* DestNode = BpWire_ResolveNode(Graph, DestNodeName);
         if (!DestNode)
         {
             TSharedPtr<FJsonObject> Fail = MakeShared<FJsonObject>();

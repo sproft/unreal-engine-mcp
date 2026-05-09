@@ -139,7 +139,7 @@ namespace
 
     /** Resolve a UPCGNode under a graph by exact FName first, then by
      *  case-insensitive substring on FName / GetNodeTitle. */
-    UPCGNode* ResolveNode(UPCGGraph* Graph, const FString& Token)
+    UPCGNode* PcgGraphEdit_ResolveNode(UPCGGraph* Graph, const FString& Token)
     {
         if (!Graph || Token.IsEmpty()) return nullptr;
         UPCGNode* SubstringMatch = nullptr;
@@ -361,7 +361,7 @@ TSharedPtr<FJsonObject> FSproftPcgGraphEditCommands::HandleConnectPins(const TSh
         {
             return Graph->GetOutputNode();
         }
-        return ResolveNode(Graph, Token);
+        return PcgGraphEdit_ResolveNode(Graph, Token);
     };
 
     UPCGNode* FromNode = ResolveOptionalIoNode(FromNodeToken, /*bWantInput=*/true);
@@ -450,7 +450,7 @@ TSharedPtr<FJsonObject> FSproftPcgGraphEditCommands::HandleRemoveNode(const TSha
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'node' parameter"));
     }
-    UPCGNode* Node = ResolveNode(Graph, NodeToken);
+    UPCGNode* Node = PcgGraphEdit_ResolveNode(Graph, NodeToken);
     if (!Node)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

@@ -18,7 +18,7 @@ namespace
      *
      *  Returns null when nothing resolves.
      */
-    UClass* ResolveClass(const FString& Input)
+    UClass* CppSource_ResolveClass(const FString& Input)
     {
         const FString Trimmed = Input.TrimStartAndEnd();
         if (Trimmed.IsEmpty())
@@ -182,7 +182,7 @@ TSharedPtr<FJsonObject> FSproftCppSourceCommands::HandleCppSource(const TSharedP
     }
     else if (!ClassParam.IsEmpty())
     {
-        ResolvedClass = ResolveClass(ClassParam);
+        ResolvedClass = CppSource_ResolveClass(ClassParam);
         if (!ResolvedClass)
         {
             return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

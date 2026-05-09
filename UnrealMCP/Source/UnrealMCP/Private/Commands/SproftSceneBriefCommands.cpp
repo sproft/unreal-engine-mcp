@@ -20,7 +20,7 @@
 namespace
 {
     /** Build a [x, y, z] number array. */
-    TArray<TSharedPtr<FJsonValue>> Vec3ToJson(const FVector& V)
+    TArray<TSharedPtr<FJsonValue>> SceneBrief_Vec3ToJson(const FVector& V)
     {
         TArray<TSharedPtr<FJsonValue>> Arr;
         Arr.Add(MakeShared<FJsonValueNumber>(V.X));
@@ -196,7 +196,7 @@ TSharedPtr<FJsonObject> FSproftSceneBriefCommands::HandleSceneBrief(const TShare
                 Entry->SetStringField(TEXT("name"), Actor->GetName());
                 Entry->SetStringField(TEXT("label"), Actor->GetActorLabel());
                 Entry->SetStringField(TEXT("class"), ClassName);
-                Entry->SetArrayField(TEXT("location"), Vec3ToJson(Actor->GetActorLocation()));
+                Entry->SetArrayField(TEXT("location"), SceneBrief_Vec3ToJson(Actor->GetActorLocation()));
                 NotableArr.Add(MakeShared<FJsonValueObject>(Entry));
             }
         }
@@ -248,10 +248,10 @@ TSharedPtr<FJsonObject> FSproftSceneBriefCommands::HandleSceneBrief(const TShare
     if (bHasBounds && WorldBounds.IsValid != 0)
     {
         TSharedPtr<FJsonObject> BoundsObj = MakeShared<FJsonObject>();
-        BoundsObj->SetArrayField(TEXT("min"),    Vec3ToJson(WorldBounds.Min));
-        BoundsObj->SetArrayField(TEXT("max"),    Vec3ToJson(WorldBounds.Max));
-        BoundsObj->SetArrayField(TEXT("center"), Vec3ToJson(WorldBounds.GetCenter()));
-        BoundsObj->SetArrayField(TEXT("extent"), Vec3ToJson(WorldBounds.GetExtent()));
+        BoundsObj->SetArrayField(TEXT("min"),    SceneBrief_Vec3ToJson(WorldBounds.Min));
+        BoundsObj->SetArrayField(TEXT("max"),    SceneBrief_Vec3ToJson(WorldBounds.Max));
+        BoundsObj->SetArrayField(TEXT("center"), SceneBrief_Vec3ToJson(WorldBounds.GetCenter()));
+        BoundsObj->SetArrayField(TEXT("extent"), SceneBrief_Vec3ToJson(WorldBounds.GetExtent()));
         Result->SetObjectField(TEXT("bounds"), BoundsObj);
     }
     else

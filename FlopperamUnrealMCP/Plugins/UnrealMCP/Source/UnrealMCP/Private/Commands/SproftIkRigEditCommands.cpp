@@ -44,7 +44,7 @@ namespace
         return nullptr;
     }
 
-    TSharedPtr<FJsonObject> TransformToJson(const FTransform& Xf)
+    TSharedPtr<FJsonObject> IkRigEdit_TransformToJson(const FTransform& Xf)
     {
         TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
         const FVector L = Xf.GetLocation();
@@ -211,8 +211,8 @@ TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleInspect(const TSharedPtr
         GoalObj->SetStringField(TEXT("bone_name"), Goal->BoneName.ToString());
         GoalObj->SetNumberField(TEXT("position_alpha"), Goal->PositionAlpha);
         GoalObj->SetNumberField(TEXT("rotation_alpha"), Goal->RotationAlpha);
-        GoalObj->SetObjectField(TEXT("current_transform"), TransformToJson(Goal->CurrentTransform));
-        GoalObj->SetObjectField(TEXT("initial_transform"), TransformToJson(Goal->InitialTransform));
+        GoalObj->SetObjectField(TEXT("current_transform"), IkRigEdit_TransformToJson(Goal->CurrentTransform));
+        GoalObj->SetObjectField(TEXT("initial_transform"), IkRigEdit_TransformToJson(Goal->InitialTransform));
         GoalArr.Add(MakeShared<FJsonValueObject>(GoalObj));
     }
     Out->SetArrayField(TEXT("goals"), GoalArr);

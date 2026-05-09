@@ -17,7 +17,7 @@
 
 namespace
 {
-    UBlueprint* ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
+    UBlueprint* BpExport_ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
     {
         FString Input;
         if (!Params->TryGetStringField(TEXT("blueprint"), Input)
@@ -36,7 +36,7 @@ namespace
 
     /** Compact pin-type description matching the bp_graph helper so a
      *  caller can diff the payloads from the two tools. */
-    FString DescribePinType(const FEdGraphPinType& PinType)
+    FString BpExport_DescribePinType(const FEdGraphPinType& PinType)
     {
         FString Result = PinType.PinCategory.ToString();
         if (!PinType.PinSubCategory.IsNone())
@@ -115,7 +115,7 @@ namespace
                 TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
                 PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
                 PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
-                PinObj->SetStringField(TEXT("type"), DescribePinType(Pin->PinType));
+                PinObj->SetStringField(TEXT("type"), BpExport_DescribePinType(Pin->PinType));
                 PinObj->SetBoolField(TEXT("is_exec"), Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec);
                 if (!Pin->DefaultValue.IsEmpty())
                 {
@@ -280,7 +280,7 @@ TSharedPtr<FJsonObject> FSproftBpExportCommands::HandleBpExport(const TSharedPtr
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing params object"));
     }
 
-    UBlueprint* Blueprint = ResolveBlueprintParam(Params);
+    UBlueprint* Blueprint = BpExport_ResolveBlueprintParam(Params);
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Blueprint not found or 'blueprint' parameter missing"));
@@ -339,7 +339,7 @@ TSharedPtr<FJsonObject> FSproftBpExportCommands::HandleBpExport(const TSharedPtr
         {
             TSharedPtr<FJsonObject> VarObj = MakeShared<FJsonObject>();
             VarObj->SetStringField(TEXT("name"), Var.VarName.ToString());
-            VarObj->SetStringField(TEXT("type"), DescribePinType(Var.VarType));
+            VarObj->SetStringField(TEXT("type"), BpExport_DescribePinType(Var.VarType));
             VarObj->SetStringField(TEXT("category"), Var.Category.ToString());
             VarObj->SetStringField(TEXT("friendly_name"), Var.FriendlyName);
             VarObj->SetStringField(TEXT("default_value"), Var.DefaultValue);

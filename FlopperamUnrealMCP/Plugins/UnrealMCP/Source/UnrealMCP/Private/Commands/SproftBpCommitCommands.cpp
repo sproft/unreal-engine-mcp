@@ -10,7 +10,7 @@
 
 namespace
 {
-    UBlueprint* ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
+    UBlueprint* BpCommit_ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
     {
         FString Input;
         if (!Params->TryGetStringField(TEXT("blueprint"), Input)
@@ -55,7 +55,7 @@ TSharedPtr<FJsonObject> FSproftBpCommitCommands::HandleBpCommit(const TSharedPtr
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing params object"));
     }
 
-    UBlueprint* Blueprint = ResolveBlueprintParam(Params);
+    UBlueprint* Blueprint = BpCommit_ResolveBlueprintParam(Params);
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

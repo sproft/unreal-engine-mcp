@@ -21,7 +21,7 @@ namespace
      *      FindFirstObjectSafe so the AssetRegistry filter can still
      *      enumerate even if the class was unloaded.
      */
-    bool ResolveClassPath(const FString& Token, FTopLevelAssetPath& OutPath, FString& OutWarning)
+    bool SearchAssets_ResolveClassPath(const FString& Token, FTopLevelAssetPath& OutPath, FString& OutWarning)
     {
         FString Trimmed = Token;
         Trimmed.TrimStartAndEndInline();
@@ -130,7 +130,7 @@ namespace
         {
             FTopLevelAssetPath ClassPath;
             FString Warning;
-            if (ResolveClassPath(Token, ClassPath, Warning))
+            if (SearchAssets_ResolveClassPath(Token, ClassPath, Warning))
             {
                 Filter.ClassPaths.AddUnique(ClassPath);
             }

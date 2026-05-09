@@ -19,7 +19,7 @@
 
 namespace
 {
-    UBlueprint* ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
+    UBlueprint* BpVariable_ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
     {
         FString Input;
         if (!Params->TryGetStringField(TEXT("blueprint"), Input)
@@ -37,7 +37,7 @@ namespace
     }
 
     /** Convert a token (bool / int / float / vector / "/Script/..." / "/Game/...") into an FEdGraphPinType. */
-    bool ResolvePinTypeFromToken(const FString& InRaw, FEdGraphPinType& OutPinType, FString& OutError)
+    bool BpVariable_ResolvePinTypeFromToken(const FString& InRaw, FEdGraphPinType& OutPinType, FString& OutError)
     {
         FString Token = InRaw.TrimStartAndEnd();
         if (Token.IsEmpty())
@@ -223,7 +223,7 @@ namespace
         return false;
     }
 
-    FString DescribePinType(const FEdGraphPinType& PinType)
+    FString BpVariable_DescribePinType(const FEdGraphPinType& PinType)
     {
         FString Result = PinType.PinCategory.ToString();
         if (!PinType.PinSubCategory.IsNone())
@@ -293,7 +293,7 @@ namespace
     void SerialiseVariable(const FBPVariableDescription& Var, TSharedPtr<FJsonObject>& Out)
     {
         Out->SetStringField(TEXT("name"), Var.VarName.ToString());
-        Out->SetStringField(TEXT("type"), DescribePinType(Var.VarType));
+        Out->SetStringField(TEXT("type"), BpVariable_DescribePinType(Var.VarType));
         Out->SetStringField(TEXT("default_value"), Var.DefaultValue);
         Out->SetStringField(TEXT("category"), Var.Category.ToString());
         Out->SetStringField(TEXT("friendly_name"), Var.FriendlyName);
@@ -335,7 +335,7 @@ TSharedPtr<FJsonObject> FSproftBpVariableCommands::HandleBpVariable(const TShare
     }
     Operation = Operation.ToLower();
 
-    UBlueprint* Blueprint = ResolveBlueprintParam(Params);
+    UBlueprint* Blueprint = BpVariable_ResolveBlueprintParam(Params);
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Blueprint not found or 'blueprint' parameter missing"));
@@ -417,7 +417,7 @@ TSharedPtr<FJsonObject> FSproftBpVariableCommands::AddVariable(UBlueprint* Bluep
     }
     FEdGraphPinType PinType;
     FString TypeError;
-    if (!ResolvePinTypeFromToken(TypeToken, PinType, TypeError))
+    if (!BpVariable_ResolvePinTypeFromToken(TypeToken, PinType, TypeError))
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TypeError);
     }
@@ -445,7 +445,7 @@ TSharedPtr<FJsonObject> FSproftBpVariableCommands::AddVariable(UBlueprint* Bluep
         }
         FEdGraphPinType ValuePinType;
         FString ValueError;
-        if (!ResolvePinTypeFromToken(ValueTypeToken, ValuePinType, ValueError))
+        if (!BpVariable_ResolvePinTypeFromToken(ValueTypeToken, ValuePinType, ValueError))
         {
             return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ValueError);
         }

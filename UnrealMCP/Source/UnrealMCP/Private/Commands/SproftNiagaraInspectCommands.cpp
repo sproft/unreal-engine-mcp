@@ -25,7 +25,7 @@ namespace
         }
     }
 
-    const TCHAR* UsageToString(ENiagaraScriptUsage Usage)
+    const TCHAR* NiagaraInspect_UsageToString(ENiagaraScriptUsage Usage)
     {
         switch (Usage)
         {
@@ -54,7 +54,7 @@ namespace
         {
             Out->SetStringField(TEXT("script_name"), Script->GetName());
             Out->SetStringField(TEXT("script_path"), Script->GetPathName());
-            Out->SetStringField(TEXT("usage"), UsageToString(Script->GetUsage()));
+            Out->SetStringField(TEXT("usage"), NiagaraInspect_UsageToString(Script->GetUsage()));
         }
         else
         {
@@ -65,7 +65,7 @@ namespace
 
     /** Categorise a Niagara variable so a downstream consumer does not
      *  need to peek at the FNiagaraTypeDefinition. */
-    const TCHAR* VariableKind(const FNiagaraVariableBase& Var)
+    const TCHAR* NiagaraInspect_VariableKind(const FNiagaraVariableBase& Var)
     {
         if (Var.IsDataInterface()) { return TEXT("data_interface"); }
         if (Var.IsUObject()) { return TEXT("object"); }
@@ -257,7 +257,7 @@ TSharedPtr<FJsonObject> FSproftNiagaraInspectCommands::HandleNiagaraInspect(cons
             {
                 Row->SetStringField(TEXT("type_path"), TypeDef.GetEnum()->GetPathName());
             }
-            Row->SetStringField(TEXT("kind"), VariableKind(Var));
+            Row->SetStringField(TEXT("kind"), NiagaraInspect_VariableKind(Var));
             Row->SetNumberField(TEXT("offset"), Var.Offset);
             ParamArr.Add(MakeShared<FJsonValueObject>(Row));
         }

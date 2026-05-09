@@ -95,7 +95,7 @@ namespace
     }
 
     /** Convert an FJsonValue into a textual form FProperty::ImportText accepts. */
-    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    FString BpComponent_JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
     {
         if (!Value.IsValid())
         {
@@ -284,7 +284,7 @@ TSharedPtr<FJsonObject> FSproftBpComponentCommands::AddComponent(const TSharedPt
                 continue;
             }
 
-            const FString TextValue = JsonValueToImportText(JsonVal);
+            const FString TextValue = BpComponent_JsonValueToImportText(JsonVal);
             const TCHAR* TextPtr = *TextValue;
             const TCHAR* Result = Prop->ImportText_InContainer(
                 TextPtr, Template, Template, PPF_None, &NullDevice);

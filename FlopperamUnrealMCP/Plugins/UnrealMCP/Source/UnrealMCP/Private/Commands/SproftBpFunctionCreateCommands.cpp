@@ -20,7 +20,7 @@
 
 namespace
 {
-    UBlueprint* ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
+    UBlueprint* BpFunctionCreate_ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
     {
         FString Input;
         if (!Params->TryGetStringField(TEXT("blueprint"), Input)
@@ -55,7 +55,7 @@ namespace
     }
 
     /** Type token resolver mirroring `bp_variable`. */
-    bool ResolvePinTypeFromToken(const FString& InRaw, FEdGraphPinType& OutPinType, FString& OutError)
+    bool BpFunctionCreate_ResolvePinTypeFromToken(const FString& InRaw, FEdGraphPinType& OutPinType, FString& OutError)
     {
         FString Token = InRaw.TrimStartAndEnd();
         if (Token.IsEmpty())
@@ -269,7 +269,7 @@ TSharedPtr<FJsonObject> FSproftBpFunctionCreateCommands::HandleFunctionCreate(co
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing params object"));
     }
 
-    UBlueprint* Blueprint = ResolveBlueprintParam(Params);
+    UBlueprint* Blueprint = BpFunctionCreate_ResolveBlueprintParam(Params);
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -404,7 +404,7 @@ TSharedPtr<FJsonObject> FSproftBpFunctionCreateCommands::HandleFunctionCreate(co
 
             FEdGraphPinType PinType;
             FString TypeError;
-            if (!ResolvePinTypeFromToken(TypeToken, PinType, TypeError))
+            if (!BpFunctionCreate_ResolvePinTypeFromToken(TypeToken, PinType, TypeError))
             {
                 EntryRow->SetBoolField(TEXT("success"), false);
                 EntryRow->SetStringField(TEXT("error"), TypeError);

@@ -13,7 +13,7 @@ namespace
     /** Best-effort class lookup for the user-facing `class` filter. Walks every
      *  loaded UClass; cheap because the editor process keeps a manageable set
      *  of classes alive at any one moment. */
-    UClass* ResolveActorClass(const FString& InClassName)
+    UClass* SceneQuery_ResolveActorClass(const FString& InClassName)
     {
         if (InClassName.IsEmpty())
         {
@@ -184,7 +184,7 @@ TSharedPtr<FJsonObject> FSproftSceneQueryCommands::HandleSceneQuery(const TShare
     bool bClassFilterUsesSearchClass = false;
     if (!ClassFilter.IsEmpty() && !bMatchClassSubstring)
     {
-        UClass* Resolved = ResolveActorClass(ClassFilter);
+        UClass* Resolved = SceneQuery_ResolveActorClass(ClassFilter);
         if (!Resolved)
         {
             TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();

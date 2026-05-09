@@ -18,7 +18,7 @@
 namespace
 {
     /** Render an FVector as a [x, y, z] number array. */
-    TArray<TSharedPtr<FJsonValue>> Vec3ToJson(const FVector& V)
+    TArray<TSharedPtr<FJsonValue>> AnimationInspect_Vec3ToJson(const FVector& V)
     {
         TArray<TSharedPtr<FJsonValue>> Arr;
         Arr.Add(MakeShared<FJsonValueNumber>(V.X));
@@ -38,7 +38,7 @@ namespace
     }
 
     /** Render an FFrameRate as `{numerator, denominator, approx_fps}`. */
-    TSharedPtr<FJsonObject> FrameRateRecord(const FFrameRate& Rate)
+    TSharedPtr<FJsonObject> AnimationInspect_FrameRateRecord(const FFrameRate& Rate)
     {
         TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
         Out->SetNumberField(TEXT("numerator"),   Rate.Numerator);
@@ -162,9 +162,9 @@ namespace
                 TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
                 Entry->SetStringField(TEXT("name"), Socket->SocketName.ToString());
                 Entry->SetStringField(TEXT("bone_name"), Socket->BoneName.ToString());
-                Entry->SetArrayField(TEXT("relative_location"), Vec3ToJson(Socket->RelativeLocation));
+                Entry->SetArrayField(TEXT("relative_location"), AnimationInspect_Vec3ToJson(Socket->RelativeLocation));
                 Entry->SetArrayField(TEXT("relative_rotation"), RotatorToJson(Socket->RelativeRotation));
-                Entry->SetArrayField(TEXT("relative_scale"),    Vec3ToJson(Socket->RelativeScale));
+                Entry->SetArrayField(TEXT("relative_scale"),    AnimationInspect_Vec3ToJson(Socket->RelativeScale));
                 Entry->SetStringField(TEXT("source"), TEXT("skeletal_mesh"));
                 SocketArr.Add(MakeShared<FJsonValueObject>(Entry));
             }
@@ -189,9 +189,9 @@ namespace
                     TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
                     Entry->SetStringField(TEXT("name"), Socket->SocketName.ToString());
                     Entry->SetStringField(TEXT("bone_name"), Socket->BoneName.ToString());
-                    Entry->SetArrayField(TEXT("relative_location"), Vec3ToJson(Socket->RelativeLocation));
+                    Entry->SetArrayField(TEXT("relative_location"), AnimationInspect_Vec3ToJson(Socket->RelativeLocation));
                     Entry->SetArrayField(TEXT("relative_rotation"), RotatorToJson(Socket->RelativeRotation));
-                    Entry->SetArrayField(TEXT("relative_scale"),    Vec3ToJson(Socket->RelativeScale));
+                    Entry->SetArrayField(TEXT("relative_scale"),    AnimationInspect_Vec3ToJson(Socket->RelativeScale));
                     Entry->SetStringField(TEXT("source"), TEXT("skeleton"));
                     SocketArr.Add(MakeShared<FJsonValueObject>(Entry));
                 }
@@ -212,7 +212,7 @@ namespace
 
         Out->SetNumberField(TEXT("play_length"), Seq->GetPlayLength());
         Out->SetNumberField(TEXT("rate_scale"),  Seq->RateScale);
-        Out->SetObjectField(TEXT("sampling_frame_rate"), FrameRateRecord(Seq->GetSamplingFrameRate()));
+        Out->SetObjectField(TEXT("sampling_frame_rate"), AnimationInspect_FrameRateRecord(Seq->GetSamplingFrameRate()));
         Out->SetNumberField(TEXT("sampled_key_count"), Seq->GetNumberOfSampledKeys());
         Out->SetStringField(TEXT("additive_anim_type"), AdditiveAnimTypeToString(Seq->GetAdditiveAnimType()));
 

@@ -13,7 +13,7 @@ namespace
     /** Friendly level name used in responses. Matches the convention used
      *  by the existing SproftFoliageInspect / SproftLandscapeInspect
      *  pipeline so cross-tool consumers see one identifier. */
-    FString LevelLabel(ULevel* Level)
+    FString FoliageEdit_LevelLabel(ULevel* Level)
     {
         if (!Level)
         {
@@ -46,7 +46,7 @@ namespace
             {
                 continue;
             }
-            if (LevelLabel(Level).Contains(LevelFilter))
+            if (FoliageEdit_LevelLabel(Level).Contains(LevelFilter))
             {
                 return Level;
             }
@@ -130,7 +130,7 @@ TSharedPtr<FJsonObject> FSproftFoliageEditCommands::HandleAddFoliageType(const T
     if (!IFA)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-            FString::Printf(TEXT("add_foliage_type: failed to spawn AInstancedFoliageActor for level '%s'"), *LevelLabel(TargetLevel)));
+            FString::Printf(TEXT("add_foliage_type: failed to spawn AInstancedFoliageActor for level '%s'"), *FoliageEdit_LevelLabel(TargetLevel)));
     }
 
     // FindInfo before the AddFoliageType call so we can report whether
@@ -163,7 +163,7 @@ TSharedPtr<FJsonObject> FSproftFoliageEditCommands::HandleAddFoliageType(const T
     Result->SetStringField(TEXT("actor_name"), IFA->GetName());
     Result->SetStringField(TEXT("actor_label"), IFA->GetActorLabel());
     Result->SetStringField(TEXT("actor_path"), IFA->GetPathName());
-    Result->SetStringField(TEXT("level"), LevelLabel(TargetLevel));
+    Result->SetStringField(TEXT("level"), FoliageEdit_LevelLabel(TargetLevel));
     Result->SetBoolField(TEXT("created_actor"), !bIFAExisted);
     Result->SetBoolField(TEXT("type_already_bound"), bTypeAlreadyBound);
     Result->SetNumberField(TEXT("foliage_type_count"), IFA->GetFoliageInfos().Num());

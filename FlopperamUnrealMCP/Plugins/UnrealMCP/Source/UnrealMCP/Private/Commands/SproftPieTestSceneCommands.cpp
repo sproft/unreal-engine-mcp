@@ -16,7 +16,7 @@ namespace
      *  spell out). We want assertions to feel symmetric with the
      *  scene-mutation tools so a designer can spawn an actor with a
      *  preferred name and reference it by the same string here. */
-    AActor* ResolveActorByName(UWorld* World, const FString& Target)
+    AActor* PieTestScene_ResolveActorByName(UWorld* World, const FString& Target)
     {
         if (!World || Target.IsEmpty())
         {
@@ -97,7 +97,7 @@ namespace
      *  flatten to their primitive text form; objects / arrays go through
      *  the standard Json writer so callers see a stable canonicalized
      *  representation when ImportText fails. */
-    FString JsonValueToString(const TSharedPtr<FJsonValue>& Value)
+    FString PieTestScene_JsonValueToString(const TSharedPtr<FJsonValue>& Value)
     {
         if (!Value.IsValid())
         {
@@ -231,7 +231,7 @@ TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandlePieTestScene(const TS
                 Results.Add(MakeShared<FJsonValueObject>(Out));
                 continue;
             }
-            AActor* Found = ResolveActorByName(World, Target);
+            AActor* Found = PieTestScene_ResolveActorByName(World, Target);
             const bool bFound = (Found != nullptr);
             Out->SetBoolField(TEXT("passed"), bFound);
             if (bFound)
@@ -282,7 +282,7 @@ TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandlePieTestScene(const TS
                 Tolerance = 0.0;
             }
 
-            AActor* Found = ResolveActorByName(World, Target);
+            AActor* Found = PieTestScene_ResolveActorByName(World, Target);
             if (!Found)
             {
                 Out->SetBoolField(TEXT("passed"), false);
@@ -336,7 +336,7 @@ TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandlePieTestScene(const TS
             {
                 if (!ExpectedField->TryGetString(TagString))
                 {
-                    TagString = JsonValueToString(ExpectedField);
+                    TagString = PieTestScene_JsonValueToString(ExpectedField);
                 }
             }
             if (TagString.IsEmpty())
@@ -348,7 +348,7 @@ TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandlePieTestScene(const TS
                 Results.Add(MakeShared<FJsonValueObject>(Out));
                 continue;
             }
-            AActor* Found = ResolveActorByName(World, Target);
+            AActor* Found = PieTestScene_ResolveActorByName(World, Target);
             if (!Found)
             {
                 Out->SetBoolField(TEXT("passed"), false);
@@ -432,7 +432,7 @@ TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandlePieTestScene(const TS
                 continue;
             }
 
-            AActor* Found = ResolveActorByName(World, Target);
+            AActor* Found = PieTestScene_ResolveActorByName(World, Target);
             if (!Found)
             {
                 Out->SetBoolField(TEXT("passed"), false);
@@ -473,7 +473,7 @@ TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandlePieTestScene(const TS
             Scratch.SetNumZeroed(Prop->GetSize());
             Prop->InitializeValue(Scratch.GetData());
 
-            const FString ExpectedRaw = JsonValueToString(ValueField);
+            const FString ExpectedRaw = PieTestScene_JsonValueToString(ValueField);
             const TCHAR* ImportPtr = *ExpectedRaw;
             const TCHAR* ImportResult = Prop->ImportText_Direct(ImportPtr, Scratch.GetData(), Found, PPF_None);
             FString ExpectedCanonical;

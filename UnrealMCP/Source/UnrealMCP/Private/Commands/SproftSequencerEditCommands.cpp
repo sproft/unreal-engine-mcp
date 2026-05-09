@@ -120,7 +120,7 @@ namespace
     /** Render a frame-rate as numerator / denominator with a helpful float
      *  approximation; UI surfaces prefer the float, schedulers prefer the
      *  exact ratio. */
-    TSharedPtr<FJsonObject> FrameRateRecord(const FFrameRate& Rate)
+    TSharedPtr<FJsonObject> SequencerEdit_FrameRateRecord(const FFrameRate& Rate)
     {
         TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
         Out->SetNumberField(TEXT("numerator"),   Rate.Numerator);
@@ -136,7 +136,7 @@ namespace
     /** Split a `/Game/Subdir/AssetName` path into directory + asset
      *  name. Mirrors the helper in `SproftAssetFactoryCommands` so the
      *  edit slice does not fight the asset-creation flow. */
-    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    void SequencerEdit_SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
     {
         FString Trim = InPath;
         Trim.TrimEndInline();
@@ -164,7 +164,7 @@ namespace
     /** Mirrors the actor lookup `actor_inspect` / `scene_compose` use:
      *  GetName() first, GetActorLabel() second. Sequencer always
      *  binds against the editor world, never PIE; we do the same. */
-    AActor* ResolveActorByName(UWorld* World, const FString& Target)
+    AActor* SequencerEdit_ResolveActorByName(UWorld* World, const FString& Target)
     {
         if (!World || Target.IsEmpty())
         {
@@ -454,9 +454,9 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleSequencerInspect(con
     Result->SetStringField(TEXT("class_path"), Sequence->GetClass()->GetPathName());
 
     Result->SetObjectField(TEXT("tick_resolution"),
-        FrameRateRecord(MovieScene->GetTickResolution()));
+        SequencerEdit_FrameRateRecord(MovieScene->GetTickResolution()));
     Result->SetObjectField(TEXT("display_rate"),
-        FrameRateRecord(MovieScene->GetDisplayRate()));
+        SequencerEdit_FrameRateRecord(MovieScene->GetDisplayRate()));
 
     {
         // Playback range is a bounded TRange in tick-resolution frame numbers.
@@ -563,7 +563,7 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCreateLevelSequence(
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    SequencerEdit_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -619,9 +619,9 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCreateLevelSequence(
     if (UMovieScene* MovieScene = Sequence->GetMovieScene())
     {
         Result->SetObjectField(TEXT("tick_resolution"),
-            FrameRateRecord(MovieScene->GetTickResolution()));
+            SequencerEdit_FrameRateRecord(MovieScene->GetTickResolution()));
         Result->SetObjectField(TEXT("display_rate"),
-            FrameRateRecord(MovieScene->GetDisplayRate()));
+            SequencerEdit_FrameRateRecord(MovieScene->GetDisplayRate()));
     }
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
@@ -666,7 +666,7 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddPossessable(const
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
     }
-    AActor* Actor = ResolveActorByName(World, ActorTarget);
+    AActor* Actor = SequencerEdit_ResolveActorByName(World, ActorTarget);
     if (!Actor)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

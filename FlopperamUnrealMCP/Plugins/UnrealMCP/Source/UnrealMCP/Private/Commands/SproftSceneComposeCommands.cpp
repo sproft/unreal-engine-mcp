@@ -15,7 +15,7 @@ namespace
     /** Resolve a class name or path into an AActor subclass. Tries full paths
      *  first, then a short-name probe in loaded classes, then a small set of
      *  Engine-namespace fallbacks. Returns nullptr on failure. */
-    UClass* ResolveActorClass(const FString& InClassPath)
+    UClass* SceneCompose_ResolveActorClass(const FString& InClassPath)
     {
         if (InClassPath.IsEmpty())
         {
@@ -78,7 +78,7 @@ namespace
     }
 
     /** Resolve an actor by FName, then by case-insensitive Outliner label. */
-    AActor* ResolveActor(UWorld* World, const FString& InQuery)
+    AActor* SceneCompose_ResolveActor(UWorld* World, const FString& InQuery)
     {
         if (!World || InQuery.IsEmpty())
         {
@@ -106,7 +106,7 @@ namespace
     }
 
     /** Convert an FJsonValue into a textual form FProperty::ImportText accepts. */
-    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    FString SceneCompose_JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
     {
         if (!Value.IsValid())
         {
@@ -135,7 +135,7 @@ namespace
 
     /** Apply a flat property dict to an actor through FProperty::ImportText.
      *  Records each successful and skipped key in OutApplied / OutSkipped. */
-    void ApplyPropertyDict(
+    void SceneCompose_ApplyPropertyDict(
         AActor* Actor,
         const TSharedPtr<FJsonObject>& Props,
         TArray<TSharedPtr<FJsonValue>>& OutApplied,
@@ -161,7 +161,7 @@ namespace
                 continue;
             }
 
-            const FString TextValue = JsonValueToImportText(JsonVal);
+            const FString TextValue = SceneCompose_JsonValueToImportText(JsonVal);
             const TCHAR* TextPtr = *TextValue;
             const TCHAR* Result = Prop->ImportText_InContainer(
                 TextPtr, Actor, Actor, PPF_None, &NullDevice);
@@ -295,7 +295,7 @@ TSharedPtr<FJsonObject> FSproftSceneComposeCommands::SpawnActor(const TSharedPtr
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'class' parameter"));
     }
 
-    UClass* SpawnClass = ResolveActorClass(ClassPath);
+    UClass* SpawnClass = SceneCompose_ResolveActorClass(ClassPath);
     if (!SpawnClass)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -388,7 +388,7 @@ TSharedPtr<FJsonObject> FSproftSceneComposeCommands::SpawnActor(const TSharedPtr
     const TSharedPtr<FJsonObject>* PropsObj = nullptr;
     if (Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid())
     {
-        ApplyPropertyDict(NewActor, *PropsObj, AppliedJson, SkippedJson);
+        SceneCompose_ApplyPropertyDict(NewActor, *PropsObj, AppliedJson, SkippedJson);
     }
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -415,7 +415,7 @@ TSharedPtr<FJsonObject> FSproftSceneComposeCommands::ModifyActor(const TSharedPt
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
     }
 
-    AActor* Actor = ResolveActor(World, ActorQuery);
+    AActor* Actor = SceneCompose_ResolveActor(World, ActorQuery);
     if (!Actor)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -469,7 +469,7 @@ TSharedPtr<FJsonObject> FSproftSceneComposeCommands::ModifyActor(const TSharedPt
     const TSharedPtr<FJsonObject>* PropsObj = nullptr;
     if (Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid())
     {
-        ApplyPropertyDict(Actor, *PropsObj, AppliedJson, SkippedJson);
+        SceneCompose_ApplyPropertyDict(Actor, *PropsObj, AppliedJson, SkippedJson);
     }
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -498,7 +498,7 @@ TSharedPtr<FJsonObject> FSproftSceneComposeCommands::DeleteActor(const TSharedPt
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
     }
 
-    AActor* Actor = ResolveActor(World, ActorQuery);
+    AActor* Actor = SceneCompose_ResolveActor(World, ActorQuery);
     if (!Actor)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

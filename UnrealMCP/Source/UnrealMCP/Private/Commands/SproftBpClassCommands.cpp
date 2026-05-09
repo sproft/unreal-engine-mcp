@@ -13,7 +13,7 @@
 
 namespace
 {
-    UBlueprint* ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
+    UBlueprint* BpClass_ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
     {
         FString Input;
         if (!Params->TryGetStringField(TEXT("blueprint"), Input)
@@ -31,7 +31,7 @@ namespace
     }
 
     /** Walk a small set of well-known short names to their UClass. Mirrors bp_create. */
-    UClass* TryWellKnownShortName(const FString& Name)
+    UClass* BpClass_TryWellKnownShortName(const FString& Name)
     {
         struct FEntry
         {
@@ -84,8 +84,8 @@ namespace
         return nullptr;
     }
 
-    /** Resolve a parent class spec mirroring bp_create's ResolveParentClass. */
-    UClass* ResolveParentClass(const FString& Input)
+    /** Resolve a parent class spec mirroring bp_create's BpClass_ResolveParentClass. */
+    UClass* BpClass_ResolveParentClass(const FString& Input)
     {
         const FString Trimmed = Input.TrimStartAndEnd();
         if (Trimmed.IsEmpty())
@@ -111,7 +111,7 @@ namespace
                 return Loaded;
             }
         }
-        if (UClass* Hit = TryWellKnownShortName(Trimmed))
+        if (UClass* Hit = BpClass_TryWellKnownShortName(Trimmed))
         {
             return Hit;
         }
@@ -249,7 +249,7 @@ TSharedPtr<FJsonObject> FSproftBpClassCommands::HandleBpClass(const TSharedPtr<F
     }
     Operation = Operation.ToLower();
 
-    UBlueprint* Blueprint = ResolveBlueprintParam(Params);
+    UBlueprint* Blueprint = BpClass_ResolveBlueprintParam(Params);
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Blueprint not found or 'blueprint' parameter missing"));
@@ -331,7 +331,7 @@ TSharedPtr<FJsonObject> FSproftBpClassCommands::SetParent(UBlueprint* Blueprint,
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'parent_class' parameter is required"));
     }
-    UClass* NewParent = ResolveParentClass(ParentInput);
+    UClass* NewParent = BpClass_ResolveParentClass(ParentInput);
     if (!NewParent)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

@@ -11,7 +11,7 @@
 
 namespace
 {
-    TArray<TSharedPtr<FJsonValue>> Vec3ToJson(const FVector& V)
+    TArray<TSharedPtr<FJsonValue>> LevelInspect_Vec3ToJson(const FVector& V)
     {
         TArray<TSharedPtr<FJsonValue>> Arr;
         Arr.Add(MakeShared<FJsonValueNumber>(V.X));
@@ -20,7 +20,7 @@ namespace
         return Arr;
     }
 
-    TArray<TSharedPtr<FJsonValue>> RotToJson(const FRotator& R)
+    TArray<TSharedPtr<FJsonValue>> LevelInspect_RotToJson(const FRotator& R)
     {
         TArray<TSharedPtr<FJsonValue>> Arr;
         Arr.Add(MakeShared<FJsonValueNumber>(R.Pitch));
@@ -29,7 +29,7 @@ namespace
         return Arr;
     }
 
-    FString MobilityToString(EComponentMobility::Type In)
+    FString LevelInspect_MobilityToString(EComponentMobility::Type In)
     {
         switch (In)
         {
@@ -42,7 +42,7 @@ namespace
 
     /** Friendly level name. ULevel itself is named "PersistentLevel" / "World";
      *  callers want the owning world's package. */
-    FString LevelLabel(ULevel* Level)
+    FString LevelInspect_LevelLabel(ULevel* Level)
     {
         if (!Level)
         {
@@ -56,7 +56,7 @@ namespace
     }
 
     /** Compact per-component record. */
-    TSharedPtr<FJsonObject> ComponentRecord(UActorComponent* Component)
+    TSharedPtr<FJsonObject> LevelInspect_ComponentRecord(UActorComponent* Component)
     {
         TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
         if (!Component)
@@ -71,8 +71,8 @@ namespace
         if (USceneComponent* AsScene = Cast<USceneComponent>(Component))
         {
             Out->SetBoolField(TEXT("is_scene_component"), true);
-            Out->SetStringField(TEXT("mobility"), MobilityToString(AsScene->Mobility));
-            Out->SetArrayField(TEXT("relative_location"), Vec3ToJson(AsScene->GetRelativeLocation()));
+            Out->SetStringField(TEXT("mobility"), LevelInspect_MobilityToString(AsScene->Mobility));
+            Out->SetArrayField(TEXT("relative_location"), LevelInspect_Vec3ToJson(AsScene->GetRelativeLocation()));
             if (USceneComponent* Parent = AsScene->GetAttachParent())
             {
                 Out->SetStringField(TEXT("attach_parent"), Parent->GetName());
@@ -195,7 +195,7 @@ TSharedPtr<FJsonObject> FSproftLevelInspectCommands::HandleLevelInspect(const TS
             continue;
         }
 
-        const FString LevelName = LevelLabel(Level);
+        const FString LevelName = LevelInspect_LevelLabel(Level);
 
         TSharedPtr<FJsonObject> LevelEntry = MakeShared<FJsonObject>();
         LevelEntry->SetStringField(TEXT("name"), LevelName);
@@ -266,9 +266,9 @@ TSharedPtr<FJsonObject> FSproftLevelInspectCommands::HandleLevelInspect(const TS
                 Entry->SetStringField(TEXT("folder_path"), Folder.ToString());
             }
 
-            Entry->SetArrayField(TEXT("location"), Vec3ToJson(Actor->GetActorLocation()));
-            Entry->SetArrayField(TEXT("rotation"), RotToJson(Actor->GetActorRotation()));
-            Entry->SetArrayField(TEXT("scale"),    Vec3ToJson(Actor->GetActorScale3D()));
+            Entry->SetArrayField(TEXT("location"), LevelInspect_Vec3ToJson(Actor->GetActorLocation()));
+            Entry->SetArrayField(TEXT("rotation"), LevelInspect_RotToJson(Actor->GetActorRotation()));
+            Entry->SetArrayField(TEXT("scale"),    LevelInspect_Vec3ToJson(Actor->GetActorScale3D()));
 
             TArray<TSharedPtr<FJsonValue>> TagArr;
             for (const FName& Tag : Actor->Tags)
@@ -283,7 +283,7 @@ TSharedPtr<FJsonObject> FSproftLevelInspectCommands::HandleLevelInspect(const TS
             if (USceneComponent* Root = Actor->GetRootComponent())
             {
                 Entry->SetStringField(TEXT("root_component_class"), Root->GetClass()->GetName());
-                Entry->SetStringField(TEXT("mobility"), MobilityToString(Root->Mobility));
+                Entry->SetStringField(TEXT("mobility"), LevelInspect_MobilityToString(Root->Mobility));
             }
 
             if (bIncludeComponents)
@@ -294,7 +294,7 @@ TSharedPtr<FJsonObject> FSproftLevelInspectCommands::HandleLevelInspect(const TS
                 TArray<TSharedPtr<FJsonValue>> CompArr;
                 for (UActorComponent* Comp : Components)
                 {
-                    CompArr.Add(MakeShared<FJsonValueObject>(ComponentRecord(Comp)));
+                    CompArr.Add(MakeShared<FJsonValueObject>(LevelInspect_ComponentRecord(Comp)));
                 }
                 Entry->SetArrayField(TEXT("components"), CompArr);
                 Entry->SetNumberField(TEXT("component_count"), Components.Num());

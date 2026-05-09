@@ -15,7 +15,7 @@
 
 namespace
 {
-    TArray<TSharedPtr<FJsonValue>> Vec3ToJson(const FVector& V)
+    TArray<TSharedPtr<FJsonValue>> FoliageInspect_Vec3ToJson(const FVector& V)
     {
         TArray<TSharedPtr<FJsonValue>> Arr;
         Arr.Add(MakeShared<FJsonValueNumber>(V.X));
@@ -26,7 +26,7 @@ namespace
 
     /** Friendly level name; mirrors the SproftLevelInspect / SproftLandscapeInspect
      *  level-naming convention so cross-tool callers see one identifier. */
-    FString LevelLabel(ULevel* Level)
+    FString FoliageInspect_LevelLabel(ULevel* Level)
     {
         if (!Level)
         {
@@ -185,7 +185,7 @@ TSharedPtr<FJsonObject> FSproftFoliageInspectCommands::HandleFoliageInspect(cons
         {
             continue;
         }
-        const FString LevelName = LevelLabel(Level);
+        const FString LevelName = FoliageInspect_LevelLabel(Level);
         if (!LevelFilter.IsEmpty() && !LevelName.ToLower().Contains(LevelFilterLower))
         {
             continue;
@@ -221,7 +221,7 @@ TSharedPtr<FJsonObject> FSproftFoliageInspectCommands::HandleFoliageInspect(cons
             Entry->SetStringField(TEXT("class"), IFA->GetClass()->GetName());
             Entry->SetStringField(TEXT("class_path"), IFA->GetClass()->GetPathName());
             Entry->SetStringField(TEXT("level"), LevelName);
-            Entry->SetArrayField(TEXT("location"), Vec3ToJson(IFA->GetActorLocation()));
+            Entry->SetArrayField(TEXT("location"), FoliageInspect_Vec3ToJson(IFA->GetActorLocation()));
 
             // GetFoliageInfos returns const TMap<UFoliageType*, TUniqueObj<FFoliageInfo>>&.
             const TMap<UFoliageType*, TUniqueObj<FFoliageInfo>>& Infos = IFA->GetFoliageInfos();
@@ -280,11 +280,11 @@ TSharedPtr<FJsonObject> FSproftFoliageInspectCommands::HandleFoliageInspect(cons
                 if (Bounds.IsValid)
                 {
                     TypeEntry->SetArrayField(TEXT("approximated_bounds_min"),
-                        Vec3ToJson(Bounds.Min));
+                        FoliageInspect_Vec3ToJson(Bounds.Min));
                     TypeEntry->SetArrayField(TEXT("approximated_bounds_max"),
-                        Vec3ToJson(Bounds.Max));
+                        FoliageInspect_Vec3ToJson(Bounds.Max));
                     TypeEntry->SetArrayField(TEXT("approximated_bounds_size"),
-                        Vec3ToJson(Bounds.GetSize()));
+                        FoliageInspect_Vec3ToJson(Bounds.GetSize()));
                 }
 #endif
 
@@ -299,7 +299,7 @@ TSharedPtr<FJsonObject> FSproftFoliageInspectCommands::HandleFoliageInspect(cons
                         TSharedPtr<FJsonObject> Sample = MakeShared<FJsonObject>();
                         Sample->SetNumberField(TEXT("index"), Idx);
                         Sample->SetArrayField(TEXT("location"),
-                            Vec3ToJson(Info.Instances[Idx].Location));
+                            FoliageInspect_Vec3ToJson(Info.Instances[Idx].Location));
                         Samples.Add(MakeShared<FJsonValueObject>(Sample));
                     }
                     TypeEntry->SetArrayField(TEXT("sample_locations"), Samples);

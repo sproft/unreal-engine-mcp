@@ -16,7 +16,7 @@
 namespace
 {
     /** Best-effort textual rendering of an FEdGraphPinType. */
-    FString DescribePinType(const FEdGraphPinType& PinType)
+    FString BpInspect_DescribePinType(const FEdGraphPinType& PinType)
     {
         FString Result = PinType.PinCategory.ToString();
         if (!PinType.PinSubCategory.IsNone())
@@ -42,7 +42,7 @@ namespace
         return Result;
     }
 
-    UBlueprint* ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
+    UBlueprint* BpInspect_ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
     {
         FString Input;
         if (!Params->TryGetStringField(TEXT("blueprint"), Input)
@@ -90,7 +90,7 @@ TSharedPtr<FJsonObject> FSproftBpInspectCommands::HandleBpInspect(const TSharedP
     }
     Operation = Operation.ToLower();
 
-    UBlueprint* Blueprint = ResolveBlueprintParam(Params);
+    UBlueprint* Blueprint = BpInspect_ResolveBlueprintParam(Params);
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Blueprint not found or 'blueprint' parameter missing"));
@@ -127,7 +127,7 @@ TSharedPtr<FJsonObject> FSproftBpInspectCommands::ListVariables(UBlueprint* Blue
     {
         TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
         Entry->SetStringField(TEXT("name"), Var.VarName.ToString());
-        Entry->SetStringField(TEXT("type"), DescribePinType(Var.VarType));
+        Entry->SetStringField(TEXT("type"), BpInspect_DescribePinType(Var.VarType));
         Entry->SetStringField(TEXT("default_value"), Var.DefaultValue);
         Entry->SetBoolField(TEXT("editable_on_instance"), (Var.PropertyFlags & CPF_Edit) != 0);
         Entry->SetBoolField(TEXT("blueprint_read_only"), (Var.PropertyFlags & CPF_BlueprintReadOnly) != 0);

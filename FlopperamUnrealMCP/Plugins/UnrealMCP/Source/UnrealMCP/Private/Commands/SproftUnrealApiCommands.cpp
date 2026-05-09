@@ -17,7 +17,7 @@ namespace
      *   - `/Game/...` Blueprint class path (auto-suffixed with `_C`)
      *   - short class name (e.g. `Actor`, `MyCharacter`).
      */
-    UClass* ResolveClass(const FString& Input)
+    UClass* UnrealApi_ResolveClass(const FString& Input)
     {
         const FString Trimmed = Input.TrimStartAndEnd();
         if (Trimmed.IsEmpty())
@@ -435,7 +435,7 @@ TSharedPtr<FJsonObject> FSproftUnrealApiCommands::HandleDescribe(const TSharedPt
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'class' parameter"));
     }
 
-    UClass* Klass = ResolveClass(ClassParam);
+    UClass* Klass = UnrealApi_ResolveClass(ClassParam);
     if (!Klass)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -553,7 +553,7 @@ TSharedPtr<FJsonObject> FSproftUnrealApiCommands::HandleFindProperty(const TShar
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'pattern' parameter"));
     }
 
-    UClass* Klass = ResolveClass(ClassParam);
+    UClass* Klass = UnrealApi_ResolveClass(ClassParam);
     if (!Klass)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -605,7 +605,7 @@ TSharedPtr<FJsonObject> FSproftUnrealApiCommands::HandleFindFunction(const TShar
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'pattern' parameter"));
     }
 
-    UClass* Klass = ResolveClass(ClassParam);
+    UClass* Klass = UnrealApi_ResolveClass(ClassParam);
     if (!Klass)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

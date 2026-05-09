@@ -11,7 +11,7 @@
 
 namespace
 {
-    UBlueprint* ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
+    UBlueprint* BpGraph_ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
     {
         FString Input;
         if (!Params->TryGetStringField(TEXT("blueprint"), Input)
@@ -28,7 +28,7 @@ namespace
         return BP;
     }
 
-    FString DescribePinType(const FEdGraphPinType& PinType)
+    FString BpGraph_DescribePinType(const FEdGraphPinType& PinType)
     {
         FString Result = PinType.PinCategory.ToString();
         if (!PinType.PinSubCategory.IsNone())
@@ -56,7 +56,7 @@ namespace
 
     /** Walk a Blueprint's graphs and pass each to a callback with its kind label. */
     template <typename FnType>
-    void ForEachGraph(UBlueprint* Blueprint, FnType Callback)
+    void BpGraph_ForEachGraph(UBlueprint* Blueprint, FnType Callback)
     {
         for (UEdGraph* G : Blueprint->UbergraphPages)
         {
@@ -88,7 +88,7 @@ namespace
         const FString Lower = InName.ToLower();
         UEdGraph* Match = nullptr;
         FString MatchKind;
-        ForEachGraph(Blueprint, [&](UEdGraph* G, const TCHAR* Kind)
+        BpGraph_ForEachGraph(Blueprint, [&](UEdGraph* G, const TCHAR* Kind)
         {
             if (Match)
             {
@@ -106,7 +106,7 @@ namespace
             return Match;
         }
         // Fallback: substring.
-        ForEachGraph(Blueprint, [&](UEdGraph* G, const TCHAR* Kind)
+        BpGraph_ForEachGraph(Blueprint, [&](UEdGraph* G, const TCHAR* Kind)
         {
             if (Match)
             {
@@ -175,7 +175,7 @@ TSharedPtr<FJsonObject> FSproftBpGraphCommands::HandleBpGraph(const TSharedPtr<F
     }
     Operation = Operation.ToLower();
 
-    UBlueprint* Blueprint = ResolveBlueprintParam(Params);
+    UBlueprint* Blueprint = BpGraph_ResolveBlueprintParam(Params);
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Blueprint not found or 'blueprint' parameter missing"));
@@ -204,7 +204,7 @@ TSharedPtr<FJsonObject> FSproftBpGraphCommands::HandleBpGraph(const TSharedPtr<F
 TSharedPtr<FJsonObject> FSproftBpGraphCommands::ListGraphs(UBlueprint* Blueprint)
 {
     TArray<TSharedPtr<FJsonValue>> Entries;
-    ForEachGraph(Blueprint, [&](UEdGraph* G, const TCHAR* Kind)
+    BpGraph_ForEachGraph(Blueprint, [&](UEdGraph* G, const TCHAR* Kind)
     {
         TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
         Entry->SetStringField(TEXT("name"), G->GetName());
@@ -330,7 +330,7 @@ TSharedPtr<FJsonObject> FSproftBpGraphCommands::GetNode(UBlueprint* Blueprint, c
         TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
         PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
         PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
-        PinObj->SetStringField(TEXT("type"), DescribePinType(Pin->PinType));
+        PinObj->SetStringField(TEXT("type"), BpGraph_DescribePinType(Pin->PinType));
         PinObj->SetBoolField(TEXT("is_exec"), Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec);
         if (!Pin->DefaultValue.IsEmpty())
         {
@@ -355,7 +355,7 @@ TSharedPtr<FJsonObject> FSproftBpGraphCommands::GetNode(UBlueprint* Blueprint, c
             Conn->SetStringField(TEXT("target_node"), Linked->GetOwningNode()->GetName());
             Conn->SetStringField(TEXT("target_node_title"), Linked->GetOwningNode()->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
             Conn->SetStringField(TEXT("target_pin"), Linked->PinName.ToString());
-            Conn->SetStringField(TEXT("target_pin_type"), DescribePinType(Linked->PinType));
+            Conn->SetStringField(TEXT("target_pin_type"), BpGraph_DescribePinType(Linked->PinType));
             Connections.Add(MakeShared<FJsonValueObject>(Conn));
         }
         PinObj->SetArrayField(TEXT("connections"), Connections);

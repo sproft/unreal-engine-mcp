@@ -20,7 +20,7 @@
 namespace
 {
     /** Convert an FJsonValue into a textual form FProperty::ImportText accepts. */
-    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    FString BpCreate_JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
     {
         if (!Value.IsValid())
         {
@@ -48,7 +48,7 @@ namespace
     }
 
     /** Walk a small set of well-known short names to their UClass. */
-    UClass* TryWellKnownShortName(const FString& Name)
+    UClass* BpCreate_TryWellKnownShortName(const FString& Name)
     {
         struct FEntry
         {
@@ -102,7 +102,7 @@ namespace
     }
 
     /** Resolve a short name, full /Script path, or /Game BP path to a UClass. */
-    UClass* ResolveParentClass(const FString& Input)
+    UClass* BpCreate_ResolveParentClass(const FString& Input)
     {
         const FString Trimmed = Input.TrimStartAndEnd();
         if (Trimmed.IsEmpty())
@@ -132,7 +132,7 @@ namespace
             }
         }
         // Well-known short names.
-        if (UClass* Hit = TryWellKnownShortName(Trimmed))
+        if (UClass* Hit = BpCreate_TryWellKnownShortName(Trimmed))
         {
             return Hit;
         }
@@ -189,7 +189,7 @@ namespace
                 OutSkipped.Add(MakeShared<FJsonValueObject>(Skip));
                 continue;
             }
-            const FString TextValue = JsonValueToImportText(JsonVal);
+            const FString TextValue = BpCreate_JsonValueToImportText(JsonVal);
             const TCHAR* TextPtr = *TextValue;
             const TCHAR* Result = Prop->ImportText_InContainer(
                 TextPtr, DefaultObject, DefaultObject, PPF_None, &NullDevice);
@@ -290,7 +290,7 @@ TSharedPtr<FJsonObject> FSproftBpCreateCommands::CreateBlueprint(const TSharedPt
     {
         Params->TryGetStringField(TEXT("parent"), ParentClassInput);
     }
-    UClass* ParentClass = ResolveParentClass(ParentClassInput);
+    UClass* ParentClass = BpCreate_ResolveParentClass(ParentClassInput);
     if (!ParentClass)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

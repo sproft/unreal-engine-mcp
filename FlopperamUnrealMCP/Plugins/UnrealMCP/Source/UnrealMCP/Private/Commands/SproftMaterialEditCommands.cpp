@@ -46,7 +46,7 @@
 namespace
 {
     /** Split "/Game/Foo/Bar" into ("/Game/Foo/", "Bar"). */
-    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    void MaterialEdit_SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
     {
         FString Trim = InPath;
         Trim.TrimEndInline();
@@ -295,7 +295,7 @@ namespace
     /** Apply a flat property dict through FProperty::ImportText. Returns
      *  the count of properties applied; appends per-property errors to
      *  OutErrors. */
-    int32 ApplyPropertyDict(UObject* Object, const TSharedPtr<FJsonObject>& Properties, TArray<FString>& OutErrors)
+    int32 MaterialEdit_ApplyPropertyDict(UObject* Object, const TSharedPtr<FJsonObject>& Properties, TArray<FString>& OutErrors)
     {
         if (!Object || !Properties.IsValid()) { return 0; }
         int32 Applied = 0;
@@ -468,7 +468,7 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TShare
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    MaterialEdit_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -581,7 +581,7 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterialInstanceConst
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    MaterialEdit_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -884,7 +884,7 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddExpression(const TShared
         const TSharedPtr<FJsonValue> PropsVal = Params->TryGetField(TEXT("properties"));
         if (PropsVal.IsValid() && PropsVal->Type == EJson::Object)
         {
-            PropertyAppliedCount = ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
+            PropertyAppliedCount = MaterialEdit_ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
         }
     }
 
@@ -1137,7 +1137,7 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetExpressionProperty(const
     }
 
     TArray<FString> PropertyErrors;
-    const int32 Applied = ApplyPropertyDict(TargetExpr, PropsVal->AsObject(), PropertyErrors);
+    const int32 Applied = MaterialEdit_ApplyPropertyDict(TargetExpr, PropsVal->AsObject(), PropertyErrors);
 
     bool bRecompile = true;
     Params->TryGetBoolField(TEXT("recompile"), bRecompile);
@@ -1287,7 +1287,7 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddExpressionsBulk(const TS
             const TSharedPtr<FJsonValue> PropsVal = EntryObj->TryGetField(TEXT("properties"));
             if (PropsVal.IsValid() && PropsVal->Type == EJson::Object)
             {
-                PropertyAppliedCount = ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
+                PropertyAppliedCount = MaterialEdit_ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
             }
         }
 

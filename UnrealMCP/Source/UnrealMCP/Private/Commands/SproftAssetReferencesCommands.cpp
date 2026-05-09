@@ -107,7 +107,7 @@ namespace
 
     /** Resolve a class token into an FTopLevelAssetPath for the
      *  optional class filter. Mirrors search_assets' resolver. */
-    bool ResolveClassPath(const FString& Token, FTopLevelAssetPath& OutPath)
+    bool AssetReferences_ResolveClassPath(const FString& Token, FTopLevelAssetPath& OutPath)
     {
         FString Trimmed = Token;
         Trimmed.TrimStartAndEndInline();
@@ -235,7 +235,7 @@ TSharedPtr<FJsonObject> FSproftAssetReferencesCommands::HandleAssetReferences(co
     bool bHasClassFilter = false;
     if (!ClassFilterToken.IsEmpty())
     {
-        bHasClassFilter = ResolveClassPath(ClassFilterToken, ClassFilter);
+        bHasClassFilter = AssetReferences_ResolveClassPath(ClassFilterToken, ClassFilter);
     }
 
     const FName SeedPackage = NormalisePackageName(AssetPath);

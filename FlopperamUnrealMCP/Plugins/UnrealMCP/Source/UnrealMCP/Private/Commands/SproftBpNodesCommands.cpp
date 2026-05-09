@@ -29,7 +29,7 @@
 
 namespace
 {
-    UBlueprint* ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
+    UBlueprint* BpNodes_ResolveBlueprintParam(const TSharedPtr<FJsonObject>& Params)
     {
         FString Input;
         if (!Params->TryGetStringField(TEXT("blueprint"), Input)
@@ -48,7 +48,7 @@ namespace
 
     /** Walk every graph the Blueprint owns and pass it to a callback. */
     template <typename FnType>
-    void ForEachGraph(UBlueprint* Blueprint, FnType Callback)
+    void BpNodes_ForEachGraph(UBlueprint* Blueprint, FnType Callback)
     {
         for (UEdGraph* G : Blueprint->UbergraphPages)     { if (G) { Callback(G); } }
         for (UEdGraph* G : Blueprint->FunctionGraphs)     { if (G) { Callback(G); } }
@@ -61,21 +61,21 @@ namespace
 
     /** Resolve a graph by name (case-insensitive, exact then substring). Defaults
      *  to the first event graph when the caller passes no name. */
-    UEdGraph* ResolveGraph(UBlueprint* Blueprint, const FString& InName)
+    UEdGraph* BpNodes_ResolveGraph(UBlueprint* Blueprint, const FString& InName)
     {
         if (InName.IsEmpty())
         {
             return Blueprint->UbergraphPages.Num() > 0 ? Blueprint->UbergraphPages[0] : nullptr;
         }
         UEdGraph* Match = nullptr;
-        ForEachGraph(Blueprint, [&](UEdGraph* G)
+        BpNodes_ForEachGraph(Blueprint, [&](UEdGraph* G)
         {
             if (Match) { return; }
             if (G->GetName().Equals(InName, ESearchCase::IgnoreCase)) { Match = G; }
         });
         if (Match) { return Match; }
         const FString Lower = InName.ToLower();
-        ForEachGraph(Blueprint, [&](UEdGraph* G)
+        BpNodes_ForEachGraph(Blueprint, [&](UEdGraph* G)
         {
             if (Match) { return; }
             if (G->GetName().ToLower().Contains(Lower)) { Match = G; }
@@ -381,7 +381,7 @@ TSharedPtr<FJsonObject> FSproftBpNodesCommands::HandleBpNodes(const TSharedPtr<F
     Params->TryGetStringField(TEXT("operation"), Operation);
     Operation = Operation.ToLower();
 
-    UBlueprint* Blueprint = ResolveBlueprintParam(Params);
+    UBlueprint* Blueprint = BpNodes_ResolveBlueprintParam(Params);
     if (!Blueprint)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -401,7 +401,7 @@ TSharedPtr<FJsonObject> FSproftBpNodesCommands::AddNodes(UBlueprint* Blueprint, 
     FString GraphName;
     Params->TryGetStringField(TEXT("graph"), GraphName);
     Params->TryGetStringField(TEXT("graph_name"), GraphName);
-    UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+    UEdGraph* Graph = BpNodes_ResolveGraph(Blueprint, GraphName);
     if (!Graph)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

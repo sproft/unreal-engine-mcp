@@ -66,7 +66,7 @@ namespace
     }
 
     /** Split "/Game/Foo/Bar" into ("/Game/Foo/", "Bar"). */
-    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    void AssetFactory_SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
     {
         FString Trim = InPath;
         Trim.TrimEndInline();
@@ -177,7 +177,7 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateDataTable(const TShar
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    AssetFactory_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -340,7 +340,7 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateEnum(const TSharedPtr
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    AssetFactory_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -462,7 +462,7 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateStruct(const TSharedP
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    AssetFactory_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -643,7 +643,7 @@ namespace
      *  back to JSON serialisation for nested objects / arrays so the engine's
      *  default property text format can take it from there.
      */
-    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    FString AssetFactory_JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
     {
         if (!Value.IsValid())
         {
@@ -699,7 +699,7 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateDataAsset(const TShar
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    AssetFactory_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -765,7 +765,7 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateDataAsset(const TShar
                 continue;
             }
 
-            const FString TextValue = JsonValueToImportText(JsonVal);
+            const FString TextValue = AssetFactory_JsonValueToImportText(JsonVal);
             const TCHAR* TextPtr = *TextValue;
             const TCHAR* Result = Prop->ImportText_InContainer(
                 TextPtr, NewAsset, NewAsset, PPF_None, &NullDevice);

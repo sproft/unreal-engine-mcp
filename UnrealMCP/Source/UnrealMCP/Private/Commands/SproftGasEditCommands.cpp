@@ -126,7 +126,7 @@ namespace
     }
 
     /** Split a `/Game/Subdir/AssetName` path into directory + asset name. */
-    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    void GasEdit_SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
     {
         FString Trim = InPath;
         Trim.TrimEndInline();
@@ -613,7 +613,7 @@ namespace
         }
         FString PackageDir;
         FString AssetName;
-        SplitPackagePath(AssetPath, PackageDir, AssetName);
+        GasEdit_SplitPackagePath(AssetPath, PackageDir, AssetName);
         if (AssetName.IsEmpty())
         {
             OutError = FString::Printf(TEXT("Could not derive asset name from '%s'"), *AssetPath);

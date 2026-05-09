@@ -33,7 +33,7 @@
 namespace
 {
     /** Split "/Game/Foo/Bar" into ("/Game/Foo/", "Bar"). */
-    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    void WidgetEdit_SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
     {
         FString Trim = InPath;
         Trim.TrimEndInline();
@@ -134,7 +134,7 @@ namespace
     /** Render a JSON value as ImportText input. Mirrors the helper used
      *  in bp_component / scene_compose so the slot-property surface
      *  accepts the same dict shape as the rest of the property tools. */
-    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    FString WidgetEdit_JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
     {
         if (!Value.IsValid())
         {
@@ -314,7 +314,7 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const T
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    WidgetEdit_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -612,7 +612,7 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetSlotProperty(const TShared
             continue;
         }
 
-        const FString TextValue = JsonValueToImportText(JsonVal);
+        const FString TextValue = WidgetEdit_JsonValueToImportText(JsonVal);
         const TCHAR* TextPtr = *TextValue;
         const TCHAR* Result = Prop->ImportText_InContainer(
             TextPtr, Slot, Slot, PPF_None, &NullDevice);

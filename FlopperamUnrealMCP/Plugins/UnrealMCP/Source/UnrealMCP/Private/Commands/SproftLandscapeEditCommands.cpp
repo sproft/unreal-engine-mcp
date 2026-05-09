@@ -24,7 +24,7 @@
 namespace
 {
     /** Owning level name lookup, mirroring landscape_inspect. */
-    FString LevelLabel(ULevel* Level)
+    FString LandscapeEdit_LevelLabel(ULevel* Level)
     {
         if (!Level) return FString();
         if (UWorld* OwningWorld = Cast<UWorld>(Level->GetOuter()))
@@ -47,7 +47,7 @@ namespace
         for (ULevel* Level : World->GetLevels())
         {
             if (!Level) continue;
-            const FString LName = LevelLabel(Level);
+            const FString LName = LandscapeEdit_LevelLabel(Level);
             for (AActor* Actor : Level->Actors)
             {
                 ALandscape* L = Cast<ALandscape>(Actor);

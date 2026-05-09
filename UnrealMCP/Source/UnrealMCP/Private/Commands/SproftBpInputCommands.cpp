@@ -22,7 +22,7 @@
 namespace
 {
     /** Split "/Game/Foo/Bar" into ("/Game/Foo/", "Bar"). */
-    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    void BpInput_SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
     {
         FString Trim = InPath;
         Trim.TrimEndInline();
@@ -177,7 +177,7 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::CreateInputAction(const TSharedP
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    BpInput_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -255,7 +255,7 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::CreateInputMappingContext(const 
 
     FString PackageDir;
     FString AssetName;
-    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    BpInput_SplitPackagePath(PackagePath, PackageDir, AssetName);
     if (AssetName.IsEmpty())
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(

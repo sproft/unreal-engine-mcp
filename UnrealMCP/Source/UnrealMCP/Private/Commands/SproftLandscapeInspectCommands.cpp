@@ -16,7 +16,7 @@
 
 namespace
 {
-    TArray<TSharedPtr<FJsonValue>> Vec3ToJson(const FVector& V)
+    TArray<TSharedPtr<FJsonValue>> LandscapeInspect_Vec3ToJson(const FVector& V)
     {
         TArray<TSharedPtr<FJsonValue>> Arr;
         Arr.Add(MakeShared<FJsonValueNumber>(V.X));
@@ -25,7 +25,7 @@ namespace
         return Arr;
     }
 
-    TArray<TSharedPtr<FJsonValue>> RotToJson(const FRotator& R)
+    TArray<TSharedPtr<FJsonValue>> LandscapeInspect_RotToJson(const FRotator& R)
     {
         TArray<TSharedPtr<FJsonValue>> Arr;
         Arr.Add(MakeShared<FJsonValueNumber>(R.Pitch));
@@ -44,7 +44,7 @@ namespace
 
     /** Pull the owning ULevel name through the parent UWorld package, mirroring
      *  the level-naming used by SproftLevelInspectCommands. */
-    FString LevelLabel(ULevel* Level)
+    FString LandscapeInspect_LevelLabel(ULevel* Level)
     {
         if (!Level)
         {
@@ -173,7 +173,7 @@ TSharedPtr<FJsonObject> FSproftLandscapeInspectCommands::HandleLandscapeInspect(
         {
             continue;
         }
-        const FString LevelName = LevelLabel(Level);
+        const FString LevelName = LandscapeInspect_LevelLabel(Level);
         if (!LevelFilter.IsEmpty() && !LevelName.ToLower().Contains(LevelFilterLower))
         {
             continue;
@@ -210,9 +210,9 @@ TSharedPtr<FJsonObject> FSproftLandscapeInspectCommands::HandleLandscapeInspect(
             Entry->SetStringField(TEXT("class_path"), Landscape->GetClass()->GetPathName());
             Entry->SetStringField(TEXT("level"), LevelName);
 
-            Entry->SetArrayField(TEXT("location"), Vec3ToJson(Landscape->GetActorLocation()));
-            Entry->SetArrayField(TEXT("rotation"), RotToJson(Landscape->GetActorRotation()));
-            Entry->SetArrayField(TEXT("scale"),    Vec3ToJson(Landscape->GetActorScale3D()));
+            Entry->SetArrayField(TEXT("location"), LandscapeInspect_Vec3ToJson(Landscape->GetActorLocation()));
+            Entry->SetArrayField(TEXT("rotation"), LandscapeInspect_RotToJson(Landscape->GetActorRotation()));
+            Entry->SetArrayField(TEXT("scale"),    LandscapeInspect_Vec3ToJson(Landscape->GetActorScale3D()));
 
             Entry->SetStringField(TEXT("landscape_guid"), Landscape->GetLandscapeGuid().ToString());
 
@@ -243,9 +243,9 @@ TSharedPtr<FJsonObject> FSproftLandscapeInspectCommands::HandleLandscapeInspect(
             const FBox ProxyBounds = Landscape->GetProxyBounds();
             if (ProxyBounds.IsValid)
             {
-                Entry->SetArrayField(TEXT("proxy_bounds_min"),  Vec3ToJson(ProxyBounds.Min));
-                Entry->SetArrayField(TEXT("proxy_bounds_max"),  Vec3ToJson(ProxyBounds.Max));
-                Entry->SetArrayField(TEXT("proxy_bounds_size"), Vec3ToJson(ProxyBounds.GetSize()));
+                Entry->SetArrayField(TEXT("proxy_bounds_min"),  LandscapeInspect_Vec3ToJson(ProxyBounds.Min));
+                Entry->SetArrayField(TEXT("proxy_bounds_max"),  LandscapeInspect_Vec3ToJson(ProxyBounds.Max));
+                Entry->SetArrayField(TEXT("proxy_bounds_size"), LandscapeInspect_Vec3ToJson(ProxyBounds.GetSize()));
             }
 
             // Editor-only landscape info: extents in component-space + the

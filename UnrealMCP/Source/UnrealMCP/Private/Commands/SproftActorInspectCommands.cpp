@@ -13,7 +13,7 @@
 namespace
 {
     /** Resolve an actor by FName first, then by case-insensitive Outliner label. */
-    AActor* ResolveActor(UWorld* World, const FString& InQuery)
+    AActor* ActorInspect_ResolveActor(UWorld* World, const FString& InQuery)
     {
         if (!World || InQuery.IsEmpty())
         {
@@ -46,7 +46,7 @@ namespace
     }
 
     /** Build a [x, y, z] number array. */
-    TArray<TSharedPtr<FJsonValue>> Vec3ToJson(const FVector& V)
+    TArray<TSharedPtr<FJsonValue>> ActorInspect_Vec3ToJson(const FVector& V)
     {
         TArray<TSharedPtr<FJsonValue>> Arr;
         Arr.Add(MakeShared<FJsonValueNumber>(V.X));
@@ -55,7 +55,7 @@ namespace
         return Arr;
     }
 
-    TArray<TSharedPtr<FJsonValue>> RotToJson(const FRotator& R)
+    TArray<TSharedPtr<FJsonValue>> ActorInspect_RotToJson(const FRotator& R)
     {
         TArray<TSharedPtr<FJsonValue>> Arr;
         Arr.Add(MakeShared<FJsonValueNumber>(R.Pitch));
@@ -65,7 +65,7 @@ namespace
     }
 
     /** Mobility enum to short label. */
-    FString MobilityToString(EComponentMobility::Type In)
+    FString ActorInspect_MobilityToString(EComponentMobility::Type In)
     {
         switch (In)
         {
@@ -152,7 +152,7 @@ namespace
     }
 
     /** Build a JSON record for one component on the actor. */
-    TSharedPtr<FJsonObject> ComponentRecord(UActorComponent* Component, bool bIncludeProperties, int32 MaxPropertiesPerComponent)
+    TSharedPtr<FJsonObject> ActorInspect_ComponentRecord(UActorComponent* Component, bool bIncludeProperties, int32 MaxPropertiesPerComponent)
     {
         TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
         if (!Component)
@@ -169,10 +169,10 @@ namespace
         if (USceneComponent* AsScene = Cast<USceneComponent>(Component))
         {
             Out->SetBoolField(TEXT("is_scene_component"), true);
-            Out->SetStringField(TEXT("mobility"), MobilityToString(AsScene->Mobility));
-            Out->SetArrayField(TEXT("relative_location"), Vec3ToJson(AsScene->GetRelativeLocation()));
-            Out->SetArrayField(TEXT("relative_rotation"), RotToJson(AsScene->GetRelativeRotation()));
-            Out->SetArrayField(TEXT("relative_scale"),    Vec3ToJson(AsScene->GetRelativeScale3D()));
+            Out->SetStringField(TEXT("mobility"), ActorInspect_MobilityToString(AsScene->Mobility));
+            Out->SetArrayField(TEXT("relative_location"), ActorInspect_Vec3ToJson(AsScene->GetRelativeLocation()));
+            Out->SetArrayField(TEXT("relative_rotation"), ActorInspect_RotToJson(AsScene->GetRelativeRotation()));
+            Out->SetArrayField(TEXT("relative_scale"),    ActorInspect_Vec3ToJson(AsScene->GetRelativeScale3D()));
 
             if (USceneComponent* Parent = AsScene->GetAttachParent())
             {
@@ -258,7 +258,7 @@ TSharedPtr<FJsonObject> FSproftActorInspectCommands::HandleActorInspect(const TS
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
     }
 
-    AActor* Actor = ResolveActor(World, ActorQuery);
+    AActor* Actor = ActorInspect_ResolveActor(World, ActorQuery);
     if (!Actor)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -279,9 +279,9 @@ TSharedPtr<FJsonObject> FSproftActorInspectCommands::HandleActorInspect(const TS
         Result->SetStringField(TEXT("folder_path"), Folder.ToString());
     }
 
-    Result->SetArrayField(TEXT("location"), Vec3ToJson(Actor->GetActorLocation()));
-    Result->SetArrayField(TEXT("rotation"), RotToJson(Actor->GetActorRotation()));
-    Result->SetArrayField(TEXT("scale"),    Vec3ToJson(Actor->GetActorScale3D()));
+    Result->SetArrayField(TEXT("location"), ActorInspect_Vec3ToJson(Actor->GetActorLocation()));
+    Result->SetArrayField(TEXT("rotation"), ActorInspect_RotToJson(Actor->GetActorRotation()));
+    Result->SetArrayField(TEXT("scale"),    ActorInspect_Vec3ToJson(Actor->GetActorScale3D()));
 
     TArray<TSharedPtr<FJsonValue>> TagArr;
     for (const FName& Tag : Actor->Tags)
@@ -304,7 +304,7 @@ TSharedPtr<FJsonObject> FSproftActorInspectCommands::HandleActorInspect(const TS
     {
         Result->SetStringField(TEXT("root_component"), Root->GetName());
         Result->SetStringField(TEXT("root_component_class"), Root->GetClass()->GetName());
-        Result->SetStringField(TEXT("mobility"), MobilityToString(Root->Mobility));
+        Result->SetStringField(TEXT("mobility"), ActorInspect_MobilityToString(Root->Mobility));
     }
 
     // Optional full actor property dump.
@@ -322,7 +322,7 @@ TSharedPtr<FJsonObject> FSproftActorInspectCommands::HandleActorInspect(const TS
         for (UActorComponent* Comp : AllComponents)
         {
             CompArr.Add(MakeShared<FJsonValueObject>(
-                ComponentRecord(Comp, bIncludeComponentProperties, MaxPropertiesPerObject)));
+                ActorInspect_ComponentRecord(Comp, bIncludeComponentProperties, MaxPropertiesPerObject)));
         }
         Result->SetArrayField(TEXT("components"), CompArr);
         Result->SetNumberField(TEXT("component_count"), AllComponents.Num());
