@@ -37,6 +37,7 @@
 #include "Commands/SproftBpWireCommands.h"
 #include "Commands/SproftBpCommitCommands.h"
 #include "Commands/SproftBpFunctionCreateCommands.h"
+#include "Commands/SproftNiagaraInspectCommands.h"
 #include "Commands/SproftMaterialInspectCommands.h"
 #include "Commands/SproftSearchAssetsCommands.h"
 #include "Commands/SproftAssetReferencesCommands.h"
@@ -113,6 +114,7 @@ private:
 	TSharedPtr<FSproftBpWireCommands> SproftBpWire;
 	TSharedPtr<FSproftBpCommitCommands> SproftBpCommit;
 	TSharedPtr<FSproftBpFunctionCreateCommands> SproftBpFunctionCreate;
+	TSharedPtr<FSproftNiagaraInspectCommands> SproftNiagaraInspect;
 	TSharedPtr<FSproftMaterialInspectCommands> SproftMaterialInspect;
 	TSharedPtr<FSproftSearchAssetsCommands> SproftSearchAssets;
 	TSharedPtr<FSproftAssetReferencesCommands> SproftAssetReferences;

@@ -49,7 +49,8 @@ public class UnrealMCP : ModuleRules
 				"UMGEditor",          // For UWidgetBlueprint (Sproft widget_edit)
 				"EnhancedInput",      // For UInputAction / UInputMappingContext (Sproft bp_input)
 				"InputBlueprintNodes", // For UK2Node_EnhancedInputAction (Sproft bp_input graph wiring)
-				"GameplayTags"        // For UGameplayTagsManager (Sproft tag_registry_edit)
+				"GameplayTags",       // For UGameplayTagsManager (Sproft tag_registry_edit)
+				"Niagara"             // For UNiagaraSystem / UNiagaraEmitter (Sproft niagara_inspect)
 			}
 		);
 

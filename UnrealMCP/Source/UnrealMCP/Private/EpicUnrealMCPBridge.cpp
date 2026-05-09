@@ -78,6 +78,7 @@
 #include "Commands/SproftBpWireCommands.h"
 #include "Commands/SproftBpCommitCommands.h"
 #include "Commands/SproftBpFunctionCreateCommands.h"
+#include "Commands/SproftNiagaraInspectCommands.h"
 #include "Commands/SproftMaterialInspectCommands.h"
 #include "Commands/SproftSearchAssetsCommands.h"
 #include "Commands/SproftAssetReferencesCommands.h"
@@ -117,6 +118,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftBpWire = MakeShared<FSproftBpWireCommands>();
     SproftBpCommit = MakeShared<FSproftBpCommitCommands>();
     SproftBpFunctionCreate = MakeShared<FSproftBpFunctionCreateCommands>();
+    SproftNiagaraInspect = MakeShared<FSproftNiagaraInspectCommands>();
     SproftMaterialInspect = MakeShared<FSproftMaterialInspectCommands>();
     SproftSearchAssets = MakeShared<FSproftSearchAssetsCommands>();
     SproftAssetReferences = MakeShared<FSproftAssetReferencesCommands>();
@@ -153,6 +155,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftBpWire.Reset();
     SproftBpCommit.Reset();
     SproftBpFunctionCreate.Reset();
+    SproftNiagaraInspect.Reset();
     SproftMaterialInspect.Reset();
     SproftSearchAssets.Reset();
     SproftAssetReferences.Reset();
@@ -450,6 +453,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("bp_function_create"))
             {
                 ResultJson = SproftBpFunctionCreate->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("niagara_inspect"))
+            {
+                ResultJson = SproftNiagaraInspect->HandleCommand(CommandType, Params);
             }
             else if (CommandType == TEXT("material_inspect"))
             {

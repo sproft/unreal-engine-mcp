@@ -4837,6 +4837,64 @@ def bp_function_create(
 
 
 @mcp.tool()
+def niagara_inspect(
+    system: str,
+    include_event_handlers: Optional[bool] = None,
+    include_simulation_stages: Optional[bool] = None,
+    include_renderers: Optional[bool] = None,
+    include_parameters: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only structured dump of a Niagara System asset.
+
+    Pairs with ``material_inspect`` for the VFX side: lists emitters,
+    per-emitter scripts grouped by execution stage (system / emitter /
+    particle spawn / particle update / event handler / simulation stage
+    / GPU compute), the user-exposed parameter store entries, the
+    renderer properties chain, and a few sim-target / determinism flags.
+
+    Args:
+        system: Short asset name or full ``/Game/...`` Niagara System
+            path.
+        include_event_handlers: Default True.
+        include_simulation_stages: Default True.
+        include_renderers: Default True.
+        include_parameters: Default True.
+
+    Returns:
+        Dict with ``name`` / ``path`` / ``class``, the system-level
+        spawn / update script paths, an ``emitters`` array (each with
+        ``name``, ``enabled``, ``sim_target`` (cpu / gpu),
+        ``local_space``, ``determinism``, a ``scripts`` list grouped by
+        execution stage, plus ``event_handlers``, ``simulation_stages``,
+        and ``renderers`` arrays gated by the corresponding include
+        flags), and a ``parameters`` array with each user-exposed
+        parameter's name, type token, type path, and kind
+        (primitive / data_interface / object).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"system": system}
+    if include_event_handlers is not None:
+        params["include_event_handlers"] = include_event_handlers
+    if include_simulation_stages is not None:
+        params["include_simulation_stages"] = include_simulation_stages
+    if include_renderers is not None:
+        params["include_renderers"] = include_renderers
+    if include_parameters is not None:
+        params["include_parameters"] = include_parameters
+
+    try:
+        response = unreal.send_command("niagara_inspect", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"niagara_inspect error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
 def material_inspect(material: str) -> Dict[str, Any]:
     """
     Read-only counterpart to ``material_edit``.
