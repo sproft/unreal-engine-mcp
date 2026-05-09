@@ -3,6 +3,7 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "EditorAssetLibrary.h"
+#include "RetargetEditor/IKRetargeterController.h"
 #include "Retargeter/IKRetargeter.h"
 #include "Retargeter/IKRetargetChainMapping.h"
 #include "Retargeter/IKRetargetOps.h"
@@ -42,6 +43,44 @@ namespace
             }
         }
         return nullptr;
+    }
+
+    UIKRigDefinition* ResolveIkRig(const FString& Input)
+    {
+        if (Input.IsEmpty())
+        {
+            return nullptr;
+        }
+        if (Input.StartsWith(TEXT("/")))
+        {
+            return Cast<UIKRigDefinition>(UEditorAssetLibrary::LoadAsset(Input));
+        }
+        FAssetRegistryModule& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        TArray<FAssetData> Found;
+        AssetRegistry.Get().GetAssetsByClass(UIKRigDefinition::StaticClass()->GetClassPathName(), Found);
+        for (const FAssetData& Data : Found)
+        {
+            if (Data.AssetName.ToString().Equals(Input, ESearchCase::IgnoreCase))
+            {
+                return Cast<UIKRigDefinition>(Data.GetAsset());
+            }
+        }
+        return nullptr;
+    }
+
+    UIKRetargeterController* GetRetargetController(const UIKRetargeter* Retargeter)
+    {
+        return Retargeter ? UIKRetargeterController::GetController(Retargeter) : nullptr;
+    }
+
+    void SaveRetargeterIfRequested(UIKRetargeter* Retargeter, bool bSave)
+    {
+        if (!Retargeter) return;
+        Retargeter->MarkPackageDirty();
+        if (bSave)
+        {
+            UEditorAssetLibrary::SaveAsset(Retargeter->GetPathName(), /*bOnlyIfIsDirty=*/false);
+        }
     }
 
     void DumpIkRig(const UIKRetargeter* Retargeter, ERetargetSourceOrTarget Side, const TCHAR* Field, TSharedPtr<FJsonObject>& Out)
@@ -123,6 +162,23 @@ namespace
             }
         }
     }
+
+    bool ParseSide(const FString& Token, ERetargetSourceOrTarget& OutSide, FString& OutError)
+    {
+        const FString Lower = Token.ToLower();
+        if (Lower == TEXT("source"))
+        {
+            OutSide = ERetargetSourceOrTarget::Source;
+            return true;
+        }
+        if (Lower == TEXT("target"))
+        {
+            OutSide = ERetargetSourceOrTarget::Target;
+            return true;
+        }
+        OutError = FString::Printf(TEXT("Invalid 'side' '%s'. Use 'source' or 'target'."), *Token);
+        return false;
+    }
 }
 
 FSproftIkRetargetCommands::FSproftIkRetargetCommands()
@@ -143,12 +199,24 @@ TSharedPtr<FJsonObject> FSproftIkRetargetCommands::HandleCommand(const FString& 
 
     FString Op;
     Params->TryGetStringField(TEXT("op"), Op);
-    if (Op.IsEmpty() || Op == TEXT("inspect"))
+    if (Op.IsEmpty() || Op.Equals(TEXT("inspect"), ESearchCase::IgnoreCase))
     {
         return HandleInspect(Params);
     }
+    if (Op.Equals(TEXT("set_source_ik_rig"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetSourceIkRig(Params);
+    }
+    if (Op.Equals(TEXT("set_target_ik_rig"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetTargetIkRig(Params);
+    }
+    if (Op.Equals(TEXT("set_retarget_pose"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetRetargetPose(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("ik_retarget: unsupported op '%s'. Supported: inspect"), *Op));
+        FString::Printf(TEXT("ik_retarget: unsupported op '%s'. Supported: inspect, set_source_ik_rig, set_target_ik_rig, set_retarget_pose"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftIkRetargetCommands::HandleInspect(const TSharedPtr<FJsonObject>& Params)
@@ -211,5 +279,157 @@ TSharedPtr<FJsonObject> FSproftIkRetargetCommands::HandleInspect(const TSharedPt
     Out->SetBoolField(TEXT("ops_truncated"), OpsArr.Num() < Ops.Num());
     Out->SetNumberField(TEXT("chain_pair_count"), ChainPairCount);
 
+    return Out;
+}
+
+namespace
+{
+    TSharedPtr<FJsonObject> SetIkRigSide(UIKRetargeter* Retargeter, ERetargetSourceOrTarget Side,
+                                          const TSharedPtr<FJsonObject>& Params, const TCHAR* OperationName)
+    {
+        UIKRetargeterController* Controller = GetRetargetController(Retargeter);
+        if (!Controller)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Could not resolve UIKRetargeterController for '%s'"),
+                    *Retargeter->GetPathName()));
+        }
+
+        bool bClear = false;
+        Params->TryGetBoolField(TEXT("clear"), bClear);
+
+        FString RigInput;
+        if (!bClear)
+        {
+            if (!Params->TryGetStringField(TEXT("rig"), RigInput)
+                && !Params->TryGetStringField(TEXT("ik_rig"), RigInput)
+                && !Params->TryGetStringField(TEXT("ik_rig_path"), RigInput)
+                && !Params->TryGetStringField(TEXT("rig_path"), RigInput))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("Missing 'rig' parameter (or pass 'clear': true to unbind the side)"));
+            }
+        }
+
+        UIKRigDefinition* NewRig = nullptr;
+        if (!bClear)
+        {
+            NewRig = ResolveIkRig(RigInput);
+            if (!NewRig)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Could not resolve UIKRigDefinition '%s'"), *RigInput));
+            }
+        }
+
+        Controller->SetIKRig(Side, NewRig);
+
+        bool bSave = true;
+        Params->TryGetBoolField(TEXT("save"), bSave);
+        SaveRetargeterIfRequested(Retargeter, bSave);
+
+        TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+        Out->SetStringField(TEXT("operation"), OperationName);
+        Out->SetStringField(TEXT("retargeter"), Retargeter->GetPathName());
+        Out->SetStringField(TEXT("side"), Side == ERetargetSourceOrTarget::Source ? TEXT("source") : TEXT("target"));
+        if (NewRig)
+        {
+            Out->SetStringField(TEXT("ik_rig_path"), NewRig->GetPathName());
+            Out->SetStringField(TEXT("ik_rig_name"), NewRig->GetName());
+            Out->SetBoolField(TEXT("cleared"), false);
+        }
+        else
+        {
+            Out->SetBoolField(TEXT("cleared"), true);
+        }
+        Out->SetBoolField(TEXT("saved"), bSave);
+        return Out;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftIkRetargetCommands::HandleSetSourceIkRig(const TSharedPtr<FJsonObject>& Params)
+{
+    UIKRetargeter* Retargeter = ResolveRetargeter(Params);
+    if (!Retargeter)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UIKRetargeter (provide 'retargeter' or 'path' as /Game/... or short name)"));
+    }
+    return SetIkRigSide(Retargeter, ERetargetSourceOrTarget::Source, Params, TEXT("set_source_ik_rig"));
+}
+
+TSharedPtr<FJsonObject> FSproftIkRetargetCommands::HandleSetTargetIkRig(const TSharedPtr<FJsonObject>& Params)
+{
+    UIKRetargeter* Retargeter = ResolveRetargeter(Params);
+    if (!Retargeter)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UIKRetargeter (provide 'retargeter' or 'path' as /Game/... or short name)"));
+    }
+    return SetIkRigSide(Retargeter, ERetargetSourceOrTarget::Target, Params, TEXT("set_target_ik_rig"));
+}
+
+TSharedPtr<FJsonObject> FSproftIkRetargetCommands::HandleSetRetargetPose(const TSharedPtr<FJsonObject>& Params)
+{
+    UIKRetargeter* Retargeter = ResolveRetargeter(Params);
+    if (!Retargeter)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UIKRetargeter (provide 'retargeter' or 'path' as /Game/... or short name)"));
+    }
+    UIKRetargeterController* Controller = GetRetargetController(Retargeter);
+    if (!Controller)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UIKRetargeterController for '%s'"),
+                *Retargeter->GetPathName()));
+    }
+
+    FString SideToken;
+    if (!Params->TryGetStringField(TEXT("side"), SideToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'side' parameter ('source' or 'target')"));
+    }
+    ERetargetSourceOrTarget Side = ERetargetSourceOrTarget::Source;
+    FString SideError;
+    if (!ParseSide(SideToken, Side, SideError))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(SideError);
+    }
+
+    FString PoseNameStr;
+    if (!Params->TryGetStringField(TEXT("pose_name"), PoseNameStr)
+        && !Params->TryGetStringField(TEXT("pose"), PoseNameStr)
+        && !Params->TryGetStringField(TEXT("name"), PoseNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'pose_name' parameter"));
+    }
+    if (PoseNameStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'pose_name' must not be empty"));
+    }
+
+    const FName PoseName(*PoseNameStr);
+    const bool bSetOk = Controller->SetCurrentRetargetPose(PoseName, Side);
+    if (!bSetOk)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Pose '%s' does not exist on the %s side of '%s'"),
+                *PoseNameStr,
+                Side == ERetargetSourceOrTarget::Source ? TEXT("source") : TEXT("target"),
+                *Retargeter->GetPathName()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveRetargeterIfRequested(Retargeter, bSave);
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_retarget_pose"));
+    Out->SetStringField(TEXT("retargeter"), Retargeter->GetPathName());
+    Out->SetStringField(TEXT("side"), Side == ERetargetSourceOrTarget::Source ? TEXT("source") : TEXT("target"));
+    Out->SetStringField(TEXT("pose_name"), PoseName.ToString());
+    Out->SetBoolField(TEXT("saved"), bSave);
     return Out;
 }

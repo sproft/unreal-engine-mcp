@@ -4,13 +4,13 @@
 #include "Json.h"
 
 /**
- * Sproft fork addition: ik_retarget (read-only first slice)
+ * Sproft fork addition: ik_retarget (read + edit slice)
  *
- * Inspect a `UIKRetargeter` asset. The 5.6 retargeter refactor moved
- * chain mapping / root settings / global settings into a polymorphic
+ * Inspect or mutate a `UIKRetargeter` asset. The 5.6 retargeter refactor
+ * moved chain mapping / root settings / global settings into a polymorphic
  * op stack (each op is an `FInstancedStruct` of a subclass of
- * `FIKRetargetOpBase`). The read-only slice walks the asset's public
- * surface plus the op stack and reports:
+ * `FIKRetargetOpBase`). The read-only inspect slice walks the asset's
+ * public surface plus the op stack and reports:
  *   - asset path / name / class
  *   - source IK Rig path + has_source_ik_rig flag
  *   - target IK Rig path + has_target_ik_rig flag
@@ -22,9 +22,21 @@
  *     exposes via `FIKRetargetOpBase::GetChainMapping()`
  *   - aggregate counts (op_count, chain_pair_count)
  *
- * One op (`inspect`, default).
+ * Operations:
+ *   - `inspect` (default): read-only walk above.
+ *   - `set_source_ik_rig`: rebind the retargeter's source IK Rig
+ *     through `UIKRetargeterController::SetIKRig(Source, Rig)`. Pass
+ *     `null` / `clear=true` to clear the binding.
+ *   - `set_target_ik_rig`: rebind the retargeter's target IK Rig
+ *     through `UIKRetargeterController::SetIKRig(Target, Rig)`. Same
+ *     clear flow.
+ *   - `set_retarget_pose`: switch the current retarget pose for either
+ *     the source or target side through
+ *     `UIKRetargeterController::SetCurrentRetargetPose(PoseName, Side)`.
+ *     The named pose must already exist on that side; create it
+ *     through the editor or `CreateRetargetPose` first.
  *
- * Inputs:
+ * Inputs (inspect):
  *   - retargeter / path / asset / asset_path: required. Accepts a
  *     `/Game/...` UIKRetargeter path or a short asset name (resolved
  *     via the asset registry).
@@ -33,14 +45,29 @@
  *     metadata but skips the chain pair walk for big rigs.
  *   - max_ops: cap on the op stack walk. Default 64.
  *
- * Returns the structure described above plus an `op_count_total`
- * and `ops_truncated` flag when the cap fires.
+ * Inputs (set_source_ik_rig / set_target_ik_rig):
+ *   - retargeter: required.
+ *   - rig / ik_rig / ik_rig_path: `/Game/...` UIKRigDefinition path or
+ *     short asset name. Required unless `clear=true`.
+ *   - clear: pass true to unbind the side. Default false.
+ *   - save: save the asset after the edit. Default true.
  *
- * Read-only. We never mutate the asset.
+ * Inputs (set_retarget_pose):
+ *   - retargeter: required.
+ *   - side: `source` or `target`. Required (no default; the caller
+ *     must pick the side they intend to edit).
+ *   - pose_name / pose: required. The named pose must already exist
+ *     on that side.
+ *   - save: save the asset after the edit. Default true.
  *
- * Edit-side ops (rebind source / target IK Rig, append op,
- * remove op, set chain mapping pair, override retarget pose,
- * profile management) remain on the BACKLOG.
+ * Returns the inspect structure for the inspect op, or a per-op dict
+ * carrying `operation`, `retargeter`, op-specific fields, and a
+ * `saved` flag.
+ *
+ * Edit-side ops still on the BACKLOG: append op / remove op (the
+ * polymorphic FInstancedStruct array on the asset), set chain mapping
+ * pair on a chosen op, override per-bone retarget pose offsets, and
+ * profile management through `UIKRetargeter::GetProfileByName`.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - `UIKRetargeter` from
@@ -54,6 +81,8 @@
  *   - `FIKRetargetOpBase::GetName` / `GetParentOpName` / `IsEnabled` /
  *     `GetChainMapping`.
  *   - `FRetargetChainMapping::GetChainPairs`.
+ *   - `UIKRetargeterController::GetController` / `SetIKRig` /
+ *     `SetCurrentRetargetPose` (editor-only, in `IKRigEditor`).
  *
  * No code from the proprietary FlopAI plugin is used.
  */
@@ -66,4 +95,7 @@ public:
 
 private:
     TSharedPtr<FJsonObject> HandleInspect(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetSourceIkRig(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetTargetIkRig(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetRetargetPose(const TSharedPtr<FJsonObject>& Params);
 };

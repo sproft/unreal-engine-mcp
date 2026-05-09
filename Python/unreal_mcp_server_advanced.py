@@ -6606,43 +6606,71 @@ def ik_retarget(
     op: Optional[str] = None,
     include_op_chain_mappings: Optional[bool] = None,
     max_ops: Optional[int] = None,
+    rig: Optional[str] = None,
+    clear: Optional[bool] = None,
+    side: Optional[str] = None,
+    pose_name: Optional[str] = None,
+    save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Inspect a UIKRetargeter asset (read-only first slice).
+    Inspect or mutate a UIKRetargeter asset (read + edit slice).
 
     The 5.6 retargeter refactor moved chain mapping / root settings /
     global settings into a polymorphic op stack (each op is an
     ``FInstancedStruct`` of an ``FIKRetargetOpBase`` subclass). The
-    read-only slice walks the asset's public surface plus the op
-    stack and reports source / target IK Rig paths, the current
+    read-only inspect slice walks the asset's public surface plus the
+    op stack and reports source / target IK Rig paths, the current
     retarget pose names, the per-op metadata (struct type, parent
     op, enabled flag), and any per-op chain mapping pairs.
 
-    One op (``inspect``, default).
+    Operations:
+      - ``inspect`` (default): the read-only walk above.
+      - ``set_source_ik_rig``: rebind the source IK Rig through
+        ``UIKRetargeterController::SetIKRig(Source, Rig)``. Pass
+        ``clear=True`` to unbind the side.
+      - ``set_target_ik_rig``: rebind the target IK Rig the same
+        way.
+      - ``set_retarget_pose``: switch the current retarget pose for
+        either ``source`` or ``target`` through
+        ``UIKRetargeterController::SetCurrentRetargetPose``. The named
+        pose must already exist on that side.
 
     Args:
         retargeter: Path or short name of a UIKRetargeter asset.
             Required.
-        op: Operation discriminator. Only ``inspect`` (default) is
-            supported.
-        include_op_chain_mappings: When True (default), each op
-            record carries its ``chain_mapping`` array. False keeps
-            the per-op metadata but skips the chain pair walk for
-            big rigs.
-        max_ops: Cap on the op stack walk. Default 64.
+        op: One of ``inspect`` (default), ``set_source_ik_rig``,
+            ``set_target_ik_rig``, ``set_retarget_pose``.
+        include_op_chain_mappings: ``inspect`` only. When True
+            (default), each op record carries its ``chain_mapping``
+            array.
+        max_ops: ``inspect`` only. Cap on the op stack walk. Default
+            64.
+        rig: ``set_source_ik_rig`` / ``set_target_ik_rig`` only. Path
+            or short name of a UIKRigDefinition asset to bind.
+            Required unless ``clear=True``.
+        clear: ``set_source_ik_rig`` / ``set_target_ik_rig`` only.
+            When True, unbinds the side instead of writing a new rig.
+        side: ``set_retarget_pose`` only. ``source`` or ``target``.
+            Required.
+        pose_name: ``set_retarget_pose`` only. The target pose's
+            FName. Must already exist on the chosen side.
+        save: Mutating ops only. Save the asset after the edit.
+            Default True.
 
     Returns:
-        Dict with asset metadata (``name`` / ``path`` / ``class``),
-        per-side blocks (``source`` / ``target`` each carrying
-        ``ik_rig_path`` / ``ik_rig_name`` / ``has_ik_rig`` /
-        ``current_pose`` / ``current_pose_bone_offset_count`` /
+        For ``inspect``: a dict with asset metadata (``name`` /
+        ``path`` / ``class``), per-side blocks (``source`` /
+        ``target`` each carrying ``ik_rig_path`` / ``ik_rig_name`` /
+        ``has_ik_rig`` / ``current_pose`` /
+        ``current_pose_bone_offset_count`` /
         ``current_pose_has_root_offset``), the op stack (``ops``
         array with each entry's ``index`` / ``name`` /
         ``parent_name`` / ``struct_type`` / ``struct_path`` /
         ``enabled`` / ``initialized`` / optional ``chain_mapping``),
-        plus aggregate counts (``op_count`` / ``op_count_total`` /
-        ``ops_truncated`` / ``chain_pair_count``) and the
-        ``default_pose_name`` constant.
+        plus aggregate counts and the ``default_pose_name`` constant.
+
+        For mutating ops: a dict with ``operation`` /
+        ``retargeter`` / op-specific fields and a ``saved`` flag.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -6655,6 +6683,16 @@ def ik_retarget(
         params["include_op_chain_mappings"] = include_op_chain_mappings
     if max_ops is not None:
         params["max_ops"] = max_ops
+    if rig is not None:
+        params["rig"] = rig
+    if clear is not None:
+        params["clear"] = clear
+    if side is not None:
+        params["side"] = side
+    if pose_name is not None:
+        params["pose_name"] = pose_name
+    if save is not None:
+        params["save"] = save
 
     try:
         response = unreal.send_command("ik_retarget", params)
