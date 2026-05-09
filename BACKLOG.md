@@ -8,7 +8,41 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass extended `gas_edit` with three edit ops, added
+The most recent pass shipped three new tool families that go wider
+into the remaining categories: `unreal_api` (reflection-driven query
+of the live UE5 type database), `sound_asset_edit` (small variant
+covering Sound Cue creation, wave-player append, and attenuation
+rebind), and `ik_retarget` (read-only first slice over the
+UIKRetargeter op stack). `unreal_api` covers three ops keyed by `op`:
+`describe` (parent class + direct child class list + interfaces +
+every UPROPERTY field with type / flags / tooltip + every UFUNCTION
+method with full signature / flags / tooltip), `find_property`
+(case-insensitive substring search across one class's properties),
+and `find_function` (case-insensitive substring search across one
+class's functions). The walk uses `TFieldIterator<FProperty>` /
+`TFieldIterator<UFunction>` plus `GetDerivedClasses` from
+`UObjectHash.h` so it answers from the live in-process reflection
+database without an offline reference table. `sound_asset_edit`
+covers `create_sound_cue` (NewObject's a USoundCue at a `/Game/...`
+path; optional `sound_wave` parameter resolves the named USoundWave
+and wires a USoundNodeWavePlayer into the cue's `FirstNode` slot),
+`add_sound_node_wave_player` (USoundCue::ConstructSoundNode +
+SetSoundWave + optional FirstNode rebind through
+`LinkGraphNodesFromSoundNodes`), and `set_attenuation` (writes the
+`AttenuationSettings` UPROPERTY on the USoundBase shape; null /
+empty clears the override). `ik_retarget` handles the read side:
+asset path / class, source / target IK Rig paths plus has-rig flags,
+current source / target retarget pose names with their
+bone-rotation-offset counts and root-offset flags, the retarget op
+stack (per-op `index` / `name` / `parent_name` / `struct_type` /
+`enabled` / `initialized` / optional `chain_mapping`), and aggregate
+counts. The walk reaches through `FInstancedStruct::GetPtr<FIKRetargetOpBase>`
+plus the per-op `GetChainMapping()` accessor that the 5.6 op refactor
+exposes. Adds IKRig to PublicDependencyModuleNames and the IKRig
+plugin to the uplugin manifest. Edit-side ops on each tool stay on
+this list.
+
+The pass before that extended `gas_edit` with three edit ops, added
 two new tools (`performance_audit`, `pie_test_bp`), and laid down
 the small variant of `metasound_edit`. `gas_edit` now answers
 `create_gameplay_ability` (NewObject's a UBlueprint at a `/Game/...`
@@ -1252,35 +1286,56 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`gas_edit` edit slice, `performance_audit`
-small read-only, `pie_test_bp` small variant, `metasound_edit`
-small variant), the next set should pick up:
+After the latest pass (`unreal_api`, `sound_asset_edit` small
+variant, `ik_retarget` small read-only first slice), the next set
+should pick up:
 
-1. `gas_edit` heavier ops — append a modifier to a UGameplayEffect
+1. `ik_retarget` edit slice — rebind source / target IK Rig through
+   `UIKRetargeterController`, append op / remove op (the polymorphic
+   `FInstancedStruct` array on the asset), set chain mapping pair
+   on a chosen op, override retarget pose, and profile management
+   through `UIKRetargeter::GetProfileByName`. Plus the IK Rig side
+   for the same shape (chain definitions, goals, solvers, retarget
+   chain configuration) since both sit behind the IKRig dep we
+   just pulled in.
+2. `sound_asset_edit` heavier ops — composite-node insertion
+   (random / sequence / mixer / modulator / delay / loop / branch /
+   concatenator), attenuation-node insertion with FAttenuationSettings
+   overrides, and distance-crossfade authoring. Plus a
+   `sound_asset_inspect` read-only counterpart that walks the cue's
+   node graph and emits it as a JSON tree paired with the existing
+   create surface.
+3. `unreal_api` follow-ons — a `list_classes` op that enumerates
+   every loaded UClass under a `/Script/Module.` namespace prefix,
+   a recursive `find_in_subclasses` pass that aggregates properties /
+   functions across one root class plus all its descendants, and a
+   `class_diff` op that compares two related UClasses (parent vs
+   child, or two cousins) and emits the property / function delta.
+4. `gas_edit` heavier ops — append a modifier to a UGameplayEffect
    with attribute target + ModifierOp + scalable-float magnitude,
    rebind cost / cooldown classes on a UGameplayAbility through the
    CDO, an attribute-default override path that writes through the
    CDO and recompiles the Blueprint, and a GameplayCue authoring
    slice (cue-tag set + level range + magnitude attribute).
-2. `behavior_tree` heavier edit ops — append a child task /
+5. `behavior_tree` heavier edit ops — append a child task /
    composite to a chosen parent, insert a decorator on a chosen
    child slot, append a service on a composite, and the full
    Blackboard key edit surface. Reuses the AIModule dep already
    pulled in.
-3. `sequencer_edit` heavier edit ops — track add (a chosen
+6. `sequencer_edit` heavier edit ops — track add (a chosen
    UMovieSceneTrack subclass), section add (with an explicit frame
    range), section move, spawnable creation, and camera-cut track
    creation. Reuses the MovieScene + LevelSequence deps.
-4. `metasound_edit` graph-authoring slice — add nodes / connect
+7. `metasound_edit` graph-authoring slice — add nodes / connect
    pins through the `UMetaSoundBuilder` API, member-default writes,
    and a `metasound_inspect` read-only counterpart that walks the
    asset's document and emits the node graph as a JSON edge list.
-5. `pie_test_bp` heavier kinds — `function_returns` (invoke a
+8. `pie_test_bp` heavier kinds — `function_returns` (invoke a
    Blueprint function in PIE and assert on its return value),
    `event_fired` (custom-event broadcast assertion in PIE), and
    `component_default_equals` (one level deeper to a named
    UActorComponent's UPROPERTY).
-6. `performance_audit` deep-dive captures — `stat startfile` /
+9. `performance_audit` deep-dive captures — `stat startfile` /
    `stat stopfile` for an offline `.ue4stats` chart, the FPSChart
    histogram surface, and an Insights `.utrace` capture wrapper.
 
