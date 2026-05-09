@@ -5726,6 +5726,90 @@ def animation_inspect(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def cpp_source(
+    cls: Optional[str] = None,
+    header_path: Optional[str] = None,
+    source_path: Optional[str] = None,
+    op: Optional[str] = None,
+    include_header: Optional[bool] = None,
+    include_source: Optional[bool] = None,
+    max_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Read C++ source by class path or by full file path on disk.
+
+    Useful for verifying the C++ class behind a Blueprint or for
+    asking "what does this UClass actually look like in source".
+    Provide one of three inputs:
+
+    - ``cls``: a class identifier accepting ``/Script/Module.ClassName``,
+      a ``/Game/...`` Blueprint class path (auto-suffixed with ``_C``),
+      or a short class name (probed against the loaded class set with
+      A / U prefix variants and an ``/Script/Engine.<Name>`` fallback).
+      Header + cpp paths come from
+      ``FSourceCodeNavigation::FindClassHeaderPath`` /
+      ``FindClassSourcePath``.
+    - ``header_path``: a full disk path to a .h file. The cpp follow-on
+      is inferred by replacing the extension when the sibling exists.
+    - ``source_path``: a full disk path to a .cpp file. The header
+      follow-on is inferred by replacing the extension when the
+      sibling exists.
+
+    Args:
+        cls: Class identifier (full ``/Script/...`` path, ``/Game/...``
+            Blueprint path, or short class name).
+        header_path: Full disk path to a .h file.
+        source_path: Full disk path to a .cpp file.
+        op: Operation discriminator. Only ``read`` (default) is
+            supported.
+        include_header: Emit the header text. Default True.
+        include_source: Emit the cpp text. Default True.
+        max_bytes: Cap on each emitted file's text length. Default
+            262144 (256 KiB). Sets ``header_truncated`` / ``source_truncated``
+            flags when the cap fires.
+
+    Returns:
+        Dict with ``class`` / ``class_short`` / ``module`` / ``module_dir``
+        when class-driven, ``header_path`` / ``header_text`` /
+        ``header_text_bytes`` / ``header_truncated`` / ``header_exists``,
+        ``source_path`` / ``source_text`` / ``source_text_bytes`` /
+        ``source_truncated`` / ``source_exists``.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    if cls is None and header_path is None and source_path is None:
+        return {
+            "success": False,
+            "message": "One of 'cls', 'header_path', or 'source_path' is required",
+        }
+
+    params: Dict[str, Any] = {}
+    if cls is not None:
+        params["class"] = cls
+    if header_path is not None:
+        params["header_path"] = header_path
+    if source_path is not None:
+        params["source_path"] = source_path
+    if op is not None:
+        params["op"] = op
+    if include_header is not None:
+        params["include_header"] = include_header
+    if include_source is not None:
+        params["include_source"] = include_source
+    if max_bytes is not None:
+        params["max_bytes"] = max_bytes
+
+    try:
+        response = unreal.send_command("cpp_source", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"cpp_source error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

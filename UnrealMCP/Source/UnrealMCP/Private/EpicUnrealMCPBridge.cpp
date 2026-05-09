@@ -90,6 +90,7 @@
 #include "Commands/SproftSequencerEditCommands.h"
 #include "Commands/SproftProjectContextCommands.h"
 #include "Commands/SproftAnimationInspectCommands.h"
+#include "Commands/SproftCppSourceCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -138,6 +139,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftSequencerEdit = MakeShared<FSproftSequencerEditCommands>();
     SproftProjectContext = MakeShared<FSproftProjectContextCommands>();
     SproftAnimationInspect = MakeShared<FSproftAnimationInspectCommands>();
+    SproftCppSource = MakeShared<FSproftCppSourceCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -183,6 +185,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftSequencerEdit.Reset();
     SproftProjectContext.Reset();
     SproftAnimationInspect.Reset();
+    SproftCppSource.Reset();
 }
 
 // Initialize subsystem
@@ -525,6 +528,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("animation_inspect"))
             {
                 ResultJson = SproftAnimationInspect->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("cpp_source"))
+            {
+                ResultJson = SproftCppSource->HandleCommand(CommandType, Params);
             }
             else
             {

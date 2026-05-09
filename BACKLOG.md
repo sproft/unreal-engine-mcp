@@ -355,6 +355,19 @@ ability" alongside `tag_registry_edit`.
   `level_filter`. Adds `Foliage` to PublicDependencyModuleNames.
   Edit-side ops (paint, scatter, remove instances) remain on the
   backlog.
+- `cpp_source` (small, read-only) — read C++ source by class path
+  or by full file path on disk. Three input modes (class +
+  header_path + source_path), all routed through
+  `FSourceCodeNavigation::FindClassHeaderPath` /
+  `FindClassSourcePath` for the class-driven path or extension-swap
+  inference for the file-driven paths. Returns header / cpp text +
+  byte size + truncation flag per file plus per-file existence
+  flags so a caller can tell "header-only class" from
+  "Blueprint-defined class with no C++ at all". Pairs with
+  `bp_brief` for the "what does this Blueprint's parent C++ class
+  look like" question. The `module` + `module_dir` metadata
+  through `FindClassModuleName` + `FindModulePath` lets a caller
+  jump straight to the .Build.cs without a second tool call.
 - `animation_inspect` (small, read-only) — structured dump for
   animation assets. Resolves the asset by short name or
   `/Game/...` path and branches by class:
@@ -733,7 +746,14 @@ helpers.
   full file. We can also expose the in-editor SOutputLog widget filter
   helpers if a hook is added to the OutputLog module.
 - `performance_audit` — gather perf stats and run a basic audit.
-- `cpp_source` — read or write C++ source and trigger Live Coding.
+- `cpp_source` (small read-only variant ships in this fork) — read
+  header / cpp pair through `FSourceCodeNavigation::FindClassHeaderPath`
+  / `FindClassSourcePath`, or by direct .h / .cpp disk path with
+  sibling-inference. Open follow-ons: write side (mutate header /
+  cpp text + run `ICompilerResultsLog` Live Coding patch) and
+  per-class symbol dump (functions + properties from the
+  reflection database with their declared file + line through
+  `FProperty::GetMetaData("MetaSource")`).
 
 ## Runtime verification (large each)
 
