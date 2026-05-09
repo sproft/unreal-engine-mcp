@@ -8,7 +8,24 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped three read-only inspectors covering
+The most recent pass shipped three small wide-domain read-only
+tools that round out the orientation surface the agent reaches
+for at the start of a session: `project_context` (one-shot
+project summary covering identity, engine version, enabled
+plugins filtered to user-installed, source modules, top-level
+Content folders with asset counts, and the active map +
+GameMode + default pawn through both per-level override and
+project-wide default), `animation_inspect` (class-keyed dump
+for USkeletalMesh / UAnimSequence / UAnimMontage / UBlendSpace
+/ UAnimBlueprint covering bones / sockets / notifies / sections
+/ slot tracks / blend-space axes / state machines), and
+`cpp_source` (read header + cpp pair through
+`FSourceCodeNavigation::FindClassHeaderPath` /
+`FindClassSourcePath` for class-driven lookup, or extension-swap
+inference for direct disk-path lookup, with per-file truncation
+caps and existence flags).
+
+The pass before that shipped three read-only inspectors covering
 broader-domain coverage that was previously locked behind
 `python_execution`: `landscape_inspect` (every `ALandscape` actor's
 component-grid configuration, materials, layers, bounds, and
@@ -771,9 +788,8 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`landscape_inspect`, `foliage_inspect`,
-`sequencer_edit` read-only first slice), the next set should pick
-up:
+After the latest pass (`project_context`, `animation_inspect`,
+`cpp_source`), the next set should pick up:
 
 1. `behavior_tree` edit slice — append a child task / composite to
    a chosen parent, insert a decorator on a chosen child slot, and
@@ -791,6 +807,10 @@ up:
    a movie scene, add a section with an explicit frame range, and
    add a possessable bound to a named actor in the editor world.
    Reuses the MovieScene + LevelSequence deps already pulled in.
+5. `animation_edit` (small variant) — set montage section
+   timings, add notify entries on a UAnimSequence / UAnimMontage
+   through the public Notifies array, and toggle additive flags
+   through the CDO. Pairs with `animation_inspect`.
 
 `python_execution` still covers any operation we have not wrapped
 natively; prefer wrapping the high-frequency calls as dedicated tools
