@@ -5084,6 +5084,93 @@ def asset_references(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def bp_export(
+    blueprint: str,
+    include_events: Optional[bool] = None,
+    include_functions: Optional[bool] = None,
+    include_macros: Optional[bool] = None,
+    include_components: Optional[bool] = None,
+    include_variables: Optional[bool] = None,
+    include_interfaces: Optional[bool] = None,
+    include_defaults: Optional[bool] = None,
+    max_pins_per_node: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only canonical Blueprint-to-JSON snapshot.
+
+    Returns a single GraphSpec-style document covering every event /
+    function / macro / interface graph as a node list (with pin defaults)
+    plus a flat edge list, every SCS component with class + relative
+    transform + an optional flat property dump, every variable with its
+    type + default, the parent class, and the implemented-interface list.
+    Diff-able and useful for verifying that an MCP-driven authoring
+    session left a Blueprint in the expected state.
+
+    Sits next to ``bp_brief`` (one-page orientation), ``bp_inspect``
+    (targeted queries), and ``bp_graph`` (graph traversal). Where
+    ``read_blueprint_content`` returns a shallow event-graph-only
+    summary, ``bp_export`` walks every graph kind and emits the same
+    pin / edge fields ``bp_graph`` does.
+
+    Args:
+        blueprint: Short asset name or full ``/Game/...`` Blueprint path.
+        include_events: Include event-graph (UbergraphPages) graphs.
+            Default True.
+        include_functions: Include function graphs. Default True.
+        include_macros: Include macro graphs. Default True.
+        include_components: Include the SCS component dump. Default True.
+        include_variables: Include the Blueprint's NewVariables list.
+            Default True.
+        include_interfaces: Include implemented interfaces and their
+            override graphs. Default True.
+        include_defaults: Include each component's flat property dump
+            through ``FProperty::ExportText``. Default True.
+        max_pins_per_node: Per-node pin cap. Default 64. Each node will
+            carry ``pins_truncated: True`` when the cap is hit.
+
+    Returns:
+        Dict with ``name``, ``path``, ``blueprint_class``,
+        ``parent_class``, ``parent_class_path``, ``blueprint_type``,
+        ``variables`` + ``variable_count``, ``components`` +
+        ``component_count``, ``interfaces`` + ``interface_count``, plus a
+        ``graphs`` array (each graph carries ``name``, ``kind``,
+        ``graph_class``, ``node_count``, ``nodes`` (per-node
+        ``node_name`` / ``class`` / ``title`` / ``position_x`` /
+        ``position_y`` / ``guid`` / ``pins`` list / optional event /
+        custom-event names) and ``edges`` (per-edge ``source_node`` /
+        ``source_pin`` / ``target_node`` / ``target_pin`` / ``is_exec``)).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"blueprint": blueprint}
+    if include_events is not None:
+        params["include_events"] = include_events
+    if include_functions is not None:
+        params["include_functions"] = include_functions
+    if include_macros is not None:
+        params["include_macros"] = include_macros
+    if include_components is not None:
+        params["include_components"] = include_components
+    if include_variables is not None:
+        params["include_variables"] = include_variables
+    if include_interfaces is not None:
+        params["include_interfaces"] = include_interfaces
+    if include_defaults is not None:
+        params["include_defaults"] = include_defaults
+    if max_pins_per_node is not None:
+        params["max_pins_per_node"] = max_pins_per_node
+
+    try:
+        response = unreal.send_command("bp_export", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_export error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

@@ -41,6 +41,7 @@
 #include "Commands/SproftMaterialInspectCommands.h"
 #include "Commands/SproftSearchAssetsCommands.h"
 #include "Commands/SproftAssetReferencesCommands.h"
+#include "Commands/SproftBpExportCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -118,4 +119,5 @@ private:
 	TSharedPtr<FSproftMaterialInspectCommands> SproftMaterialInspect;
 	TSharedPtr<FSproftSearchAssetsCommands> SproftSearchAssets;
 	TSharedPtr<FSproftAssetReferencesCommands> SproftAssetReferences;
+	TSharedPtr<FSproftBpExportCommands> SproftBpExport;
 };
