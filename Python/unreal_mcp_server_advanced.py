@@ -5209,7 +5209,7 @@ def bp_export(
 
 @mcp.tool()
 def behavior_tree(
-    tree: str,
+    tree: Optional[str] = None,
     op: Optional[str] = None,
     include_blackboard: Optional[bool] = None,
     include_decorators: Optional[bool] = None,
@@ -5219,10 +5219,26 @@ def behavior_tree(
     composite_class: Optional[str] = None,
     overwrite: Optional[bool] = None,
     replace: Optional[bool] = None,
+    parent: Optional[str] = None,
+    target: Optional[str] = None,
+    task_class: Optional[str] = None,
+    decorator_class: Optional[str] = None,
+    service_class: Optional[str] = None,
+    node_name: Optional[str] = None,
+    properties: Optional[Dict[str, Any]] = None,
+    clear: Optional[bool] = None,
+    key_name: Optional[str] = None,
+    key_class: Optional[str] = None,
+    base_class: Optional[str] = None,
+    enum_path: Optional[str] = None,
+    struct_path: Optional[str] = None,
+    instance_synced: Optional[bool] = None,
+    description: Optional[str] = None,
+    category: Optional[str] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Multi-op tool over a UBehaviorTree asset.
+    Multi-op tool over a UBehaviorTree asset (read + edit slice).
 
     Operations (selected through ``op``):
         - ``inspect`` (default): structured read-only dump of an
@@ -5233,49 +5249,72 @@ def behavior_tree(
           ``/Game/...`` package path with an optional linked
           Blackboard.
         - ``add_root_composite``: assign a Selector / Sequence /
-          SimpleParallel as the tree's RootNode. Used right after
-          ``create_behavior_tree`` to land a usable empty tree.
-
-    Edit-slice future work (append child task / composite, insert
-    decorator, append service, blackboard key edits) stays on the
-    backlog.
+          SimpleParallel as the tree's RootNode.
+        - ``add_child_task``: append a UBTNode child slot under a
+          named composite.
+        - ``add_decorator``: append a UBTDecorator to a target child
+          slot's decorator chain.
+        - ``add_service``: append a UBTService to a target composite.
+        - ``set_blackboard``: rebind the BT's BlackboardAsset slot.
+          Pass ``clear=True`` to unbind.
+        - ``add_blackboard_key``: append a typed key to the target
+          Blackboard. ``key_class`` accepts ``bool`` / ``int`` /
+          ``float`` / ``string`` / ``name`` / ``vector`` / ``rotator``
+          / ``object`` / ``class`` / ``enum`` / ``struct``.
+        - ``remove_blackboard_key``: remove a key from the target
+          Blackboard by FName.
 
     Args:
         tree: Short asset name or full ``/Game/...`` Behavior Tree
-            path. For ``create_behavior_tree`` this is the target
-            package path; for ``inspect`` / ``add_root_composite`` it
-            is the existing asset path.
-        op: One of ``inspect`` (default), ``create_behavior_tree``,
-            or ``add_root_composite``.
+            path. Required for every op except the Blackboard-only
+            ops (``add_blackboard_key`` / ``remove_blackboard_key``)
+            when ``blackboard`` is provided directly.
+        op: See operations list above. Defaults to ``inspect``.
         include_blackboard / include_decorators / include_services /
-            max_depth: ``inspect``-only flags. See the read-only slice
-            for details.
-        blackboard: ``create_behavior_tree``-only optional
-            ``/Game/...`` UBlackboardData path to link as the new
-            tree's BlackboardAsset.
-        composite_class: ``add_root_composite``-only token. One of
-            ``selector`` / ``sequence`` / ``simple_parallel``
-            (case-insensitive); a full UClass path is also accepted
-            for any UBTCompositeNode subclass.
-        overwrite: ``create_behavior_tree``-only flag. Replace an
-            existing asset at the path. Default False.
-        replace: ``add_root_composite``-only flag. Replace an existing
-            RootNode. Default False; the call errors out if a
-            RootNode is already present and ``replace=False``.
-        save: Save the asset after the edit. Default True for both
-            edit ops.
+            max_depth: ``inspect``-only flags.
+        blackboard: ``create_behavior_tree`` linked-Blackboard path,
+            ``set_blackboard`` rebind target, or
+            ``add_blackboard_key`` / ``remove_blackboard_key`` target.
+        composite_class: ``add_root_composite``-only token.
+        overwrite: ``create_behavior_tree`` flag.
+        replace: ``add_root_composite`` flag.
+        parent / target: ``add_child_task`` parent / ``add_decorator``
+            target / ``add_service`` target. Default ``root``.
+        task_class / decorator_class / service_class: short token
+            (``wait`` / ``move_to`` / ``blackboard`` / ``cooldown``
+            / etc.) or full ``/Script/Module.ClassName`` /
+            ``/Game/...`` Blueprint class path.
+        node_name: optional UBTNode::NodeName override.
+        properties: flat dict applied via ``FProperty::ImportText``
+            on the new node / decorator / service.
+        clear: ``set_blackboard`` flag to unbind the slot.
+        key_name: ``add_blackboard_key`` / ``remove_blackboard_key``
+            target FName.
+        key_class: ``add_blackboard_key`` short type token.
+        base_class: ``add_blackboard_key`` ``BaseClass`` for
+            ``object`` / ``class`` keys.
+        enum_path: ``add_blackboard_key`` ``EnumType`` for ``enum``
+            keys.
+        struct_path: ``add_blackboard_key`` UScriptStruct path for
+            ``struct`` keys (wires the DefaultValue's script struct).
+        instance_synced: ``add_blackboard_key`` flag (FBlackboardEntry).
+        description / category: ``add_blackboard_key`` editor-only
+            metadata.
+        save: Save the asset after the edit. Default True.
 
     Returns:
-        For ``inspect`` see the read-only slice's contract. For the
-        edit ops, a dict with ``operation``, ``name`` / ``path`` /
-        ``class``, the input echo (``composite_class`` /
-        ``blackboard_path`` etc.), and the ``saved`` flag.
+        For ``inspect`` see the read-only slice's contract. For each
+        edit op, a dict with ``operation``, the resolved ``tree`` /
+        ``blackboard`` path, op-specific echo fields, and a ``saved``
+        flag.
     """
     unreal = get_unreal_connection()
     if not unreal:
         return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
-    params: Dict[str, Any] = {"tree": tree}
+    params: Dict[str, Any] = {}
+    if tree is not None:
+        params["tree"] = tree
     if op is not None:
         params["op"] = op
     if include_blackboard is not None:
@@ -5294,6 +5333,38 @@ def behavior_tree(
         params["overwrite"] = overwrite
     if replace is not None:
         params["replace"] = replace
+    if parent is not None:
+        params["parent"] = parent
+    if target is not None:
+        params["target"] = target
+    if task_class is not None:
+        params["task_class"] = task_class
+    if decorator_class is not None:
+        params["decorator_class"] = decorator_class
+    if service_class is not None:
+        params["service_class"] = service_class
+    if node_name is not None:
+        params["node_name"] = node_name
+    if properties is not None:
+        params["properties"] = properties
+    if clear is not None:
+        params["clear"] = clear
+    if key_name is not None:
+        params["key_name"] = key_name
+    if key_class is not None:
+        params["key_class"] = key_class
+    if base_class is not None:
+        params["base_class"] = base_class
+    if enum_path is not None:
+        params["enum_path"] = enum_path
+    if struct_path is not None:
+        params["struct_path"] = struct_path
+    if instance_synced is not None:
+        params["instance_synced"] = instance_synced
+    if description is not None:
+        params["description"] = description
+    if category is not None:
+        params["category"] = category
     if save is not None:
         params["save"] = save
 

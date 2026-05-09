@@ -10,10 +10,17 @@
 #include "BehaviorTree/BTTaskNode.h"
 #include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType.h"
-#include "BehaviorTree/Blackboard/BlackboardKeyType_Object.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Bool.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Class.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Enum.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Float.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Int.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Name.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Object.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Rotator.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_String.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Struct.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Vector.h"
 #include "BehaviorTree/Composites/BTComposite_Selector.h"
 #include "BehaviorTree/Composites/BTComposite_Sequence.h"
 #include "BehaviorTree/Composites/BTComposite_SimpleParallel.h"
@@ -588,6 +595,18 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCommand(const FString
     if (Op == TEXT("add_service"))
     {
         return HandleAddService(Params);
+    }
+    if (Op == TEXT("set_blackboard"))
+    {
+        return HandleSetBlackboard(Params);
+    }
+    if (Op == TEXT("add_blackboard_key"))
+    {
+        return HandleAddBlackboardKey(Params);
+    }
+    if (Op == TEXT("remove_blackboard_key"))
+    {
+        return HandleRemoveBlackboardKey(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("behavior_tree: unsupported op '%s'"), *Op));
@@ -1247,6 +1266,494 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddService(const TSha
         Result->SetArrayField(TEXT("applied_properties"), AppliedJson);
         Result->SetArrayField(TEXT("skipped_properties"), SkippedJson);
     }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+// =============================================================================
+// Blackboard key edits.
+//
+// `set_blackboard` rebinds the BT's BlackboardAsset slot.
+// `add_blackboard_key` appends an FBlackboardEntry with a typed
+// UBlackboardKeyType subclass on the chosen Blackboard.
+// `remove_blackboard_key` removes a key from a chosen Blackboard's
+// `Keys` array by FName.
+//
+// The Blackboard is resolved either through an explicit `blackboard`
+// path or, when only `tree` is set, through the BT's BlackboardAsset
+// slot (when bound).
+// =============================================================================
+
+namespace
+{
+    UBlackboardData* ResolveBlackboardArg(const TSharedPtr<FJsonObject>& Params, FString& OutError)
+    {
+        FString BlackboardInput;
+        if (Params->TryGetStringField(TEXT("blackboard"), BlackboardInput)
+            || Params->TryGetStringField(TEXT("blackboard_path"), BlackboardInput))
+        {
+            if (BlackboardInput.IsEmpty())
+            {
+                OutError = TEXT("'blackboard' must not be empty");
+                return nullptr;
+            }
+            UObject* Resolved = nullptr;
+            if (BlackboardInput.StartsWith(TEXT("/")))
+            {
+                Resolved = UEditorAssetLibrary::LoadAsset(BlackboardInput);
+            }
+            else
+            {
+                FAssetRegistryModule& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+                TArray<FAssetData> Found;
+                AssetRegistry.Get().GetAssetsByClass(UBlackboardData::StaticClass()->GetClassPathName(), Found);
+                for (const FAssetData& Data : Found)
+                {
+                    if (Data.AssetName.ToString().Equals(BlackboardInput, ESearchCase::IgnoreCase))
+                    {
+                        Resolved = Data.GetAsset();
+                        break;
+                    }
+                }
+            }
+            UBlackboardData* BBData = Cast<UBlackboardData>(Resolved);
+            if (!BBData)
+            {
+                OutError = FString::Printf(TEXT("Asset '%s' is not a UBlackboardData"), *BlackboardInput);
+                return nullptr;
+            }
+            return BBData;
+        }
+
+        // Fallback: resolve via the tree's BlackboardAsset slot.
+        FString TreeError;
+        UBehaviorTree* Tree = LoadTargetTree(Params, TreeError);
+        if (!Tree)
+        {
+            OutError = TEXT("Provide either 'blackboard' or 'tree' (with a bound BlackboardAsset)");
+            return nullptr;
+        }
+        UBlackboardData* Bound = Tree->GetBlackboardAsset();
+        if (!Bound)
+        {
+            OutError = FString::Printf(TEXT("Tree '%s' has no BlackboardAsset; pass 'blackboard' explicitly"),
+                *Tree->GetName());
+            return nullptr;
+        }
+        return Bound;
+    }
+
+    UClass* ResolveBlackboardKeyTypeClass(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return UBlackboardKeyType_Bool::StaticClass();
+        }
+        const FString Lower = Token.ToLower();
+        if (Lower == TEXT("bool") || Lower == TEXT("boolean"))            return UBlackboardKeyType_Bool::StaticClass();
+        if (Lower == TEXT("int") || Lower == TEXT("integer") || Lower == TEXT("int32")) return UBlackboardKeyType_Int::StaticClass();
+        if (Lower == TEXT("float") || Lower == TEXT("real"))               return UBlackboardKeyType_Float::StaticClass();
+        if (Lower == TEXT("string"))                                       return UBlackboardKeyType_String::StaticClass();
+        if (Lower == TEXT("name"))                                         return UBlackboardKeyType_Name::StaticClass();
+        if (Lower == TEXT("vector"))                                       return UBlackboardKeyType_Vector::StaticClass();
+        if (Lower == TEXT("rotator"))                                      return UBlackboardKeyType_Rotator::StaticClass();
+        if (Lower == TEXT("object"))                                       return UBlackboardKeyType_Object::StaticClass();
+        if (Lower == TEXT("class"))                                        return UBlackboardKeyType_Class::StaticClass();
+        if (Lower == TEXT("enum"))                                         return UBlackboardKeyType_Enum::StaticClass();
+        if (Lower == TEXT("struct"))                                       return UBlackboardKeyType_Struct::StaticClass();
+
+        // Full path or short class name fallback.
+        if (Token.StartsWith(TEXT("/")))
+        {
+            if (UClass* Loaded = LoadClass<UBlackboardKeyType>(nullptr, *Token))
+            {
+                return Loaded;
+            }
+        }
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            if (Found->IsChildOf(UBlackboardKeyType::StaticClass()))
+            {
+                return Found;
+            }
+        }
+        // Try the AIModule namespace prefix.
+        const FString WithBackboardPrefix = FString::Printf(TEXT("/Script/AIModule.UBlackboardKeyType_%s"), *Token);
+        if (UClass* Loaded = LoadClass<UBlackboardKeyType>(nullptr, *WithBackboardPrefix))
+        {
+            return Loaded;
+        }
+        return nullptr;
+    }
+
+    /** Load a UClass at a `/Script/...` path, a `/Game/...` Blueprint
+     *  class path (auto-suffixed with `_C`), or a short class name. */
+    UClass* ResolveAnyClass(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        if (Token.StartsWith(TEXT("/Script/")))
+        {
+            if (UClass* Loaded = LoadClass<UObject>(nullptr, *Token))
+            {
+                return Loaded;
+            }
+        }
+        if (Token.StartsWith(TEXT("/Game/")))
+        {
+            FString WithSuffix = Token;
+            if (!WithSuffix.EndsWith(TEXT("_C")))
+            {
+                WithSuffix += TEXT("_C");
+            }
+            if (UClass* Loaded = LoadClass<UObject>(nullptr, *WithSuffix))
+            {
+                return Loaded;
+            }
+        }
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            return Found;
+        }
+        // Engine fallback for short tokens like "Actor" / "Pawn".
+        const FString EngineTry = FString::Printf(TEXT("/Script/Engine.%s"), *Token);
+        if (UClass* Loaded = LoadClass<UObject>(nullptr, *EngineTry))
+        {
+            return Loaded;
+        }
+        return nullptr;
+    }
+
+    UEnum* ResolveEnumPath(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        if (Token.StartsWith(TEXT("/")))
+        {
+            if (UObject* Loaded = StaticLoadObject(UEnum::StaticClass(), nullptr, *Token))
+            {
+                return Cast<UEnum>(Loaded);
+            }
+            return nullptr;
+        }
+        return FindObject<UEnum>(nullptr, *Token);
+    }
+
+    UScriptStruct* ResolveScriptStructPath(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        if (Token.StartsWith(TEXT("/")))
+        {
+            if (UObject* Loaded = StaticLoadObject(UScriptStruct::StaticClass(), nullptr, *Token))
+            {
+                return Cast<UScriptStruct>(Loaded);
+            }
+            return nullptr;
+        }
+        return FindObject<UScriptStruct>(nullptr, *Token);
+    }
+
+    void SaveBlackboardIfRequested(UBlackboardData* BBData, bool bSave)
+    {
+        if (!BBData) return;
+        BBData->MarkPackageDirty();
+        if (bSave)
+        {
+            UEditorAssetLibrary::SaveAsset(BBData->GetPathName(), /*bOnlyIfIsDirty=*/false);
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleSetBlackboard(const TSharedPtr<FJsonObject>& Params)
+{
+    FString TreeError;
+    UBehaviorTree* Tree = LoadTargetTree(Params, TreeError);
+    if (!Tree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TreeError);
+    }
+
+    bool bClear = false;
+    Params->TryGetBoolField(TEXT("clear"), bClear);
+
+    UBlackboardData* NewBlackboard = nullptr;
+    FString BlackboardInput;
+    if (!bClear)
+    {
+        if (!Params->TryGetStringField(TEXT("blackboard"), BlackboardInput)
+            && !Params->TryGetStringField(TEXT("blackboard_path"), BlackboardInput))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Missing 'blackboard' parameter (or pass 'clear': true to unbind the slot)"));
+        }
+        if (BlackboardInput.IsEmpty())
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("'blackboard' must not be empty"));
+        }
+        UObject* Resolved = nullptr;
+        if (BlackboardInput.StartsWith(TEXT("/")))
+        {
+            Resolved = UEditorAssetLibrary::LoadAsset(BlackboardInput);
+        }
+        else
+        {
+            FAssetRegistryModule& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+            TArray<FAssetData> Found;
+            AssetRegistry.Get().GetAssetsByClass(UBlackboardData::StaticClass()->GetClassPathName(), Found);
+            for (const FAssetData& Data : Found)
+            {
+                if (Data.AssetName.ToString().Equals(BlackboardInput, ESearchCase::IgnoreCase))
+                {
+                    Resolved = Data.GetAsset();
+                    break;
+                }
+            }
+        }
+        NewBlackboard = Cast<UBlackboardData>(Resolved);
+        if (!NewBlackboard)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Asset '%s' is not a UBlackboardData"), *BlackboardInput));
+        }
+    }
+
+    Tree->BlackboardAsset = NewBlackboard;
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    Tree->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Tree->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("set_blackboard"));
+    Result->SetStringField(TEXT("tree"), Tree->GetPathName());
+    if (NewBlackboard)
+    {
+        Result->SetStringField(TEXT("blackboard_path"), NewBlackboard->GetPathName());
+        Result->SetStringField(TEXT("blackboard_name"), NewBlackboard->GetName());
+        Result->SetBoolField(TEXT("cleared"), false);
+    }
+    else
+    {
+        Result->SetBoolField(TEXT("cleared"), true);
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddBlackboardKey(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ResolveError;
+    UBlackboardData* BBData = ResolveBlackboardArg(Params, ResolveError);
+    if (!BBData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    FString KeyNameStr;
+    if (!Params->TryGetStringField(TEXT("key_name"), KeyNameStr)
+        && !Params->TryGetStringField(TEXT("name"), KeyNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'key_name' parameter"));
+    }
+    if (KeyNameStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'key_name' must not be empty"));
+    }
+    const FName KeyName(*KeyNameStr);
+
+    // Reject duplicates against this asset's own keys (parent chain
+    // dupes are merged at runtime through UpdatePersistentKey, but we
+    // surface the local conflict explicitly).
+    for (const FBlackboardEntry& Existing : BBData->Keys)
+    {
+        if (Existing.EntryName == KeyName)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Blackboard '%s' already has a key '%s'"),
+                    *BBData->GetName(), *KeyNameStr));
+        }
+    }
+
+    FString KeyClassToken;
+    if (!Params->TryGetStringField(TEXT("key_class"), KeyClassToken)
+        && !Params->TryGetStringField(TEXT("class"), KeyClassToken)
+        && !Params->TryGetStringField(TEXT("type"), KeyClassToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'key_class' parameter (bool / int / float / string / name / vector / rotator / object / class / enum / struct)"));
+    }
+    UClass* KeyTypeClass = ResolveBlackboardKeyTypeClass(KeyClassToken);
+    if (!KeyTypeClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UBlackboardKeyType subclass '%s'"), *KeyClassToken));
+    }
+    if (KeyTypeClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is abstract"), *KeyTypeClass->GetPathName()));
+    }
+
+    // NewObject the typed key with the Blackboard as outer so it travels
+    // with the asset on save.
+    UBlackboardKeyType* NewKey = NewObject<UBlackboardKeyType>(BBData, KeyTypeClass, NAME_None, RF_Transactional);
+    if (!NewKey)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to NewObject UBlackboardKeyType of class '%s'"), *KeyTypeClass->GetName()));
+    }
+
+    // Wire the inner type fields when the caller supplied a hint.
+    FString BaseClassToken;
+    if (Params->TryGetStringField(TEXT("base_class"), BaseClassToken)
+        || Params->TryGetStringField(TEXT("base_class_path"), BaseClassToken))
+    {
+        if (UBlackboardKeyType_Object* AsObj = Cast<UBlackboardKeyType_Object>(NewKey))
+        {
+            if (UClass* BaseClass = ResolveAnyClass(BaseClassToken))
+            {
+                AsObj->BaseClass = BaseClass;
+            }
+        }
+        else if (UBlackboardKeyType_Class* AsCls = Cast<UBlackboardKeyType_Class>(NewKey))
+        {
+            if (UClass* BaseClass = ResolveAnyClass(BaseClassToken))
+            {
+                AsCls->BaseClass = BaseClass;
+            }
+        }
+    }
+    FString EnumToken;
+    if (Params->TryGetStringField(TEXT("enum_path"), EnumToken)
+        || Params->TryGetStringField(TEXT("enum"), EnumToken))
+    {
+        if (UBlackboardKeyType_Enum* AsEnum = Cast<UBlackboardKeyType_Enum>(NewKey))
+        {
+            if (UEnum* EnumObj = ResolveEnumPath(EnumToken))
+            {
+                AsEnum->EnumType = EnumObj;
+            }
+        }
+    }
+    FString StructToken;
+    if (Params->TryGetStringField(TEXT("struct_path"), StructToken)
+        || Params->TryGetStringField(TEXT("struct"), StructToken))
+    {
+        if (UBlackboardKeyType_Struct* AsStruct = Cast<UBlackboardKeyType_Struct>(NewKey))
+        {
+            if (UScriptStruct* Struct = ResolveScriptStructPath(StructToken))
+            {
+                AsStruct->DefaultValue.InitializeAs(Struct);
+            }
+        }
+    }
+
+    FBlackboardEntry NewEntry;
+    NewEntry.EntryName = KeyName;
+    NewEntry.KeyType = NewKey;
+
+    bool bInstanceSynced = false;
+    if (Params->TryGetBoolField(TEXT("instance_synced"), bInstanceSynced))
+    {
+        NewEntry.bInstanceSynced = bInstanceSynced ? 1 : 0;
+    }
+#if WITH_EDITORONLY_DATA
+    FString DescriptionStr;
+    if (Params->TryGetStringField(TEXT("description"), DescriptionStr))
+    {
+        NewEntry.EntryDescription = DescriptionStr;
+    }
+    FString CategoryStr;
+    if (Params->TryGetStringField(TEXT("category"), CategoryStr))
+    {
+        NewEntry.EntryCategory = FName(*CategoryStr);
+    }
+#endif
+    BBData->Keys.Add(NewEntry);
+    BBData->UpdateIfHasSynchronizedKeys();
+    BBData->UpdateKeyIDs();
+    BBData->PropagateKeyChangesToDerivedBlackboardAssets();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveBlackboardIfRequested(BBData, bSave);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_blackboard_key"));
+    Result->SetStringField(TEXT("blackboard"), BBData->GetPathName());
+    Result->SetStringField(TEXT("key_name"), KeyName.ToString());
+    Result->SetStringField(TEXT("key_class"), KeyTypeClass->GetName());
+    Result->SetStringField(TEXT("key_class_path"), KeyTypeClass->GetPathName());
+    Result->SetNumberField(TEXT("key_index"), BBData->Keys.Num() - 1);
+    Result->SetNumberField(TEXT("key_count"), BBData->Keys.Num());
+    if (bInstanceSynced) Result->SetBoolField(TEXT("instance_synced"), true);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleRemoveBlackboardKey(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ResolveError;
+    UBlackboardData* BBData = ResolveBlackboardArg(Params, ResolveError);
+    if (!BBData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    FString KeyNameStr;
+    if (!Params->TryGetStringField(TEXT("key_name"), KeyNameStr)
+        && !Params->TryGetStringField(TEXT("name"), KeyNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'key_name' parameter"));
+    }
+    if (KeyNameStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'key_name' must not be empty"));
+    }
+    const FName KeyName(*KeyNameStr);
+
+    int32 RemoveIndex = INDEX_NONE;
+    for (int32 Idx = 0; Idx < BBData->Keys.Num(); ++Idx)
+    {
+        if (BBData->Keys[Idx].EntryName == KeyName)
+        {
+            RemoveIndex = Idx;
+            break;
+        }
+    }
+    if (RemoveIndex == INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blackboard '%s' has no own key '%s'"),
+                *BBData->GetName(), *KeyNameStr));
+    }
+    BBData->Keys.RemoveAt(RemoveIndex);
+    BBData->UpdateIfHasSynchronizedKeys();
+    BBData->UpdateKeyIDs();
+    BBData->PropagateKeyChangesToDerivedBlackboardAssets();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveBlackboardIfRequested(BBData, bSave);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("remove_blackboard_key"));
+    Result->SetStringField(TEXT("blackboard"), BBData->GetPathName());
+    Result->SetStringField(TEXT("key_name"), KeyName.ToString());
+    Result->SetNumberField(TEXT("removed_index"), RemoveIndex);
+    Result->SetNumberField(TEXT("key_count"), BBData->Keys.Num());
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }

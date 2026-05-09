@@ -29,6 +29,19 @@
  *     chain. Targets the composite by `GetNodeName()`. Optionally
  *     takes a flat property dict applied through `FProperty::ImportText`
  *     on the new service.
+ *   - `set_blackboard`: rebind the tree's Blackboard asset. Accepts a
+ *     `/Game/...` UBlackboardData path or short asset name. Pass
+ *     `clear=true` to unbind the asset.
+ *   - `add_blackboard_key`: append a key to a target Blackboard's
+ *     `Keys` array. Resolves the key class from the short token
+ *     (`bool` / `int` / `float` / `string` / `name` / `vector` /
+ *     `rotator` / `object` / `class` / `enum` / `struct`), instantiates
+ *     a UBlackboardKeyType subclass outered to the Blackboard, and
+ *     wires inner type fields (BaseClass on Object / Class keys,
+ *     EnumType on Enum keys, DefaultValue.GetScriptStruct() on Struct
+ *     keys) when the caller passes the corresponding parameter.
+ *   - `remove_blackboard_key`: remove a key from a target
+ *     Blackboard's `Keys` array by FName.
  *
  * Inputs (inspect):
  *   - tree:                short asset name or full `/Game/...` path
@@ -107,6 +120,55 @@
  *   - save:                save the asset after the edit. Default
  *                          true.
  *
+ * Inputs (set_blackboard):
+ *   - tree:                BT asset path / short name. Required.
+ *   - blackboard:          `/Game/...` UBlackboardData path or short
+ *                          asset name. Required unless `clear=true`.
+ *   - clear:               unbind the BlackboardAsset slot. Default
+ *                          false.
+ *   - save:                save the asset after the edit. Default
+ *                          true.
+ *
+ * Inputs (add_blackboard_key):
+ *   - blackboard:          `/Game/...` UBlackboardData path or short
+ *                          asset name. Required. (When `tree` is set
+ *                          but `blackboard` is omitted, the BT's
+ *                          BlackboardAsset is used.)
+ *   - tree:                optional BT asset path / short name. When
+ *                          set without `blackboard`, the BT's
+ *                          BlackboardAsset is targeted.
+ *   - key_name:            new key's FName. Required.
+ *   - key_class:           short type token. One of `bool` / `int` /
+ *                          `float` / `string` / `name` / `vector` /
+ *                          `rotator` / `object` / `class` / `enum` /
+ *                          `struct`. Full `/Script/AIModule.UBlackboardKeyType_X`
+ *                          paths and the short class names also
+ *                          work.
+ *   - base_class:          optional `/Script/...` or short class
+ *                          name applied to UBlackboardKeyType_Object
+ *                          / UBlackboardKeyType_Class as `BaseClass`.
+ *   - enum_path:           optional `/Script/...` or `/Game/...`
+ *                          UEnum path applied to UBlackboardKeyType_Enum
+ *                          as `EnumType`.
+ *   - struct_path:         optional `/Script/...` or `/Game/...`
+ *                          UScriptStruct path. Wires the
+ *                          UBlackboardKeyType_Struct's
+ *                          `DefaultValue.InitializeAs(Struct)`.
+ *   - instance_synced:     optional bool. Sets the entry's
+ *                          `bInstanceSynced` flag.
+ *   - description:         optional string (editor-only).
+ *   - category:            optional FName (editor-only).
+ *   - save:                save the Blackboard asset after the edit.
+ *                          Default true.
+ *
+ * Inputs (remove_blackboard_key):
+ *   - blackboard:          UBlackboardData path or short name (or
+ *                          omit when `tree` is set, same fallback).
+ *   - tree:                optional BT asset path / short name.
+ *   - key_name:            FName of the key to remove. Required.
+ *   - save:                save the Blackboard asset after the edit.
+ *                          Default true.
+ *
  * Clean-room implementation derived from the public UE5 API:
  *   - UBehaviorTree::RootNode / RootDecorators / BlackboardAsset.
  *   - UBTCompositeNode::Children / Services /
@@ -136,4 +198,7 @@ private:
     TSharedPtr<FJsonObject> HandleAddChildTask(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddDecorator(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddService(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetBlackboard(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddBlackboardKey(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveBlackboardKey(const TSharedPtr<FJsonObject>& Params);
 };
