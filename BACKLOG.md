@@ -19,12 +19,18 @@ declarative ops without touching `python_execution`.
 
 - `editor_actions` (small) — save / undo / redo / focus selection / play / stop play.
 - `window_capture` (small) — synchronous PNG screenshot of the active viewport.
-- `asset_factory` (small) — create DataTable / Enum / Struct / DataAsset
-  assets. The Enum variant takes a list of entry names; the Struct variant
-  takes a list of `{name, type}` field specs covering the standard scalar
-  and small-struct types plus `/Game/`-rooted UScriptStruct paths; the
-  DataAsset variant accepts a target UDataAsset class and an optional
-  flat property dict applied through `FProperty::ImportText_InContainer`.
+- `asset_factory` (small) — create DataTable / Enum / Struct / DataAsset /
+  Enhanced Input Bundle assets. The Enum variant takes a list of entry
+  names; the Struct variant takes a list of `{name, type}` field specs
+  covering the standard scalar and small-struct types plus `/Game/`-
+  rooted UScriptStruct paths; the DataAsset variant accepts a target
+  UDataAsset class and an optional flat property dict applied through
+  `FProperty::ImportText_InContainer`; the enhanced_input_bundle variant
+  takes a list of action specs (name + value_type) plus a list of
+  mapping rows (action + key + optional negate / swizzle) and produces
+  one UInputMappingContext plus N UInputAction assets in a single call.
+  Existing assets at the target paths are reused unless `overwrite`
+  is set.
 - `widget_edit` (small) — create a UWidgetBlueprint (`create_widget_blueprint`)
   and add a typed child widget (`add_child_widget`, e.g. vertical_box,
   progress_bar, text_block, button, image) under a parent panel by FName.
@@ -385,9 +391,13 @@ helpers.
 ## Data assets (small to medium each, on the asset_factory umbrella)
 
 - `asset_factory` (DataAsset) — shipped in this fork.
-- `asset_factory` (Enhanced Input bundle) — superseded by the dedicated
-  `bp_input` tool, which creates InputActions and InputMappingContexts
-  individually and lets the agent bind keys at the row level.
+- `asset_factory` (Enhanced Input bundle) — shipped in this fork. One
+  call accepts a list of action specs (name + value_type) and a list
+  of mapping rows (action + key + optional negate / swizzle) and
+  produces an IMC plus N UInputActions. The dedicated `bp_input` tool
+  still covers per-asset creation and the action-event-node wiring
+  side; the bundle variant is the right shortcut when the caller can
+  describe the entire input layer declaratively.
 
 ## Editor & diagnostics (medium each)
 

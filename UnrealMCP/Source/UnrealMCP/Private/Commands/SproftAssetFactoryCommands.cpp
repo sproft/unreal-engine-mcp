@@ -8,6 +8,12 @@
 #include "Engine/DataTable.h"
 #include "Engine/UserDefinedEnum.h"
 #include "Engine/UserDefinedStruct.h"
+#include "EnhancedActionKeyMapping.h"
+#include "InputAction.h"
+#include "InputActionValue.h"
+#include "InputCoreTypes.h"
+#include "InputMappingContext.h"
+#include "InputModifiers.h"
 #include "Kismet2/EnumEditorUtils.h"
 #include "Kismet2/StructureEditorUtils.h"
 #include "Misc/OutputDeviceNull.h"
@@ -133,9 +139,14 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::HandleAssetFactory(const TS
     {
         return CreateDataAsset(Params);
     }
+    if (AssetType == TEXT("enhanced_input_bundle") || AssetType == TEXT("input_bundle")
+        || AssetType == TEXT("enhanced_input"))
+    {
+        return CreateEnhancedInputBundle(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported asset_type '%s'. Supported: datatable, enum, struct, data_asset"), *AssetType));
+        FString::Printf(TEXT("Unsupported asset_type '%s'. Supported: datatable, enum, struct, data_asset, enhanced_input_bundle"), *AssetType));
 }
 
 TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateDataTable(const TSharedPtr<FJsonObject>& Params)
@@ -790,6 +801,336 @@ TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateDataAsset(const TShar
     ResultObj->SetStringField(TEXT("data_asset_class"), DataAssetClass->GetPathName());
     ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
     ResultObj->SetArrayField(TEXT("skipped"), SkippedJson);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterCreate);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Map a short value-type token to EInputActionValueType. Mirrors
+     *  the helper in SproftBpInputCommands.cpp; we duplicate the small
+     *  table here to keep this command file self-contained rather than
+     *  cross-including a sibling. */
+    bool TryParseInputValueType_Bundle(const FString& InText, EInputActionValueType& OutType)
+    {
+        const FString Text = InText.ToLower().TrimStartAndEnd();
+        if (Text == TEXT("bool") || Text == TEXT("boolean") || Text == TEXT("digital"))
+        {
+            OutType = EInputActionValueType::Boolean;
+            return true;
+        }
+        if (Text == TEXT("axis1d") || Text == TEXT("axis_1d") || Text == TEXT("1d") || Text == TEXT("float"))
+        {
+            OutType = EInputActionValueType::Axis1D;
+            return true;
+        }
+        if (Text == TEXT("axis2d") || Text == TEXT("axis_2d") || Text == TEXT("2d") || Text == TEXT("vector2d"))
+        {
+            OutType = EInputActionValueType::Axis2D;
+            return true;
+        }
+        if (Text == TEXT("axis3d") || Text == TEXT("axis_3d") || Text == TEXT("3d") || Text == TEXT("vector3d") || Text == TEXT("vector"))
+        {
+            OutType = EInputActionValueType::Axis3D;
+            return true;
+        }
+        return false;
+    }
+
+    bool TryParseAxisSwizzle(const FString& Token, EInputAxisSwizzle& OutSwizzle)
+    {
+        const FString T = Token.ToUpper().Replace(TEXT(" "), TEXT(""));
+        if (T == TEXT("YXZ")) { OutSwizzle = EInputAxisSwizzle::YXZ; return true; }
+        if (T == TEXT("ZYX")) { OutSwizzle = EInputAxisSwizzle::ZYX; return true; }
+        if (T == TEXT("XZY")) { OutSwizzle = EInputAxisSwizzle::XZY; return true; }
+        if (T == TEXT("YZX")) { OutSwizzle = EInputAxisSwizzle::YZX; return true; }
+        if (T == TEXT("ZXY")) { OutSwizzle = EInputAxisSwizzle::ZXY; return true; }
+        return false;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftAssetFactoryCommands::CreateEnhancedInputBundle(const TSharedPtr<FJsonObject>& Params)
+{
+    FString PackageRoot;
+    if (!Params->TryGetStringField(TEXT("package_root"), PackageRoot)
+        && !Params->TryGetStringField(TEXT("root"), PackageRoot)
+        && !Params->TryGetStringField(TEXT("package_path"), PackageRoot))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'package_root' (e.g. /Game/Input). Actions go under <root>/Actions/IA_*; the IMC goes at <root>/<imc_name>."));
+    }
+    if (!PackageRoot.StartsWith(TEXT("/")))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'package_root' must be an absolute /Game/ path, got '%s'"), *PackageRoot));
+    }
+    PackageRoot.RemoveFromEnd(TEXT("/"));
+
+    FString IMCName = TEXT("IMC_Default");
+    Params->TryGetStringField(TEXT("imc_name"), IMCName);
+
+    FString ActionPrefix = TEXT("IA_");
+    Params->TryGetStringField(TEXT("action_prefix"), ActionPrefix);
+
+    bool bSaveAfterCreate = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterCreate);
+
+    bool bOverwrite = false;
+    Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+
+    const TArray<TSharedPtr<FJsonValue>>* ActionsArray = nullptr;
+    if (!Params->TryGetArrayField(TEXT("actions"), ActionsArray) || ActionsArray->Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'actions' array (e.g. [{\"name\": \"Move\", \"value_type\": \"axis2d\"}, {\"name\": \"Jump\"}])"));
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* MappingsArray = nullptr;
+    Params->TryGetArrayField(TEXT("mappings"), MappingsArray);
+
+    // Track created action assets keyed by short name so the mapping rows
+    // can resolve them without re-loading.
+    TMap<FString, UInputAction*> ActionsByName;
+    TArray<TSharedPtr<FJsonValue>> ActionsResult;
+    TArray<FString> Errors;
+
+    for (const TSharedPtr<FJsonValue>& ActionVal : *ActionsArray)
+    {
+        if (!ActionVal.IsValid() || ActionVal->Type != EJson::Object)
+        {
+            Errors.Add(TEXT("Action entry is not a JSON object"));
+            continue;
+        }
+        const TSharedPtr<FJsonObject>& ActionObj = ActionVal->AsObject();
+
+        FString ShortName;
+        if (!ActionObj->TryGetStringField(TEXT("name"), ShortName) || ShortName.IsEmpty())
+        {
+            Errors.Add(TEXT("Action entry missing 'name'"));
+            continue;
+        }
+
+        FString ValueTypeText = TEXT("Boolean");
+        ActionObj->TryGetStringField(TEXT("value_type"), ValueTypeText);
+        EInputActionValueType ValueType = EInputActionValueType::Boolean;
+        if (!TryParseInputValueType_Bundle(ValueTypeText, ValueType))
+        {
+            Errors.Add(FString::Printf(TEXT("Action '%s' has unknown value_type '%s'"), *ShortName, *ValueTypeText));
+            continue;
+        }
+
+        bool bTriggerWhenPaused = false;
+        ActionObj->TryGetBoolField(TEXT("trigger_when_paused"), bTriggerWhenPaused);
+
+        FString Description;
+        ActionObj->TryGetStringField(TEXT("description"), Description);
+
+        // Compose the action's package path.
+        const FString AssetName = ShortName.StartsWith(ActionPrefix) ? ShortName : (ActionPrefix + ShortName);
+        const FString ActionPackagePath = FString::Printf(TEXT("%s/Actions/%s"), *PackageRoot, *AssetName);
+
+        if (UEditorAssetLibrary::DoesAssetExist(ActionPackagePath) && !bOverwrite)
+        {
+            // Reuse the existing IA so the mapping pass can still bind it.
+            if (UInputAction* Existing = Cast<UInputAction>(UEditorAssetLibrary::LoadAsset(ActionPackagePath)))
+            {
+                ActionsByName.Add(ShortName, Existing);
+                TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+                Row->SetStringField(TEXT("name"), AssetName);
+                Row->SetStringField(TEXT("path"), ActionPackagePath);
+                Row->SetStringField(TEXT("value_type"), ValueTypeText);
+                Row->SetBoolField(TEXT("created"), false);
+                Row->SetBoolField(TEXT("reused"), true);
+                ActionsResult.Add(MakeShared<FJsonValueObject>(Row));
+                continue;
+            }
+            Errors.Add(FString::Printf(TEXT("Asset already exists at '%s' but is not a UInputAction; skipping"), *ActionPackagePath));
+            continue;
+        }
+
+        UPackage* ActionPkg = CreatePackage(*ActionPackagePath);
+        if (!ActionPkg)
+        {
+            Errors.Add(FString::Printf(TEXT("Failed to create package '%s'"), *ActionPackagePath));
+            continue;
+        }
+        ActionPkg->FullyLoad();
+        UInputAction* NewAction = NewObject<UInputAction>(
+            ActionPkg, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+        if (!NewAction)
+        {
+            Errors.Add(FString::Printf(TEXT("Failed to NewObject UInputAction for '%s'"), *AssetName));
+            continue;
+        }
+        NewAction->ValueType = ValueType;
+        NewAction->bTriggerWhenPaused = bTriggerWhenPaused;
+        if (!Description.IsEmpty())
+        {
+            NewAction->ActionDescription = FText::FromString(Description);
+        }
+        FAssetRegistryModule::AssetCreated(NewAction);
+        ActionPkg->MarkPackageDirty();
+        if (bSaveAfterCreate)
+        {
+            UEditorAssetLibrary::SaveAsset(ActionPackagePath, /*bOnlyIfIsDirty=*/false);
+        }
+        ActionsByName.Add(ShortName, NewAction);
+
+        TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+        Row->SetStringField(TEXT("name"), AssetName);
+        Row->SetStringField(TEXT("path"), ActionPackagePath);
+        Row->SetStringField(TEXT("value_type"), ValueTypeText);
+        Row->SetBoolField(TEXT("created"), true);
+        Row->SetBoolField(TEXT("reused"), false);
+        ActionsResult.Add(MakeShared<FJsonValueObject>(Row));
+    }
+
+    // Create the IMC.
+    const FString IMCPackagePath = FString::Printf(TEXT("%s/%s"), *PackageRoot, *IMCName);
+    UInputMappingContext* IMC = nullptr;
+    bool bIMCCreated = false;
+    bool bIMCReused = false;
+    if (UEditorAssetLibrary::DoesAssetExist(IMCPackagePath) && !bOverwrite)
+    {
+        IMC = Cast<UInputMappingContext>(UEditorAssetLibrary::LoadAsset(IMCPackagePath));
+        if (!IMC)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Asset already exists at '%s' but is not a UInputMappingContext (set overwrite=true to replace)."), *IMCPackagePath));
+        }
+        bIMCReused = true;
+    }
+    else
+    {
+        UPackage* IMCPkg = CreatePackage(*IMCPackagePath);
+        if (!IMCPkg)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Failed to create IMC package '%s'"), *IMCPackagePath));
+        }
+        IMCPkg->FullyLoad();
+        IMC = NewObject<UInputMappingContext>(
+            IMCPkg, *IMCName, RF_Public | RF_Standalone | RF_Transactional);
+        if (!IMC)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Failed to NewObject UInputMappingContext '%s'"), *IMCName));
+        }
+        FAssetRegistryModule::AssetCreated(IMC);
+        IMCPkg->MarkPackageDirty();
+        bIMCCreated = true;
+    }
+
+    // Apply mapping rows. Each row binds one action to one FKey, with
+    // optional negate/swizzle modifiers attached.
+    TArray<TSharedPtr<FJsonValue>> MappingsResult;
+    if (MappingsArray)
+    {
+        for (const TSharedPtr<FJsonValue>& MapVal : *MappingsArray)
+        {
+            if (!MapVal.IsValid() || MapVal->Type != EJson::Object)
+            {
+                Errors.Add(TEXT("Mapping entry is not a JSON object"));
+                continue;
+            }
+            const TSharedPtr<FJsonObject>& MapObj = MapVal->AsObject();
+
+            FString ActionName;
+            if (!MapObj->TryGetStringField(TEXT("action"), ActionName) || ActionName.IsEmpty())
+            {
+                Errors.Add(TEXT("Mapping entry missing 'action'"));
+                continue;
+            }
+            FString KeyText;
+            if (!MapObj->TryGetStringField(TEXT("key"), KeyText) || KeyText.IsEmpty())
+            {
+                Errors.Add(FString::Printf(TEXT("Mapping for action '%s' missing 'key'"), *ActionName));
+                continue;
+            }
+
+            UInputAction** Lookup = ActionsByName.Find(ActionName);
+            if (!Lookup || !*Lookup)
+            {
+                Errors.Add(FString::Printf(TEXT("Mapping references unknown action '%s'"), *ActionName));
+                continue;
+            }
+            UInputAction* Action = *Lookup;
+
+            const FKey Key(*KeyText);
+            if (!Key.IsValid())
+            {
+                Errors.Add(FString::Printf(TEXT("Mapping for '%s': key '%s' is not a known FKey"), *ActionName, *KeyText));
+                continue;
+            }
+
+            FEnhancedActionKeyMapping& NewMapping = IMC->MapKey(Action, Key);
+
+            // Optional convenience modifiers. We support the two most-used
+            // ones in practice: Negate (so WASD can drive a 2D move from
+            // single-axis keys) and SwizzleAxis (so Up / Down can drive Y).
+            bool bNegate = false;
+            MapObj->TryGetBoolField(TEXT("negate"), bNegate);
+            if (bNegate)
+            {
+                UInputModifierNegate* Modifier = NewObject<UInputModifierNegate>(IMC);
+                NewMapping.Modifiers.Add(Modifier);
+            }
+
+            FString SwizzleToken;
+            if (MapObj->TryGetStringField(TEXT("swizzle"), SwizzleToken))
+            {
+                EInputAxisSwizzle SwizzleOrder = EInputAxisSwizzle::YXZ;
+                if (TryParseAxisSwizzle(SwizzleToken, SwizzleOrder))
+                {
+                    UInputModifierSwizzleAxis* Modifier = NewObject<UInputModifierSwizzleAxis>(IMC);
+                    Modifier->Order = SwizzleOrder;
+                    NewMapping.Modifiers.Add(Modifier);
+                }
+                else
+                {
+                    Errors.Add(FString::Printf(TEXT("Mapping for '%s': unknown swizzle order '%s'"), *ActionName, *SwizzleToken));
+                }
+            }
+
+            TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+            Row->SetStringField(TEXT("action"), Action->GetName());
+            Row->SetStringField(TEXT("action_path"), Action->GetPathName());
+            Row->SetStringField(TEXT("key"), Key.ToString());
+            Row->SetBoolField(TEXT("negate"), bNegate);
+            if (!SwizzleToken.IsEmpty())
+            {
+                Row->SetStringField(TEXT("swizzle"), SwizzleToken);
+            }
+            MappingsResult.Add(MakeShared<FJsonValueObject>(Row));
+        }
+    }
+
+    if (UPackage* Package = IMC->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSaveAfterCreate)
+    {
+        UEditorAssetLibrary::SaveAsset(IMCPackagePath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("asset_type"), TEXT("EnhancedInputBundle"));
+    ResultObj->SetStringField(TEXT("imc_path"), IMCPackagePath);
+    ResultObj->SetBoolField(TEXT("imc_created"), bIMCCreated);
+    ResultObj->SetBoolField(TEXT("imc_reused"), bIMCReused);
+    ResultObj->SetArrayField(TEXT("actions"), ActionsResult);
+    ResultObj->SetArrayField(TEXT("mappings"), MappingsResult);
+    ResultObj->SetNumberField(TEXT("mapping_count"), IMC->GetMappings().Num());
+    if (!Errors.IsEmpty())
+    {
+        TArray<TSharedPtr<FJsonValue>> ErrorsJson;
+        for (const FString& Err : Errors)
+        {
+            ErrorsJson.Add(MakeShared<FJsonValueString>(Err));
+        }
+        ResultObj->SetArrayField(TEXT("errors"), ErrorsJson);
+    }
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterCreate);
     return ResultObj;
 }

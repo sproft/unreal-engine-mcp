@@ -2891,19 +2891,29 @@ def asset_factory(
     properties: Optional[Dict[str, Any]] = None,
     save: bool = True,
     overwrite: bool = False,
+    actions: Optional[List[Dict[str, Any]]] = None,
+    mappings: Optional[List[Dict[str, Any]]] = None,
+    imc_name: Optional[str] = None,
+    action_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new asset of the requested type.
 
-    Mirrors the hosted Flop "asset_factory" surface. This fork supports four
-    asset types so far: DataTable, Enum, Struct, and DataAsset. The Enhanced
-    Input data-asset bundle is split into the dedicated bp_input tool.
+    Mirrors the hosted Flop "asset_factory" surface. This fork supports five
+    asset types so far: DataTable, Enum, Struct, DataAsset, and Enhanced
+    Input bundles (one IMC plus N input actions in a single declarative
+    call).
 
     Args:
-        asset_type: One of "datatable", "enum", "struct", "data_asset".
-        package_path: Absolute content-browser path for the new asset, e.g.
-            "/Game/Data/CraftingRecipes". A trailing ".AssetName" object
-            suffix is allowed and stripped.
+        asset_type: One of "datatable", "enum", "struct", "data_asset",
+            "enhanced_input_bundle".
+        package_path: Absolute content-browser path for the new asset.
+            For "enhanced_input_bundle" this is treated as the package
+            root (e.g. "/Game/Input"); the IMC goes at
+            "<root>/<imc_name>" and each action goes under
+            "<root>/Actions/<action_prefix><name>". For the other types
+            it is the asset's own path (e.g. "/Game/Data/MyTable"). A
+            trailing ".AssetName" suffix is allowed and stripped.
         row_struct: For DataTable: a UScriptStruct path or short name to use
             as the row schema. Pass either a full path like
             "/Script/MyModule.MyRow", a Blueprint struct path like
@@ -2925,6 +2935,24 @@ def asset_factory(
             arrays are JSON-encoded first. Unknown or malformed entries are
             reported in the "skipped" field of the response without
             aborting the create.
+        actions: For "enhanced_input_bundle": list of action specs.
+            Each spec is a dict with keys "name" (required, e.g. "Move"),
+            optional "value_type" (one of "bool" / "axis1d" / "axis2d" /
+            "axis3d", default "bool"), optional "trigger_when_paused"
+            (bool), and optional "description". Existing assets at the
+            target path are reused unless overwrite=True.
+        mappings: For "enhanced_input_bundle": list of binding rows.
+            Each row is a dict with keys "action" (must match a name in
+            ``actions``), "key" (FKey FName like "SpaceBar", "W",
+            "Gamepad_FaceButton_Bottom"), optional "negate" (bool, adds
+            a UInputModifierNegate), and optional "swizzle" (one of
+            YXZ / ZYX / XZY / YZX / ZXY, adds a
+            UInputModifierSwizzleAxis).
+        imc_name: For "enhanced_input_bundle": IMC asset short name.
+            Defaults to "IMC_Default".
+        action_prefix: For "enhanced_input_bundle": prefix prepended to
+            each action name. Defaults to "IA_". Names that already
+            start with the prefix are not double-prefixed.
         save: Save the asset to disk after creating it. Defaults to True.
         overwrite: If an asset already exists at package_path, overwrite it.
             Defaults to False (the call fails instead).
@@ -2952,6 +2980,14 @@ def asset_factory(
         params["data_asset_class"] = data_asset_class
     if properties is not None:
         params["properties"] = properties
+    if actions is not None:
+        params["actions"] = actions
+    if mappings is not None:
+        params["mappings"] = mappings
+    if imc_name is not None:
+        params["imc_name"] = imc_name
+    if action_prefix is not None:
+        params["action_prefix"] = action_prefix
 
     try:
         response = unreal.send_command("asset_factory", params)
