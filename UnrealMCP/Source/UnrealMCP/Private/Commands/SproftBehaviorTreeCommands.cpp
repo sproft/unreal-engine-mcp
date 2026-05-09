@@ -17,9 +17,22 @@
 #include "BehaviorTree/Composites/BTComposite_Selector.h"
 #include "BehaviorTree/Composites/BTComposite_Sequence.h"
 #include "BehaviorTree/Composites/BTComposite_SimpleParallel.h"
+#include "BehaviorTree/Decorators/BTDecorator_Blackboard.h"
+#include "BehaviorTree/Decorators/BTDecorator_Cooldown.h"
+#include "BehaviorTree/Decorators/BTDecorator_ForceSuccess.h"
+#include "BehaviorTree/Decorators/BTDecorator_Loop.h"
+#include "BehaviorTree/Decorators/BTDecorator_TimeLimit.h"
+#include "BehaviorTree/Services/BTService_DefaultFocus.h"
+#include "BehaviorTree/Tasks/BTTask_MoveTo.h"
+#include "BehaviorTree/Tasks/BTTask_PlayAnimation.h"
+#include "BehaviorTree/Tasks/BTTask_PlaySound.h"
+#include "BehaviorTree/Tasks/BTTask_RunBehavior.h"
+#include "BehaviorTree/Tasks/BTTask_Wait.h"
 #include "EditorAssetLibrary.h"
+#include "Misc/OutputDeviceNull.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -271,6 +284,268 @@ namespace
         }
         return nullptr;
     }
+
+    /** Generic UBTNode subclass resolver. Accepts a short token with a
+     *  case-insensitive lookup against the UE5 stock task / decorator /
+     *  service set, a `/Script/Module.ClassName` path, and a `/Game/...`
+     *  Blueprint class path (auto-suffixed with `_C`). */
+    UClass* ResolveBTNodeClass(const FString& Token, UClass* RequiredBase)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        const FString Lower = Token.ToLower();
+
+        // Composite shortcuts (also valid as add_child_task targets).
+        if (Lower == TEXT("selector"))      return UBTComposite_Selector::StaticClass();
+        if (Lower == TEXT("sequence"))      return UBTComposite_Sequence::StaticClass();
+        if (Lower == TEXT("simple_parallel") || Lower == TEXT("parallel")
+            || Lower == TEXT("simpleparallel"))
+        {
+            return UBTComposite_SimpleParallel::StaticClass();
+        }
+
+        // Stock task shortcuts.
+        if (Lower == TEXT("wait"))           return UBTTask_Wait::StaticClass();
+        if (Lower == TEXT("move_to") || Lower == TEXT("moveto"))
+        {
+            return UBTTask_MoveTo::StaticClass();
+        }
+        if (Lower == TEXT("play_animation") || Lower == TEXT("playanimation"))
+        {
+            return UBTTask_PlayAnimation::StaticClass();
+        }
+        if (Lower == TEXT("play_sound") || Lower == TEXT("playsound"))
+        {
+            return UBTTask_PlaySound::StaticClass();
+        }
+        if (Lower == TEXT("run_behavior") || Lower == TEXT("runbehavior"))
+        {
+            return UBTTask_RunBehavior::StaticClass();
+        }
+
+        // Stock decorator shortcuts.
+        if (Lower == TEXT("blackboard"))    return UBTDecorator_Blackboard::StaticClass();
+        if (Lower == TEXT("cooldown"))      return UBTDecorator_Cooldown::StaticClass();
+        if (Lower == TEXT("force_success") || Lower == TEXT("forcesuccess"))
+        {
+            return UBTDecorator_ForceSuccess::StaticClass();
+        }
+        if (Lower == TEXT("loop"))          return UBTDecorator_Loop::StaticClass();
+        if (Lower == TEXT("time_limit") || Lower == TEXT("timelimit"))
+        {
+            return UBTDecorator_TimeLimit::StaticClass();
+        }
+
+        // Stock service shortcuts.
+        if (Lower == TEXT("default_focus") || Lower == TEXT("defaultfocus"))
+        {
+            return UBTService_DefaultFocus::StaticClass();
+        }
+
+        // Full path / Blueprint class path.
+        if (Token.StartsWith(TEXT("/Script/")))
+        {
+            if (UClass* Loaded = LoadClass<UObject>(nullptr, *Token))
+            {
+                if (!RequiredBase || Loaded->IsChildOf(RequiredBase))
+                {
+                    return Loaded;
+                }
+            }
+        }
+        if (Token.StartsWith(TEXT("/Game/")))
+        {
+            FString WithSuffix = Token;
+            if (!WithSuffix.EndsWith(TEXT("_C")))
+            {
+                WithSuffix += TEXT("_C");
+            }
+            if (UClass* Loaded = LoadClass<UObject>(nullptr, *WithSuffix))
+            {
+                if (!RequiredBase || Loaded->IsChildOf(RequiredBase))
+                {
+                    return Loaded;
+                }
+            }
+        }
+        // Fallback: look up the bare token plus an `/Script/AIModule.<Name>`
+        // shape for users who pass `BTTask_Wait` style tokens.
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            if (!RequiredBase || Found->IsChildOf(RequiredBase))
+            {
+                return Found;
+            }
+        }
+        const FString AIPath = FString::Printf(TEXT("/Script/AIModule.%s"), *Token);
+        if (UClass* Loaded = LoadClass<UObject>(nullptr, *AIPath))
+        {
+            if (!RequiredBase || Loaded->IsChildOf(RequiredBase))
+            {
+                return Loaded;
+            }
+        }
+        return nullptr;
+    }
+
+    /** Convert an FJsonValue into a textual form FProperty::ImportText
+     *  accepts. Mirrors the helper in SproftBpComponentCommands. */
+    FString JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    {
+        if (!Value.IsValid())
+        {
+            return FString();
+        }
+        switch (Value->Type)
+        {
+            case EJson::String:
+                return Value->AsString();
+            case EJson::Number:
+                return LexToString(Value->AsNumber());
+            case EJson::Boolean:
+                return Value->AsBool() ? TEXT("true") : TEXT("false");
+            case EJson::Null:
+                return TEXT("None");
+            default:
+            {
+                FString Buffer;
+                TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+                    TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Buffer);
+                FJsonSerializer::Serialize(Value.ToSharedRef(), TEXT(""), Writer);
+                return Buffer;
+            }
+        }
+    }
+
+    /** Apply a flat property dict against a UObject through
+     *  `FProperty::ImportText_InContainer`. Failed entries land on
+     *  OutSkipped with a reason. Mirrors the slot-property pass on
+     *  widget_edit / bp_component. */
+    void ApplyFlatProperties(UObject* Target, const TSharedPtr<FJsonObject>* PropsObj,
+                             TArray<TSharedPtr<FJsonValue>>& OutApplied,
+                             TArray<TSharedPtr<FJsonValue>>& OutSkipped)
+    {
+        if (!Target || !PropsObj || !(*PropsObj).IsValid())
+        {
+            return;
+        }
+        FOutputDeviceNull NullDevice;
+        for (const auto& Pair : (*PropsObj)->Values)
+        {
+            const FString& PropName = Pair.Key;
+            const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
+
+            FProperty* Prop = FindFProperty<FProperty>(Target->GetClass(), *PropName);
+            if (!Prop)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), PropName);
+                Skip->SetStringField(TEXT("reason"), TEXT("not_a_uproperty"));
+                OutSkipped.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            const FString TextValue = JsonValueToImportText(JsonVal);
+            const TCHAR* TextPtr = *TextValue;
+            const TCHAR* Result = Prop->ImportText_InContainer(
+                TextPtr, Target, Target, PPF_None, &NullDevice);
+            if (Result == nullptr)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), PropName);
+                Skip->SetStringField(TEXT("reason"), TEXT("import_text_failed"));
+                Skip->SetStringField(TEXT("attempted_value"), TextValue);
+                OutSkipped.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+            Applied->SetStringField(TEXT("name"), PropName);
+            Applied->SetStringField(TEXT("type"), Prop->GetCPPType());
+            OutApplied.Add(MakeShared<FJsonValueObject>(Applied));
+        }
+    }
+
+    /** Recursive walk: find a composite by `GetNodeName()` substring.
+     *  Returns nullptr if no match. The `root` sentinel returns the
+     *  tree's RootNode unconditionally. */
+    UBTCompositeNode* FindCompositeByName(UBTCompositeNode* Search, const FString& Target)
+    {
+        if (!Search)
+        {
+            return nullptr;
+        }
+        if (Search->GetNodeName().Contains(Target))
+        {
+            return Search;
+        }
+        for (const FBTCompositeChild& Child : Search->Children)
+        {
+            if (Child.ChildComposite)
+            {
+                if (UBTCompositeNode* Found = FindCompositeByName(Child.ChildComposite, Target))
+                {
+                    return Found;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    /** Recursive walk: find a child slot that owns a node whose
+     *  `GetNodeName()` contains Target. Returns the parent composite
+     *  plus the child index so callers can reach `Children[Idx]`. */
+    bool FindChildSlot(UBTCompositeNode* Search, const FString& Target,
+                       UBTCompositeNode*& OutParent, int32& OutIndex)
+    {
+        if (!Search)
+        {
+            return false;
+        }
+        for (int32 Idx = 0; Idx < Search->Children.Num(); ++Idx)
+        {
+            const FBTCompositeChild& Child = Search->Children[Idx];
+            UBTNode* ChildNode = Child.ChildComposite ? static_cast<UBTNode*>(Child.ChildComposite)
+                                                      : static_cast<UBTNode*>(Child.ChildTask);
+            if (ChildNode && ChildNode->GetNodeName().Contains(Target))
+            {
+                OutParent = Search;
+                OutIndex = Idx;
+                return true;
+            }
+            if (Child.ChildComposite)
+            {
+                if (FindChildSlot(Child.ChildComposite, Target, OutParent, OutIndex))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Resolve a target BT asset and dispatch the common preamble:
+     *  load + cast + null-check. */
+    UBehaviorTree* LoadTargetTree(const TSharedPtr<FJsonObject>& Params, FString& OutError)
+    {
+        FString TreePath;
+        if (!Params->TryGetStringField(TEXT("tree"), TreePath)
+            && !Params->TryGetStringField(TEXT("tree_path"), TreePath)
+            && !Params->TryGetStringField(TEXT("path"), TreePath)
+            && !Params->TryGetStringField(TEXT("asset"), TreePath))
+        {
+            OutError = TEXT("Missing 'tree' parameter");
+            return nullptr;
+        }
+        UObject* Asset = UEditorAssetLibrary::LoadAsset(TreePath);
+        UBehaviorTree* Tree = Cast<UBehaviorTree>(Asset);
+        if (!Tree)
+        {
+            OutError = FString::Printf(TEXT("Asset at '%s' is not a UBehaviorTree"), *TreePath);
+            return nullptr;
+        }
+        return Tree;
+    }
 }
 
 FSproftBehaviorTreeCommands::FSproftBehaviorTreeCommands()
@@ -301,6 +576,18 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCommand(const FString
     if (Op == TEXT("add_root_composite"))
     {
         return HandleAddRootComposite(Params);
+    }
+    if (Op == TEXT("add_child_task") || Op == TEXT("add_child"))
+    {
+        return HandleAddChildTask(Params);
+    }
+    if (Op == TEXT("add_decorator"))
+    {
+        return HandleAddDecorator(Params);
+    }
+    if (Op == TEXT("add_service"))
+    {
+        return HandleAddService(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("behavior_tree: unsupported op '%s'"), *Op));
@@ -617,5 +904,349 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddRootComposite(cons
     Result->SetStringField(TEXT("root_node_name"), NewRoot->GetName());
     Result->SetBoolField(TEXT("saved"), bSave);
     Result->SetBoolField(TEXT("replaced"), bReplace);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddChildTask(const TSharedPtr<FJsonObject>& Params)
+{
+    FString TreeError;
+    UBehaviorTree* Tree = LoadTargetTree(Params, TreeError);
+    if (!Tree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TreeError);
+    }
+    if (!Tree->RootNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Tree '%s' has no RootNode; call add_root_composite first"),
+                *Tree->GetName()));
+    }
+
+    FString ParentTarget;
+    Params->TryGetStringField(TEXT("parent"), ParentTarget);
+    if (ParentTarget.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("parent_name"), ParentTarget);
+    }
+    UBTCompositeNode* ParentComposite = nullptr;
+    if (ParentTarget.IsEmpty() || ParentTarget.Equals(TEXT("root"), ESearchCase::IgnoreCase))
+    {
+        ParentComposite = Tree->RootNode;
+    }
+    else
+    {
+        ParentComposite = FindCompositeByName(Tree->RootNode, ParentTarget);
+    }
+    if (!ParentComposite)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No composite matching '%s' under tree '%s'"),
+                *ParentTarget, *Tree->GetName()));
+    }
+
+    FString TaskClassToken;
+    if (!Params->TryGetStringField(TEXT("task_class"), TaskClassToken)
+        && !Params->TryGetStringField(TEXT("class"), TaskClassToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'task_class' parameter"));
+    }
+    UClass* ChildClass = ResolveBTNodeClass(TaskClassToken, UBTNode::StaticClass());
+    if (!ChildClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UBTNode class '%s'"), *TaskClassToken));
+    }
+    if (ChildClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is abstract"), *ChildClass->GetPathName()));
+    }
+    const bool bIsComposite = ChildClass->IsChildOf(UBTCompositeNode::StaticClass());
+    const bool bIsTask = ChildClass->IsChildOf(UBTTaskNode::StaticClass());
+    if (!bIsComposite && !bIsTask)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is not a UBTCompositeNode or UBTTaskNode subclass"),
+                *ChildClass->GetPathName()));
+    }
+
+    FString FriendlyName;
+    Params->TryGetStringField(TEXT("node_name"), FriendlyName);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+    const bool bHasProperties = Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid();
+
+    // Outer the new node under the BT asset so it travels with the
+    // package on save. The runtime exec / memory indices are populated
+    // by the BT graph's RebuildExecutionOrder when the asset is opened
+    // or compiled in the editor.
+    UBTNode* NewChild = NewObject<UBTNode>(Tree, ChildClass, NAME_None, RF_Transactional);
+    if (!NewChild)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to NewObject UBTNode of class '%s'"), *ChildClass->GetName()));
+    }
+    NewChild->InitializeFromAsset(*Tree);
+    if (!FriendlyName.IsEmpty())
+    {
+        // UBTNode::NodeName is editor-data only; GetNodeName() returns
+        // the class display name when empty.
+#if WITH_EDITORONLY_DATA
+        if (FStrProperty* StrProp = CastField<FStrProperty>(
+            FindFProperty<FProperty>(UBTNode::StaticClass(), TEXT("NodeName"))))
+        {
+            StrProp->SetPropertyValue_InContainer(NewChild, FriendlyName);
+        }
+#endif
+    }
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    if (bHasProperties)
+    {
+        ApplyFlatProperties(NewChild, PropsObj, AppliedJson, SkippedJson);
+    }
+
+    FBTCompositeChild& Slot = ParentComposite->Children.AddDefaulted_GetRef();
+    if (bIsComposite)
+    {
+        Slot.ChildComposite = Cast<UBTCompositeNode>(NewChild);
+    }
+    else
+    {
+        Slot.ChildTask = Cast<UBTTaskNode>(NewChild);
+    }
+
+    Tree->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Tree->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_child_task"));
+    Result->SetStringField(TEXT("tree"), Tree->GetPathName());
+    Result->SetStringField(TEXT("parent"), ParentComposite->GetNodeName());
+    Result->SetStringField(TEXT("class"), ChildClass->GetName());
+    Result->SetStringField(TEXT("class_path"), ChildClass->GetPathName());
+    Result->SetStringField(TEXT("kind"), bIsComposite ? TEXT("composite") : TEXT("task"));
+    Result->SetStringField(TEXT("node_name"), NewChild->GetNodeName());
+    Result->SetStringField(TEXT("object_name"), NewChild->GetName());
+    Result->SetNumberField(TEXT("child_index"), ParentComposite->Children.Num() - 1);
+    if (bHasProperties)
+    {
+        Result->SetArrayField(TEXT("applied_properties"), AppliedJson);
+        Result->SetArrayField(TEXT("skipped_properties"), SkippedJson);
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddDecorator(const TSharedPtr<FJsonObject>& Params)
+{
+    FString TreeError;
+    UBehaviorTree* Tree = LoadTargetTree(Params, TreeError);
+    if (!Tree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TreeError);
+    }
+    if (!Tree->RootNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Tree '%s' has no RootNode"), *Tree->GetName()));
+    }
+
+    FString TargetName;
+    if (!Params->TryGetStringField(TEXT("target"), TargetName)
+        && !Params->TryGetStringField(TEXT("target_name"), TargetName)
+        && !Params->TryGetStringField(TEXT("node"), TargetName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'target' parameter (decorator attaches to a child slot under a composite)"));
+    }
+
+    UBTCompositeNode* ParentComposite = nullptr;
+    int32 ChildIndex = INDEX_NONE;
+    if (!FindChildSlot(Tree->RootNode, TargetName, ParentComposite, ChildIndex))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No child slot matching '%s' under tree '%s'"),
+                *TargetName, *Tree->GetName()));
+    }
+
+    FString DecoratorClassToken;
+    if (!Params->TryGetStringField(TEXT("decorator_class"), DecoratorClassToken)
+        && !Params->TryGetStringField(TEXT("class"), DecoratorClassToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'decorator_class' parameter"));
+    }
+    UClass* DecoratorClass = ResolveBTNodeClass(DecoratorClassToken, UBTDecorator::StaticClass());
+    if (!DecoratorClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UBTDecorator class '%s'"), *DecoratorClassToken));
+    }
+    if (DecoratorClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is abstract"), *DecoratorClass->GetPathName()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+    const bool bHasProperties = Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid();
+
+    UBTDecorator* NewDecorator = NewObject<UBTDecorator>(Tree, DecoratorClass, NAME_None, RF_Transactional);
+    if (!NewDecorator)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to NewObject UBTDecorator of class '%s'"), *DecoratorClass->GetName()));
+    }
+    NewDecorator->InitializeFromAsset(*Tree);
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    if (bHasProperties)
+    {
+        ApplyFlatProperties(NewDecorator, PropsObj, AppliedJson, SkippedJson);
+    }
+
+    ParentComposite->Children[ChildIndex].Decorators.Add(NewDecorator);
+
+    Tree->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Tree->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    const FBTCompositeChild& Slot = ParentComposite->Children[ChildIndex];
+    UBTNode* SlotNode = Slot.ChildComposite ? static_cast<UBTNode*>(Slot.ChildComposite)
+                                             : static_cast<UBTNode*>(Slot.ChildTask);
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_decorator"));
+    Result->SetStringField(TEXT("tree"), Tree->GetPathName());
+    Result->SetStringField(TEXT("parent_composite"), ParentComposite->GetNodeName());
+    Result->SetNumberField(TEXT("child_index"), ChildIndex);
+    if (SlotNode)
+    {
+        Result->SetStringField(TEXT("target_node"), SlotNode->GetNodeName());
+    }
+    Result->SetStringField(TEXT("class"), DecoratorClass->GetName());
+    Result->SetStringField(TEXT("class_path"), DecoratorClass->GetPathName());
+    Result->SetStringField(TEXT("decorator_name"), NewDecorator->GetNodeName());
+    Result->SetStringField(TEXT("object_name"), NewDecorator->GetName());
+    Result->SetNumberField(TEXT("decorator_index"), Slot.Decorators.Num() - 1);
+    if (bHasProperties)
+    {
+        Result->SetArrayField(TEXT("applied_properties"), AppliedJson);
+        Result->SetArrayField(TEXT("skipped_properties"), SkippedJson);
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddService(const TSharedPtr<FJsonObject>& Params)
+{
+    FString TreeError;
+    UBehaviorTree* Tree = LoadTargetTree(Params, TreeError);
+    if (!Tree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TreeError);
+    }
+    if (!Tree->RootNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Tree '%s' has no RootNode"), *Tree->GetName()));
+    }
+
+    FString TargetName;
+    Params->TryGetStringField(TEXT("target"), TargetName);
+    if (TargetName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("target_name"), TargetName);
+    }
+    UBTCompositeNode* TargetComposite = nullptr;
+    if (TargetName.IsEmpty() || TargetName.Equals(TEXT("root"), ESearchCase::IgnoreCase))
+    {
+        TargetComposite = Tree->RootNode;
+    }
+    else
+    {
+        TargetComposite = FindCompositeByName(Tree->RootNode, TargetName);
+    }
+    if (!TargetComposite)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No composite matching '%s' under tree '%s' (services attach to composites)"),
+                *TargetName, *Tree->GetName()));
+    }
+
+    FString ServiceClassToken;
+    if (!Params->TryGetStringField(TEXT("service_class"), ServiceClassToken)
+        && !Params->TryGetStringField(TEXT("class"), ServiceClassToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'service_class' parameter"));
+    }
+    UClass* ServiceClass = ResolveBTNodeClass(ServiceClassToken, UBTService::StaticClass());
+    if (!ServiceClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UBTService class '%s'"), *ServiceClassToken));
+    }
+    if (ServiceClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is abstract"), *ServiceClass->GetPathName()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+    const bool bHasProperties = Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid();
+
+    UBTService* NewService = NewObject<UBTService>(Tree, ServiceClass, NAME_None, RF_Transactional);
+    if (!NewService)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to NewObject UBTService of class '%s'"), *ServiceClass->GetName()));
+    }
+    NewService->InitializeFromAsset(*Tree);
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    if (bHasProperties)
+    {
+        ApplyFlatProperties(NewService, PropsObj, AppliedJson, SkippedJson);
+    }
+
+    TargetComposite->Services.Add(NewService);
+
+    Tree->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Tree->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_service"));
+    Result->SetStringField(TEXT("tree"), Tree->GetPathName());
+    Result->SetStringField(TEXT("target_composite"), TargetComposite->GetNodeName());
+    Result->SetStringField(TEXT("class"), ServiceClass->GetName());
+    Result->SetStringField(TEXT("class_path"), ServiceClass->GetPathName());
+    Result->SetStringField(TEXT("service_name"), NewService->GetNodeName());
+    Result->SetStringField(TEXT("object_name"), NewService->GetName());
+    Result->SetNumberField(TEXT("service_index"), TargetComposite->Services.Num() - 1);
+    if (bHasProperties)
+    {
+        Result->SetArrayField(TEXT("applied_properties"), AppliedJson);
+        Result->SetArrayField(TEXT("skipped_properties"), SkippedJson);
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }
