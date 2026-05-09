@@ -8,12 +8,13 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped `search_assets`, `asset_references`, and the
-`material_edit` expression-graph trio (`add_expression`,
-`connect_expressions`, `set_expression_property`). Together they close
-the read-only "what assets exist / who references this asset" gaps and
-let a caller author a non-trivial UMaterial graph through narrow,
-declarative ops without touching `python_execution`.
+The most recent pass shipped `bp_commit`, `bp_function_create`, the
+`material_edit` bulk `add_expressions` op, and a read-only
+`niagara_inspect` tool. Together they close the standard
+end-of-edit Blueprint commit cycle as a single call, lay down a typed
+function graph in one round trip, cut the round-trip count for small
+material graph authoring, and add a structured Niagara System dump to
+pair with `material_inspect`.
 
 ## Shipped in this fork
 
@@ -214,6 +215,53 @@ declarative ops without touching `python_execution`.
   and package_path. Optional `class_filter` drops rows whose asset
   class does not match. Returns `count`, `matched_total`,
   `limit_hit`, and `depth_reached`.
+- `bp_commit` (small) — convenience wrapper that runs the standard
+  end-of-edit Blueprint cycle in one call:
+  `MarkBlueprintAsStructurallyModified` (or the lighter
+  `MarkBlueprintAsModified` when `mark_structurally=false`) plus
+  `CompileBlueprint` with a captured `FCompilerResultsLog` plus
+  `SaveAsset`. Surfaces compiler errors / warnings / infos as separate
+  string arrays. Skips save when the compile produced errors so a
+  broken Blueprint does not get pinned to disk; `force_save=true`
+  overrides for diagnostic snapshots. Becomes the canonical end-of-edit
+  step for designers chaining `bp_nodes` -> `bp_wire` -> `bp_commit`.
+- `bp_function_create` (small) — declarative one-call wrapper for
+  laying down a new Blueprint function with its full typed signature.
+  Wraps `FBlueprintEditorUtils::CreateNewGraph` +
+  `AddFunctionGraph<UClass>` plus the FunctionEntry / FunctionResult
+  pin authoring. Inputs accept the same wide type resolver as
+  `bp_variable` (scalar tokens, built-in structs, `/Script/...`,
+  `/Game/...` BP class refs auto-suffixed with `_C`, `struct:/...`
+  UScriptStruct paths) plus per-entry `is_array` / `is_reference`.
+  Optional `pure` flag, `category`, `keywords`, `tooltip`, and
+  `call_in_editor` toggles land directly on the entry node's
+  `FKismetUserDeclaredFunctionMetadata`. Compiles and saves on
+  success unless `compile=false` / `save=false`.
+- `material_edit` (bulk `add_expressions` op) — extends the
+  expression-graph trio with a single-call form that takes a list of
+  expression specs (each with `class`, optional `name` alias,
+  `position`, `properties` dict) and an optional list of edge specs
+  (each `{source, source_output?, dest, dest_input?}` between
+  expressions or `{source, property}` to a material attribute). The
+  per-spec `name` alias lets a downstream connection reference an
+  expression created earlier in the same call without waiting for
+  the engine's resolved FName. Recompiles + saves once after the
+  whole batch unless overridden. Cuts the round-trip count for typical
+  panner-driven UV chain or normal-map setup workflows.
+- `niagara_inspect` (small, read-only) — structured dump of a
+  UNiagaraSystem asset. Returns the system-level spawn / update
+  script paths and an `emitters` array. Each emitter dict reports
+  `name`, `enabled`, `sim_target` (cpu / gpu), `local_space`,
+  `determinism`, the per-stage script list grouped by execution stage
+  (emitter spawn / emitter update / particle spawn / particle update
+  / particle gpu compute), the event-handler chain, the
+  simulation-stage class list, and the renderer class list. The
+  `parameters` array enumerates every entry in
+  `UNiagaraSystem::GetExposedParameters()` with name + type + kind
+  (primitive / data_interface / object). Edit-side ops
+  (niagara_edit / niagara_script_edit) remain on the backlog. Adds
+  Niagara to UnrealMCP's PublicDependencyModuleNames and the
+  uplugin manifest.
 
 ## Blueprint authoring (medium to large each)
 
@@ -264,7 +312,8 @@ declarative ops without touching `python_execution`.
   multiple trigger exec pins in one call, parameter-binding from the
   enhanced-input action value pin into the connected function, and
   pin-by-pin `set_node_property` overrides on the spawned node.
-- `bp_commit` — compile and save with verification.
+- `bp_commit` (small variant ships in this fork) — `MarkBlueprintAsStructurallyModified` + `CompileBlueprint` with captured `FCompilerResultsLog` + `SaveAsset`. Surfaces error / warning / info lines as separate string arrays and refuses to save a broken Blueprint unless `force_save=true`. Open follow-ons: include the structural diff against the previous compiled state (added / removed function signatures and variable types), and a per-call timing breakdown.
+- `bp_function_create` (small variant ships in this fork) — declarative `CreateNewGraph` + `AddFunctionGraph<UClass>` + typed FunctionEntry / FunctionResult pins in one call. Open follow-ons: add a Local Variables array to the new function in the same call, add Latent flag handling + UObject return-pin glue beyond the current FUNC_BlueprintPure toggle, and a `from_interface` mode that fills the signature from a Blueprint Interface method's parameter list.
 - `bp_author` — high-level "write me a feature" composite.
 - `bp_dry_run` — verify what `bp_commit` would do without applying.
 - `bp_skills` — list available Blueprint authoring skills.
@@ -331,15 +380,22 @@ helpers.
 - `material_edit` (small variant ships in this fork: create material
   with a Constant3Vector base colour, create material instance
   constant, set scalar / vector / texture parameters on an instance,
-  plus the expression-graph trio `add_expression` /
-  `connect_expressions` / `set_expression_property`). Pending:
-  Material Functions and Material Parameter Collections, plus a
-  bulk-add variant that creates several expressions in one call so a
-  caller can describe a small graph declaratively.
+  the expression-graph trio `add_expression` / `connect_expressions`
+  / `set_expression_property`, plus the bulk `add_expressions` op
+  that lays a small graph down in one call from a list of expression
+  specs and a list of edge specs). Pending: Material Functions and
+  Material Parameter Collections, plus a `set_attribute_blendable`
+  op for the override-surface chain on an instance.
 
 ## VFX (large each)
 
-- `niagara_inspect` — read Niagara system / emitter / module structure.
+- `niagara_inspect` (small read-only variant ships in this fork) — dump
+  emitters, per-stage scripts, event-handler chain, simulation-stage
+  class list, renderer class list, and the user-exposed parameter
+  store entries. Open follow-ons: per-emitter renderer property
+  readback (lit-sprite / mesh / ribbon settings), data-interface
+  configuration dump beyond the type kind, and per-script binding
+  list for the rapid-iteration parameter set.
 - `niagara_edit` — Niagara particle system editing.
 - `niagara_script_edit` — reusable Niagara module authoring.
 - `chaos_edit` — Geometry Collection destruction setup.
@@ -425,30 +481,25 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`search_assets`, `asset_references`, plus the
-`material_edit` expression trio), the next set should pick up:
+After the latest pass (`bp_commit`, `bp_function_create`, the
+`material_edit` bulk `add_expressions` op, and read-only
+`niagara_inspect`), the next set should pick up:
 
-1. `bp_function_create` — function-graph creation with typed inputs /
-   outputs in a single call. The local repo has `create_function`
-   plus `add_function_input` / `add_function_output`; the gap is a
-   declarative one-call wrapper that lays the function down with its
-   signature in one round trip.
-2. `material_edit` (bulk expressions) — extend the new expression-graph
-   ops with a single-call form that takes a list of expression specs
-   plus a list of edges and lays the small graph down in one shot. Cuts
-   the round-trip count for typical "build me a panner-driven UV chain"
-   asks.
-3. `niagara_inspect` — read-only Niagara dump (system / emitter list,
-   module list per emitter, parameter readback). Pairs with
-   `material_inspect` for the VFX side.
-4. `bp_commit` — batched compile + save with verification. Surfaces
-   the engine's compiler output and a structural diff so a long
-   authoring chain (`bp_nodes` -> `bp_wire` -> `bp_commit`) reports
-   one consolidated outcome.
+1. `bp_export` — full GraphSpec JSON export. Sits next to the read-only
+   `bp_brief` / `bp_inspect` / `bp_graph` triad and lets a caller
+   round-trip a Blueprint's authored content through a single
+   structured payload.
+2. `behavior_tree` (small read-only slice) — list a UBehaviorTree's
+   root composite, decorator chain, services, and the bound
+   Blackboard. Symmetric with `niagara_inspect` for AI assets.
+3. `widget_edit` slot-property surface — alignment / fill / padding
+   on UVerticalBox / UHorizontalBox / UCanvasPanel children. Closes
+   the most frequent UMG smoke-test gap.
+4. `gas_edit` (small read-only slice) — list Gameplay Abilities,
+   Effects, Attribute Sets on a Blueprint or DataAsset. Pairs with
+   `tag_registry_edit` so a caller can answer "what tags drive what
+   ability" without round-tripping through Python.
 
 `python_execution` still covers any operation we have not wrapped
 natively; prefer wrapping the high-frequency calls as dedicated tools
 so the agent does not need to author Python every time.
-
-The `widget_edit` slot-property surface (alignment, fill, padding) is
-small follow-up work if the consumer game needs it during smoke-testing.
