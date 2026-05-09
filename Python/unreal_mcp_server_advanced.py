@@ -5329,6 +5329,79 @@ def gas_edit(asset: str) -> Dict[str, Any]:
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def landscape_inspect(
+    include_components: Optional[bool] = None,
+    include_heightmaps: Optional[bool] = None,
+    include_weightmaps: Optional[bool] = None,
+    name_pattern: Optional[str] = None,
+    level_filter: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only structured dump of every ALandscape actor in the editor world.
+
+    For each ALandscape: name, label, transform, GUID, component grid
+    (ComponentSizeQuads / SubsectionSizeQuads / NumSubsections), per-
+    proxy material driver and hole-material override, world-space proxy
+    bounds (min / max / size), the registered layer list (each entry
+    with layer_name, layer_info_object_path, phys_material, blend_method
+    enum byte, is_no_blend, is_visibility_layer), the heightmap and
+    weightmap texture lists deduplicated across components, and an
+    optional per-component records array. Pairs with ``foliage_inspect``
+    for terrain reasoning.
+
+    Args:
+        include_components: Emit a per-LandscapeComponent record (name,
+            section_base, weightmap counts, heightmap path). Default
+            False because a single landscape can have hundreds of
+            components.
+        include_heightmaps: Emit the deduplicated heightmap-texture
+            package list per landscape. Default True.
+        include_weightmaps: Emit the deduplicated weightmap-texture
+            package list per landscape. Default False.
+        name_pattern: Case-insensitive substring filter against the
+            actor's name and outliner label.
+        level_filter: Case-insensitive substring filter on the owning
+            ULevel name (the World package name for sublevels).
+
+    Returns:
+        Dict with ``level_name`` / ``level_path`` and a ``landscapes``
+        array. Each landscape entry carries ``name``, ``label``,
+        ``class``, ``class_path``, ``level``, ``location``, ``rotation``,
+        ``scale``, ``landscape_guid``, ``component_size_quads``,
+        ``subsection_size_quads``, ``num_subsections``,
+        ``component_count``, ``streaming_distance_multiplier``,
+        ``landscape_material``, optional ``landscape_hole_material``,
+        ``proxy_bounds_min``, ``proxy_bounds_max``, ``proxy_bounds_size``,
+        ``xy_extent_min``, ``xy_extent_max``, ``xy_extent_size``,
+        ``layers`` plus ``layer_count``, ``heightmap_texture_count``,
+        ``weightmap_texture_count``, plus the optional ``components`` /
+        ``heightmap_textures`` / ``weightmap_textures`` arrays.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {}
+    if include_components is not None:
+        params["include_components"] = include_components
+    if include_heightmaps is not None:
+        params["include_heightmaps"] = include_heightmaps
+    if include_weightmaps is not None:
+        params["include_weightmaps"] = include_weightmaps
+    if name_pattern is not None:
+        params["name_pattern"] = name_pattern
+    if level_filter is not None:
+        params["level_filter"] = level_filter
+
+    try:
+        response = unreal.send_command("landscape_inspect", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"landscape_inspect error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

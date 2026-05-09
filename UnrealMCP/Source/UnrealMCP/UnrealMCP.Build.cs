@@ -52,7 +52,8 @@ public class UnrealMCP : ModuleRules
 				"GameplayTags",       // For UGameplayTagsManager (Sproft tag_registry_edit)
 				"Niagara",            // For UNiagaraSystem / UNiagaraEmitter (Sproft niagara_inspect)
 				"AIModule",           // For UBehaviorTree / UBlackboardData (Sproft behavior_tree)
-				"GameplayAbilities"   // For UGameplayAbility / UGameplayEffect / UAttributeSet (Sproft gas_edit)
+				"GameplayAbilities",  // For UGameplayAbility / UGameplayEffect / UAttributeSet (Sproft gas_edit)
+				"Landscape"           // For ALandscape / ULandscapeInfo / ULandscapeLayerInfoObject (Sproft landscape_inspect)
 			}
 		);
 

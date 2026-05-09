@@ -44,6 +44,7 @@
 #include "Commands/SproftBpExportCommands.h"
 #include "Commands/SproftBehaviorTreeCommands.h"
 #include "Commands/SproftGasEditCommands.h"
+#include "Commands/SproftLandscapeInspectCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -124,4 +125,5 @@ private:
 	TSharedPtr<FSproftBpExportCommands> SproftBpExport;
 	TSharedPtr<FSproftBehaviorTreeCommands> SproftBehaviorTree;
 	TSharedPtr<FSproftGasEditCommands> SproftGasEdit;
+	TSharedPtr<FSproftLandscapeInspectCommands> SproftLandscapeInspect;
 };

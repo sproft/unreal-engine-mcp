@@ -85,6 +85,7 @@
 #include "Commands/SproftBpExportCommands.h"
 #include "Commands/SproftBehaviorTreeCommands.h"
 #include "Commands/SproftGasEditCommands.h"
+#include "Commands/SproftLandscapeInspectCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -128,6 +129,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftBpExport = MakeShared<FSproftBpExportCommands>();
     SproftBehaviorTree = MakeShared<FSproftBehaviorTreeCommands>();
     SproftGasEdit = MakeShared<FSproftGasEditCommands>();
+    SproftLandscapeInspect = MakeShared<FSproftLandscapeInspectCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -168,6 +170,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftBpExport.Reset();
     SproftBehaviorTree.Reset();
     SproftGasEdit.Reset();
+    SproftLandscapeInspect.Reset();
 }
 
 // Initialize subsystem
@@ -490,6 +493,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("gas_edit"))
             {
                 ResultJson = SproftGasEdit->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("landscape_inspect"))
+            {
+                ResultJson = SproftLandscapeInspect->HandleCommand(CommandType, Params);
             }
             else
             {
