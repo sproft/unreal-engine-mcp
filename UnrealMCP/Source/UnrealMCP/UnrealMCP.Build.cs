@@ -60,7 +60,8 @@ public class UnrealMCP : ModuleRules
 				"EngineSettings",     // For UGameMapsSettings (Sproft project_context); Projects is already in PrivateDependencyModuleNames below
 				"RenderCore",         // For GGameThreadTime / GRenderThreadTime / GRHIThreadTime (Sproft performance_audit)
 				"RHI",                // For GGPUFrameTime (Sproft performance_audit)
-				"MetasoundEngine"     // For UMetaSoundSource / UMetaSoundPatch (Sproft metasound_edit)
+				"MetasoundEngine",    // For UMetaSoundSource / UMetaSoundPatch (Sproft metasound_edit)
+				"IKRig"               // For UIKRetargeter / FRetargetChainMapping / FInstancedStruct ops (Sproft ik_retarget)
 			}
 		);
 

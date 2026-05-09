@@ -6600,6 +6600,70 @@ def sound_asset_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def ik_retarget(
+    retargeter: str,
+    op: Optional[str] = None,
+    include_op_chain_mappings: Optional[bool] = None,
+    max_ops: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Inspect a UIKRetargeter asset (read-only first slice).
+
+    The 5.6 retargeter refactor moved chain mapping / root settings /
+    global settings into a polymorphic op stack (each op is an
+    ``FInstancedStruct`` of an ``FIKRetargetOpBase`` subclass). The
+    read-only slice walks the asset's public surface plus the op
+    stack and reports source / target IK Rig paths, the current
+    retarget pose names, the per-op metadata (struct type, parent
+    op, enabled flag), and any per-op chain mapping pairs.
+
+    One op (``inspect``, default).
+
+    Args:
+        retargeter: Path or short name of a UIKRetargeter asset.
+            Required.
+        op: Operation discriminator. Only ``inspect`` (default) is
+            supported.
+        include_op_chain_mappings: When True (default), each op
+            record carries its ``chain_mapping`` array. False keeps
+            the per-op metadata but skips the chain pair walk for
+            big rigs.
+        max_ops: Cap on the op stack walk. Default 64.
+
+    Returns:
+        Dict with asset metadata (``name`` / ``path`` / ``class``),
+        per-side blocks (``source`` / ``target`` each carrying
+        ``ik_rig_path`` / ``ik_rig_name`` / ``has_ik_rig`` /
+        ``current_pose`` / ``current_pose_bone_offset_count`` /
+        ``current_pose_has_root_offset``), the op stack (``ops``
+        array with each entry's ``index`` / ``name`` /
+        ``parent_name`` / ``struct_type`` / ``struct_path`` /
+        ``enabled`` / ``initialized`` / optional ``chain_mapping``),
+        plus aggregate counts (``op_count`` / ``op_count_total`` /
+        ``ops_truncated`` / ``chain_pair_count``) and the
+        ``default_pose_name`` constant.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"retargeter": retargeter}
+    if op is not None:
+        params["op"] = op
+    if include_op_chain_mappings is not None:
+        params["include_op_chain_mappings"] = include_op_chain_mappings
+    if max_ops is not None:
+        params["max_ops"] = max_ops
+
+    try:
+        response = unreal.send_command("ik_retarget", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"ik_retarget error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
