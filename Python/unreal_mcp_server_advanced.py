@@ -6402,6 +6402,110 @@ def metasound_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def unreal_api(
+    cls: str,
+    op: Optional[str] = None,
+    pattern: Optional[str] = None,
+    include_inherited: Optional[bool] = None,
+    include_children: Optional[bool] = None,
+    max_children: Optional[int] = None,
+    max_properties: Optional[int] = None,
+    max_functions: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Reflection-driven query of the live UE5 type database.
+
+    Where the hosted Flop tool is documented as a "15 K+ API lookup",
+    this clean-room variant trades the offline reference table for
+    live ``UClass`` / ``FProperty`` / ``UFunction`` walks against
+    whichever modules have already loaded into the editor. The
+    actual designer use case (what can this class do, what methods
+    can I call, what UPROPERTY fields does it expose) is fully
+    answered out of the in-process reflection database.
+
+    Three ops, keyed by ``op``:
+
+        - ``describe`` (default): full surface for one class.
+          Parent class, direct child class list, implemented
+          interfaces, all UPROPERTY fields with type + flags +
+          tooltip, all UFUNCTION methods with full parameter list +
+          flags + tooltip, plus the class's own flag set.
+        - ``find_property``: case-insensitive substring search across
+          one class's property list. Same record shape as
+          ``describe``'s ``properties`` array, but only for matches.
+        - ``find_function``: case-insensitive substring search across
+          one class's function list. Same record shape as
+          ``describe``'s ``functions`` array, but only for matches.
+
+    The class identifier accepts ``/Script/Module.ClassName``, a
+    ``/Game/...`` Blueprint class path (auto-suffixed with ``_C``),
+    or a short class name (probed against the loaded class set with
+    A / U prefix variants and a ``/Script/Engine.<Name>`` fallback).
+
+    Args:
+        cls: Class identifier. Required for every op.
+        op: One of ``describe`` (default), ``find_property``, or
+            ``find_function``.
+        pattern: Required for ``find_property`` / ``find_function``.
+            Case-insensitive substring matched against property /
+            function FName.
+        include_inherited: Walk parent properties + functions too.
+            Default True.
+        include_children: Include the direct-child class list under
+            ``describe``. Default True.
+        max_children: Cap on the direct-child class list. Default 256.
+        max_properties: Cap on the property list / match list.
+            Default 512.
+        max_functions: Cap on the function list / match list.
+            Default 512.
+
+    Returns:
+        Dict with class metadata (``class`` / ``class_short`` /
+        ``class_path`` / ``is_native`` / ``is_abstract`` /
+        ``is_blueprint`` / ``is_interface`` / ``class_flags`` /
+        ``tooltip``), the optional ``parent`` block, the
+        ``interfaces`` array, the ``properties`` array (each with
+        ``name`` / ``cpp_type`` / ``container`` / ``inner_type`` /
+        ``flags`` / ``tooltip`` / ``category`` / ``owner_class`` /
+        ``inherited``), the ``functions`` array (each with ``name`` /
+        ``params`` / ``return`` / ``flags`` / ``tooltip`` /
+        ``category`` / ``owner_class`` / ``inherited`` / ``is_pure`` /
+        ``is_blueprint_callable`` / ``is_blueprint_event`` /
+        ``is_static`` / ``is_net`` / ``is_const``), the ``children``
+        array (only for ``describe``), and aggregate counts
+        (``properties_total`` / ``properties_truncated`` /
+        ``functions_total`` / ``functions_truncated`` /
+        ``child_count`` / ``child_count_total``).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"class": cls}
+    if op is not None:
+        params["op"] = op
+    if pattern is not None:
+        params["pattern"] = pattern
+    if include_inherited is not None:
+        params["include_inherited"] = include_inherited
+    if include_children is not None:
+        params["include_children"] = include_children
+    if max_children is not None:
+        params["max_children"] = max_children
+    if max_properties is not None:
+        params["max_properties"] = max_properties
+    if max_functions is not None:
+        params["max_functions"] = max_functions
+
+    try:
+        response = unreal.send_command("unreal_api", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"unreal_api error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

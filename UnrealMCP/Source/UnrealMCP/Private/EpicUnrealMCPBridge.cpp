@@ -97,6 +97,7 @@
 #include "Commands/SproftPerformanceAuditCommands.h"
 #include "Commands/SproftPieTestBpCommands.h"
 #include "Commands/SproftMetaSoundEditCommands.h"
+#include "Commands/SproftUnrealApiCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -152,6 +153,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftPerformanceAudit = MakeShared<FSproftPerformanceAuditCommands>();
     SproftPieTestBp = MakeShared<FSproftPieTestBpCommands>();
     SproftMetaSoundEdit = MakeShared<FSproftMetaSoundEditCommands>();
+    SproftUnrealApi = MakeShared<FSproftUnrealApiCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -204,6 +206,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftPerformanceAudit.Reset();
     SproftPieTestBp.Reset();
     SproftMetaSoundEdit.Reset();
+    SproftUnrealApi.Reset();
 }
 
 // Initialize subsystem
@@ -574,6 +577,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("metasound_edit"))
             {
                 ResultJson = SproftMetaSoundEdit->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("unreal_api"))
+            {
+                ResultJson = SproftUnrealApi->HandleCommand(CommandType, Params);
             }
             else
             {

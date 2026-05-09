@@ -768,6 +768,42 @@ ability" alongside `tag_registry_edit`.
   PublicDependencyModuleNames, MetasoundEditor to the editor-only
   PrivateDependencyModuleNames, and Metasound to the uplugin's
   plugin list so consumer projects auto-enable it.
+- `unreal_api` (small, read-only) — reflection-driven query of the
+  live UE5 type database. Where the hosted Flop tool is documented as
+  a "15 K+ API lookup", this clean-room variant trades the offline
+  reference table for live `UClass` / `FProperty` / `UFunction` walks
+  against whichever modules have already loaded into the editor.
+  Three ops keyed by `op`:
+  - `describe` (default): full surface for one class. Returns parent
+    class, direct child class list (plus the recursive count),
+    implemented interfaces, all UPROPERTY fields with type / flags /
+    tooltip / category / inherited flag, all UFUNCTION methods with
+    full parameter list (each with cpp_type / container / is_const /
+    is_reference / is_out / is_return) plus return value plus flags
+    / tooltip / category / `is_pure` / `is_blueprint_callable` /
+    `is_blueprint_event` / `is_static` / `is_net` / `is_const`, and
+    the queried class's own flag set decoded into FName tokens.
+  - `find_property`: case-insensitive substring search across one
+    class's property list. Same record shape as `describe`'s
+    `properties` array.
+  - `find_function`: case-insensitive substring search across one
+    class's function list. Same record shape as `describe`'s
+    `functions` array.
+  The class identifier accepts `/Script/Module.ClassName`, a
+  `/Game/...` Blueprint class path (auto-suffixed with `_C`), or a
+  short class name (probed against the loaded class set with A / U
+  prefix variants and a `/Script/Engine.<Name>` fallback). Walks
+  inherited members by default through `EFieldIteratorFlags::IncludeSuper`;
+  `include_inherited=false` restricts to the class's own declarations.
+  Per-list caps (`max_properties` / `max_functions` / `max_children`)
+  with truncated flags and aggregate totals. Property records also
+  emit `inner_type` for arrays / sets and `key_type` / `value_type`
+  for maps so callers can answer "what does this TArray<FFoo> hold"
+  without a second tool call. Backed by `TFieldIterator<FProperty>`
+  / `TFieldIterator<UFunction>` plus `GetDerivedClasses` from
+  `UObjectHash.h`. Pairs with `cpp_source` for the "what does this
+  UClass actually look like" question without leaving the
+  reflection database.
 
 ## Blueprint authoring (medium to large each)
 
@@ -1132,7 +1168,16 @@ helpers.
   scope still pending: persistent shared interpreter scope across calls,
   output streaming for long-running scripts, and richer typed result
   marshalling beyond the current stdout / stderr / repr capture.
-- `unreal_api` — query the 15,000+ entry API surface.
+- `unreal_api` (small variant ships in this fork) — `describe` /
+  `find_property` / `find_function` ops keyed off the live UE5
+  reflection database. Open follow-ons: a recursive `find_in_subclasses`
+  pass that searches the union of properties / functions across a
+  class plus all its descendants, a `list_classes` op that enumerates
+  every loaded UClass under a `/Script/Module.` namespace prefix or
+  with a substring filter, an offline JSON dump path that pre-computes
+  the full reflection surface for the project's enabled modules, and
+  a `class_diff` op that compares two related UClasses (parent vs
+  child, or two cousins) and emits the property / function delta.
 - `skills` — fetch on-demand workflow docs.
 
 ## Suggested next-pass shortlist for a single-player game project
