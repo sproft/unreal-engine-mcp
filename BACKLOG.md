@@ -8,7 +8,39 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass extended `pie_test_scene` with two new
+The most recent pass extended `gas_edit` with three edit ops, added
+two new tools (`performance_audit`, `pie_test_bp`), and laid down
+the small variant of `metasound_edit`. `gas_edit` now answers
+`create_gameplay_ability` (NewObject's a UBlueprint at a `/Game/...`
+path with a UGameplayAbility-derived parent class, default
+`/Script/GameplayAbilities.GameplayAbility`),
+`create_gameplay_effect` (same shape with a UGameplayEffect parent;
+optional `duration_policy` / `duration_magnitude` write through the
+CDO before the first compile), and `set_gameplay_tags` (tag-container
+mutation on either asset shape; UGameplayAbility writes through the
+reflected `AbilityTags` / `CancelAbilitiesWithTag` /
+`BlockAbilitiesWithTag` etc. fields, UGameplayEffect routes through
+`FindOrAddComponent` on the asset / target / block-ability tag
+GE-component subclasses and calls each component's `SetAndApply`
+mutator). `performance_audit` (small read-only) reports a per-metric
+avg / peak / last triple over the active editor viewport's
+FStatUnitData ring (frame / game / render / RHI / GPU) plus a live
+globals snapshot (`GAverageMS` / `GAverageFPS` plus the
+cycle-converted thread / GPU times through `RHIGetGPUFrameCycles`).
+`pie_test_bp` (small) is the Blueprint-side counterpart to
+`pie_test_scene`: one assertion kind in this slice
+(`default_value_equals`), targeting a UPROPERTY FName on the
+Blueprint's CDO, with the JSON literal canonicalised through the
+property's `ImportText` -> `ExportText` round-trip and compared
+against the CDO's `ExportText` output. `metasound_edit` (small) lays
+down `create_metasound_source` (UMetaSoundSource with optional
+output format / sample-rate / block-rate overrides) and
+`create_metasound_patch` (UMetaSoundPatch). Both ops route through
+`UMetaSoundEditorSubsystem::GetChecked()`'s public `InitAsset` +
+`RegisterGraphWithFrontend`. The graph-authoring surface (add
+nodes, connect pins) stays on this list.
+
+The pass before that extended `pie_test_scene` with two new
 assertion kinds and shipped two new edit-slice tools that pair with
 existing read-only inspectors. `pie_test_scene` now answers
 `actor_overlapping_tag` (target = actor name, expected = an FName
@@ -639,7 +671,8 @@ ability" alongside `tag_registry_edit`.
   to PublicDependencyModuleNames. Heavier edit ops (track add,
   section move, spawnable creation, camera-cut creation, per-row
   edits) remain on the backlog.
-- `gas_edit` (small, read-only) — Gameplay Ability System dump for
+- `gas_edit` (small read + edit slice) — Gameplay Ability System
+  multi-op tool keyed by `op`. The default op `inspect` covers the
   three asset shapes:
   - UGameplayAbility (or a Blueprint with a UGameplayAbility CDO):
     ability tags + cancel / block / activation owned / required /
@@ -665,6 +698,76 @@ ability" alongside `tag_registry_edit`.
   mutation, modifier add / remove, cost / cooldown rebind, attribute
   default override) remain on the backlog. Adds GameplayAbilities to
   PublicDependencyModuleNames.
+  The new edit ops are `create_gameplay_ability` (NewObject's a
+  UBlueprint at a `/Game/...` path with a UGameplayAbility-derived
+  parent class, default `/Script/GameplayAbilities.GameplayAbility`),
+  `create_gameplay_effect` (same shape with a UGameplayEffect-derived
+  parent; optional `duration_policy` (`instant` / `has_duration` /
+  `infinite`) plus an optional literal `duration_magnitude` write
+  through the CDO before the first compile), and `set_gameplay_tags`
+  (tag-container mutation on either asset shape). For UGameplayAbility
+  the writes route through reflected `AbilityTags` /
+  `CancelAbilitiesWithTag` / `BlockAbilitiesWithTag` /
+  `ActivationOwnedTags` / `ActivationRequiredTags` /
+  `ActivationBlockedTags` / `SourceRequiredTags` / `SourceBlockedTags`
+  / `TargetRequiredTags` / `TargetBlockedTags` UPROPERTY fields. For
+  UGameplayEffect we route through
+  `FindOrAddComponent<UAssetTagsGameplayEffectComponent>` /
+  `UTargetTagsGameplayEffectComponent` /
+  `UBlockAbilityTagsGameplayEffectComponent` and call each component's
+  `SetAndApplyAssetTagChanges` / `SetAndApplyTargetTagChanges` /
+  `SetAndApplyBlockedAbilityTagChanges` mutator so the cached
+  tag-container snapshot on the GE refreshes. Heavier ops (modifier
+  add / remove, cost / cooldown rebind, attribute default override,
+  GameplayCue authoring) remain on the backlog.
+- `performance_audit` (small, read-only) — frame-time / thread-time
+  snapshot for the active editor viewport. Reads the live
+  `FStatUnitData` ring (the 200-sample circular buffer that `stat
+  unit` already populates) on the editor's active viewport and
+  reports a per-metric `avg_ms` / `peak_ms` / `last_ms` triple over
+  the last `frames` samples (default 60, capped at the engine's ring
+  size). Returns blocks for `frame` / `game` (game-thread) / `render`
+  (render-thread) / `rhi` (RHI thread) / `gpu` (GPU frame), plus a
+  live `globals` block carrying `GAverageMS` / `GAverageFPS` and the
+  cycle-converted `GGameThreadTime` / `GRenderThreadTime` /
+  `GRHIThreadTime` plus the GPU frame cycles through
+  `RHIGetGPUFrameCycles(0)`. Optional `metrics` filter list trims
+  the report to a subset, and `include_samples=true` opts into the
+  raw per-frame ring dump. Skips the deep-dive captures (`stat
+  startfile` / `stat stopfile`, Insights traces, FPSChart). Adds
+  RenderCore + RHI to PublicDependencyModuleNames.
+- `pie_test_bp` (small) — Blueprint-side assertion harness. Sits
+  next to `pie_test_scene` (which targets actors in the active editor
+  world) and lets a caller verify properties on a Blueprint asset's
+  CDO without a running PIE session. Currently supports one
+  assertion kind: `default_value_equals` (target = a UPROPERTY FName
+  on the Blueprint's generated class; expected = a JSON literal that
+  is canonicalised through the property's `ImportText` ->
+  `ExportText` round-trip and compared against the CDO's
+  `ExportText` output). Per-assertion the response carries `index`,
+  `kind`, `target`, `passed` flag, `var` / `actual` / `expected` /
+  `expected_raw` / `property_class` / `expected_imported`, plus a
+  human-readable `message`. Aggregate counts (`total` / `passed` /
+  `failed` / `unsupported` / `all_passed`) sit at the top. The
+  kinds that need a running PIE session (`function_returns`,
+  `event_fired`) stay on the backlog.
+- `metasound_edit` (small) — MetaSound asset authoring. Two ops
+  keyed by `op`: `create_metasound_source` (NewObject's a
+  `UMetaSoundSource` at a `/Game/...` path; optional `output_format`
+  token (`mono` / `stereo` / `quad` / `5_1` / `7_1`, default stereo)
+  plus optional `sample_rate` / `block_rate` overrides land on the
+  asset's OutputFormat / SampleRateOverride / BlockRateOverride
+  before InitAsset wires the document) and `create_metasound_patch`
+  (NewObject's a `UMetaSoundPatch` at a `/Game/...` path; reusable
+  graph asset, no audio output). Both ops route through
+  `UMetaSoundEditorSubsystem::GetChecked()`'s public `InitAsset` +
+  `RegisterGraphWithFrontend` so the new asset has a fresh document
+  plus an editor graph that opens cleanly in the MetaSound editor.
+  The graph-authoring surface (add nodes, connect pins, set member
+  defaults) stays on the backlog. Adds MetasoundEngine to
+  PublicDependencyModuleNames, MetasoundEditor to the editor-only
+  PrivateDependencyModuleNames, and Metasound to the uplugin's
+  plugin list so consumer projects auto-enable it.
 
 ## Blueprint authoring (medium to large each)
 
@@ -873,14 +976,19 @@ helpers.
   AI Controller / EQS slice with the same read-only structure for
   the Run Behavior Tree -> Make Decision flow. AIModule is already
   pulled in.
-- `gas_edit` (small read-only slice ships in this fork) —
-  UGameplayAbility / UGameplayEffect / UAttributeSet dump (tags,
-  modifiers, attribute defaults). Open follow-ons: tag-container
-  mutation through GE components, GE modifier add / remove,
-  ability cost / cooldown class rebind, and an attribute-default
+- `gas_edit` (small read + small edit slice ships in this fork) —
+  read-only `inspect` plus three edit ops:
+  `create_gameplay_ability`, `create_gameplay_effect` (with the
+  duration-policy / duration-magnitude shortcut), and
+  `set_gameplay_tags` (UGameplayAbility tag fields directly +
+  UGameplayEffect through `FindOrAddComponent` on the asset /
+  target / block-ability tag GE components plus their
+  `SetAndApply` mutators). Open follow-ons: GE modifier add /
+  remove, ability cost / cooldown class rebind, attribute-default
   override path that writes through the CDO and recompiles the
-  Blueprint. Native AbilityTask classes and GameplayCue assets
-  remain unscoped. GameplayAbilities is already pulled in.
+  Blueprint, GameplayCue authoring, and a per-tag dev-comment
+  surface beyond the registry's. Native AbilityTask classes
+  remain unscoped.
 - `tag_registry_edit` (small variant ships in this fork) — `add_tag`,
   `remove_tag`, `list_tags` through `IGameplayTagsEditorModule`. Open
   follow-ons: rename through `RenameTagInINI`, restricted-tag source
@@ -937,7 +1045,18 @@ helpers.
   bound to a possessable GUID), and the heavier edit ops (track
   add, section add with explicit frame range, section move,
   spawnable creation, camera-cut creation).
-- `metasound_edit` — MetaSound graphs.
+- `metasound_edit` (small variant ships in this fork) — two ops on
+  MetaSound assets keyed by `op`: `create_metasound_source`
+  (UMetaSoundSource at a `/Game/...` path; optional `output_format`
+  / `sample_rate` / `block_rate` overrides land on the asset before
+  InitAsset wires the document) and `create_metasound_patch`
+  (UMetaSoundPatch at a `/Game/...` path). Both ops route through
+  `UMetaSoundEditorSubsystem::GetChecked()`'s public `InitAsset` +
+  `RegisterGraphWithFrontend`. Open follow-ons: the graph-authoring
+  surface (add / connect / disconnect nodes through the
+  `UMetaSoundBuilder` API), member defaults, preset support, and a
+  `metasound_inspect` read-only counterpart that walks the asset's
+  document and emits the node graph as a JSON edge list.
 - `sound_asset_edit` — SoundCue graphs.
 
 ## Procedural (large)
@@ -962,7 +1081,14 @@ helpers.
   log entries that arrived after the editor started without re-parsing the
   full file. We can also expose the in-editor SOutputLog widget filter
   helpers if a hook is added to the OutputLog module.
-- `performance_audit` — gather perf stats and run a basic audit.
+- `performance_audit` (small variant ships in this fork) — frame /
+  thread / GPU snapshot read off the active editor viewport's
+  `FStatUnitData` ring plus the cycle-counter globals. Open
+  follow-ons: deep-dive captures (`stat startfile` / `stat
+  stopfile`), Insights `.utrace` capture wiring, the FPSChart
+  histogram surface, and per-emitter / per-actor breakdowns out of
+  the `STAT GROUP` snapshot the engine already maintains for
+  Engine / Memory / RHI.
 - `cpp_source` (small read-only variant ships in this fork) — read
   header / cpp pair through `FSourceCodeNavigation::FindClassHeaderPath`
   / `FindClassSourcePath`, or by direct .h / .cpp disk path with
@@ -974,7 +1100,19 @@ helpers.
 
 ## Runtime verification (large each)
 
-- `pie_test_bp` — Blueprint test harness with assertions during PIE.
+- `pie_test_bp` (small variant ships in this fork) — Blueprint-side
+  assertion harness with one assertion kind that answers statically
+  against a Blueprint's CDO: `default_value_equals` (target = a
+  UPROPERTY FName on the Blueprint's generated class; expected = a
+  JSON literal that we canonicalise through the property's
+  `ImportText` -> `ExportText` round-trip and compare against the
+  CDO's `ExportText` output). Open follow-ons: `function_returns`
+  (invoke a Blueprint function and assert on its return value;
+  needs PIE), `event_fired` (custom-event broadcast assertion;
+  needs PIE), `component_default_equals` (one level deeper to a
+  named UActorComponent's UPROPERTY), and a `function_returns_pure`
+  variant that runs the function on the CDO directly when the
+  function is marked pure with no side effects.
 - `pie_test_scene` (small variant ships in this fork) — scene-state
   assertion harness with four assertion kinds that all answer
   statically against the editor world: `actor_exists` for actor-name
@@ -999,38 +1137,37 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`pie_test_scene` extension to four assertion
-kinds, `animation_edit` small slice, `foliage_edit` small slice),
-the next set should pick up:
+After the latest pass (`gas_edit` edit slice, `performance_audit`
+small read-only, `pie_test_bp` small variant, `metasound_edit`
+small variant), the next set should pick up:
 
-1. `gas_edit` edit slice — append a modifier to a UGameplayEffect,
-   set DurationPolicy / DurationMagnitude through CDO writes +
-   recompile, rebind cost / cooldown classes on a UGameplayAbility,
-   write asset / granted / blocked-ability tags through the
-   `GetAssetTags()` / `GetGrantedTags()` / `GetBlockedAbilityTags()`
-   mutator surface. Reuses the existing GameplayAbilities dep.
-2. `behavior_tree` heavier edit ops — append a child task / composite
-   to a chosen parent, insert a decorator on a chosen child slot,
-   append a service on a composite, and the full Blackboard key
-   edit surface. Reuses the AIModule dep already pulled in.
+1. `gas_edit` heavier ops — append a modifier to a UGameplayEffect
+   with attribute target + ModifierOp + scalable-float magnitude,
+   rebind cost / cooldown classes on a UGameplayAbility through the
+   CDO, an attribute-default override path that writes through the
+   CDO and recompiles the Blueprint, and a GameplayCue authoring
+   slice (cue-tag set + level range + magnitude attribute).
+2. `behavior_tree` heavier edit ops — append a child task /
+   composite to a chosen parent, insert a decorator on a chosen
+   child slot, append a service on a composite, and the full
+   Blackboard key edit surface. Reuses the AIModule dep already
+   pulled in.
 3. `sequencer_edit` heavier edit ops — track add (a chosen
    UMovieSceneTrack subclass), section add (with an explicit frame
    range), section move, spawnable creation, and camera-cut track
    creation. Reuses the MovieScene + LevelSequence deps.
-4. `niagara_edit` (small variant) — `create_niagara_system` for an
-   empty UNiagaraSystem asset (the implicit `PostInitProperties` flow
-   sets up SystemSpawnScript / SystemUpdateScript so no per-call
-   scripting is needed), then `add_emitter` once the parent emitter
-   surface is scoped clean-room. Pairs with `niagara_inspect`.
-5. `animation_edit` heavier branches — per-curve key authoring
-   through the `IAnimationDataController` surface, sync-marker
-   authoring, and composite section authoring on UAnimMontage
-   (slot tracks, sections, transitions). Reuses the
-   AnimationBlueprintLibrary dep already pulled in.
-6. `foliage_edit` instance placement — `FFoliageInfo::AddInstance`
-   for "place N instances at world locations", remove instances by
-   index or spatial bound, and a procedural-foliage spawner
-   authoring slice.
+4. `metasound_edit` graph-authoring slice — add nodes / connect
+   pins through the `UMetaSoundBuilder` API, member-default writes,
+   and a `metasound_inspect` read-only counterpart that walks the
+   asset's document and emits the node graph as a JSON edge list.
+5. `pie_test_bp` heavier kinds — `function_returns` (invoke a
+   Blueprint function in PIE and assert on its return value),
+   `event_fired` (custom-event broadcast assertion in PIE), and
+   `component_default_equals` (one level deeper to a named
+   UActorComponent's UPROPERTY).
+6. `performance_audit` deep-dive captures — `stat startfile` /
+   `stat stopfile` for an offline `.ue4stats` chart, the FPSChart
+   histogram surface, and an Insights `.utrace` capture wrapper.
 
 `python_execution` still covers any operation we have not wrapped
 natively; prefer wrapping the high-frequency calls as dedicated tools
