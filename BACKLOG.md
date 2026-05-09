@@ -1020,6 +1020,33 @@ ability" alongside `tag_registry_edit`.
   `unreal_api` for the runtime-class side and `cpp_source` for the
   in-engine-source side; the workflow docs sit one level higher
   for "what is the canonical pattern for X" questions.
+- `landscape_edit` (small variant retry) — multi-op tool for
+  ALandscape authoring, keyed by `op`. Two ops:
+  - `set_landscape_material`: writes the proxy's master
+    `LandscapeMaterial` UPROPERTY to a chosen UMaterialInterface
+    (UMaterial or UMaterialInstance) and runs the same
+    `PostEditChangeProperty` rebroadcast that the editor's
+    BlueprintSetter uses, so component MICs rebuild on the next
+    tick. The hole-material override (`LandscapeHoleMaterial`)
+    stays on this list.
+  - `import_heightmap_png`: decodes a 16-bit grayscale PNG file
+    off disk through
+    `IImageWrapperModule::CreateImageWrapper(EImageFormat::PNG)`
+    plus `IImageWrapper::SetCompressed` / `GetRaw`, walks the
+    resolved `ULandscapeInfo` extent through `GetLandscapeExtent`,
+    and writes the height samples through
+    `FLandscapeEditDataInterface::SetHeightData` so every
+    component, heightmap texture, and collision mip lands in one
+    pass. PNG dimensions must match the landscape's extent (the
+    standard "components * CompSize + 1" inclusive grid). 8-bit
+    PNGs land widened by * 257; floating-point PNGs are rejected.
+  Pairs with `landscape_inspect`. The earlier batch dropped the
+  whole landscape_edit family because the sculpt brush surface
+  did not collapse to one focused minimum; this retry fences the
+  small variant to the two operations above. The sculpt / paint
+  brush surface, per-edit-layer writes, and import_layer_data
+  branches stay on this list. Adds `ImageWrapper` to
+  PublicDependencyModuleNames.
 
 ## Blueprint authoring (medium to large each)
 
@@ -1304,8 +1331,17 @@ helpers.
   dump for actors implementing ILandscapeSplineInterface, and a
   height / weight sample at a chosen world location through
   `ULandscapeInfo::GetLayerWeightAtLocation`.
-- `landscape_edit` — sculpting, paint layers, heightmap import /
-  export.
+- `landscape_edit` (small variant retry ships in this fork) —
+  multi-op tool keyed by `op` covering `set_landscape_material`
+  (writes the proxy's master `LandscapeMaterial` UPROPERTY through a
+  PostEditChangeProperty rebroadcast that mirrors
+  `EditorSetLandscapeMaterial`) and `import_heightmap_png` (decodes
+  a 16-bit grayscale PNG and writes through
+  `FLandscapeEditDataInterface::SetHeightData`). Open follow-ons:
+  the per-edit-layer write side (`SetHeightDataForLayer`), the
+  paint-layer-by-stroke surface, weightmap import per layer
+  (`SetAlphaData`), the sculpt brush primitives, and the heightmap
+  export counterpart.
 - `foliage_inspect` (small read-only variant ships in this fork) —
   per-IFA dump with foliage type list (mesh / actor source path,
   density, radius, per-axis scale interval, instance counts) plus an

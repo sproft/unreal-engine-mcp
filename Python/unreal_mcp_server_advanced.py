@@ -6876,6 +6876,80 @@ def niagara_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def landscape_edit(
+    actor: str,
+    op: Optional[str] = None,
+    material: Optional[str] = None,
+    path: Optional[str] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Landscape authoring (small variant retry).
+
+    Two ops on an ``ALandscape`` actor in the active editor world,
+    keyed by ``op``:
+
+    - ``set_landscape_material``: writes the proxy's master
+      ``LandscapeMaterial`` UPROPERTY to a chosen UMaterialInterface
+      (UMaterial or UMaterialInstance) and runs the same
+      PostEditChangeProperty rebroadcast that the editor's
+      BlueprintSetter uses, so component MICs rebuild on the next
+      tick.
+    - ``import_heightmap_png``: decodes a 16-bit grayscale PNG file
+      off disk through ``IImageWrapperModule::DecompressImage``,
+      walks the resolved ULandscapeInfo extent, and writes the
+      height samples through
+      ``FLandscapeEditDataInterface::SetHeightData`` so every
+      component, heightmap texture, and collision mip lands in one
+      pass. PNG dimensions must match the landscape's extent.
+
+    The wider sculpt-by-brush / paint-layer-by-stroke surface stays
+    in BACKLOG.md.
+
+    Args:
+        actor: ``ALandscape`` actor name (matched by ``GetName()``
+            first and Outliner label second). Required.
+        op: Operation discriminator. ``set_landscape_material`` or
+            ``import_heightmap_png``.
+        material: ``/Game/...`` path to a UMaterialInterface, or
+            short name resolved through the asset registry. Required
+            for ``set_landscape_material``.
+        path: Absolute path to a 16-bit grayscale PNG on disk.
+            Required for ``import_heightmap_png``.
+        save: Save the persistent level after the edit. Default
+            True.
+
+    Returns:
+        Dict with ``operation``, ``actor_name``, ``actor_label``,
+        ``level``, plus op-specific fields (``material_path`` /
+        ``previous_material_path`` for set_landscape_material;
+        ``width`` / ``height`` / ``bit_depth`` / ``min_x`` /
+        ``min_y`` / ``max_x`` / ``max_y`` / ``samples_written`` for
+        import_heightmap_png), and a ``saved`` flag.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"actor": actor}
+    if op is not None:
+        params["op"] = op
+    if material is not None:
+        params["material"] = material
+    if path is not None:
+        params["path"] = path
+    if save is not None:
+        params["save"] = save
+
+    try:
+        response = unreal.send_command("landscape_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"landscape_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Sproft fork addition: skills (workflow-doc lookup)
 #

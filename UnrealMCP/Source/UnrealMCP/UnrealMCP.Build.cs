@@ -63,7 +63,8 @@ public class UnrealMCP : ModuleRules
 				"MetasoundEngine",    // For UMetaSoundSource / UMetaSoundPatch (Sproft metasound_edit)
 				"IKRig",              // For UIKRetargeter / FRetargetChainMapping / FInstancedStruct ops (Sproft ik_retarget)
 				"GeometryCollectionEngine", // For UGeometryCollection (Sproft chaos_edit)
-				"Chaos"               // For FGeometryCollection / FTransformCollection managed-array data (Sproft chaos_edit)
+				"Chaos",              // For FGeometryCollection / FTransformCollection managed-array data (Sproft chaos_edit)
+				"ImageWrapper"        // For IImageWrapperModule PNG decode (Sproft landscape_edit)
 			}
 		);
 
