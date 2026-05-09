@@ -8,7 +8,63 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass deepened edit-side coverage on two already-shipped
+The most recent pass shipped one maintenance fix and three deepening
+tools. The maintenance fix walks every `Sproft*Commands.cpp` file
+under `UnrealMCP/Source/UnrealMCP/Private/Commands/` and renames each
+helper that is defined in two or more files with a per-file prefix
+(e.g. `SceneCompose_LevelLabel`, `ActorInspect_ResolveActor`,
+`AssetFactory_SplitPackagePath`). Helpers defined in only one file
+stay as-is. Twenty-five helper names across forty-two cpp files
+ended up touched, and the bundled
+`FlopperamUnrealMCP/Plugins/UnrealMCP/Source/Commands/` tree picks
+up the same renames in the same commit. The unity-build collision
+that batch 22 hit (anonymous namespace contents from one cpp
+clashing with a same-named helper from another cpp inside the
+unified TU) goes away because each helper is now globally unique
+inside the unity-grouped TU. `unreal_api` gains three new ops:
+`list_classes` (substring filter across every loaded UClass with
+optional `include_subclasses_of` / `include_native` /
+`include_blueprint` / `include_interfaces` / `include_abstract`
+filters; backed by `TObjectIterator<UClass>` plus
+`GetDerivedClasses(Parent, Out, /*bRecursive=*/true)` when a parent
+is given), `find_in_subclasses` (parent class plus property /
+function name substring; walks each descendant's own declarations
+through `EFieldIteratorFlags::ExcludeSuper` so the result tells the
+caller which descendant ADDS a member rather than which inherits
+it), and `class_diff` (two class paths; returns
+`properties.added` / `properties.removed` / `properties.changed`
+plus the parallel function trio with the canonical signature
+including parameter list / return type / the relevant flag set).
+Read-only and reflection-driven; no new module deps. `pcg_graph_edit`
+gains the per-node settings-write hole that the earlier slice left
+open: one op `set_node_settings` that pulls
+`UPCGNode::GetSettings()`, applies a flat `properties` dict through
+`FProperty::ImportText_InContainer`, runs
+`Settings->PostEditChangeProperty` plus
+`Node->OnNodeChangedDelegate.Broadcast(Node, EPCGChangeType::Settings)`
+so any open PCG editor refreshes the node's pin layout, then
+saves the asset. Failed entries surface under `skipped` mirroring
+the convention shipped by `chaos_edit set_simulation_settings`.
+`animation_graph_edit` gains the focused-minimum-cut edit slice
+that the earlier pass dropped: one op `add_state` that resolves a
+state machine on the AnimBP by name (walks every UEdGraph reachable
+through FunctionGraphs / UbergraphPages / MacroGraphs plus per-node
+GetSubGraphs / per-graph SubGraphs for any
+`UAnimGraphNode_StateMachineBase` whose `GetStateMachineName()`
+matches), reaches through `EditorStateMachineGraph` to the
+`UAnimationStateMachineGraph`, and spawns a new `UAnimStateNode`
+through the public schema-action template
+`FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate<UAnimStateNode>(Graph, NewObject<UAnimStateNode>(), Location)`.
+PerformAction wires the per-state `BoundGraph` (the per-state
+AnimGraph that holds the pose subtree) via PostPlacedNewNode plus
+AllocateDefaultPins so the state opens cleanly in the editor. The
+duplicate-name guard surfaces a clear error rather than silently
+spawning; `compile=true` (default) recompiles after the edit, and
+`save=true` (default) writes to disk. Adds `AnimGraph` to the
+editor-only `PrivateDependencyModuleNames`. Transitions and
+per-state property writes stay on this list.
+
+The pass before that deepened edit-side coverage on two already-shipped
 multi-op tools and folded one maintenance fix on top. `ik_retarget`
 gains three edit ops routed through the editor-only
 `UIKRetargeterController::GetController(Retargeter)` accessor
@@ -38,11 +94,12 @@ the canonical tree lives, and brings the bundled uplugin manifest in
 line with the canonical one (the bundled tree had drifted far behind
 and the bundled project was failing to compile against the canonical
 bridge header). The `animation_graph_edit` edit slice was the
-fourth target on this pass but stayed skipped: the AnimGraph editor
-module surface (UAnimStateNode + UAnimStateTransitionNode + the
-state machine's UEdGraph plus the `BoundGraph` per-state subgraph
-authoring) is wider than the focused-minimum cut shape we ship for
-small variants.
+fourth target on that pass but stayed skipped at the time: the
+AnimGraph editor module surface (UAnimStateNode + UAnimStateTransitionNode +
+the state machine's UEdGraph plus the `BoundGraph` per-state
+subgraph authoring) was wider than the focused-minimum cut shape
+we ship for small variants. The current pass collapses the cut
+to a single `add_state` op so the slice still ships small.
 
 The pass before that deepened edit-side coverage on four
 already-shipped multi-op tools: `behavior_tree` adds three edit
@@ -1094,7 +1151,7 @@ ability" alongside `tag_registry_edit`.
   a "15 K+ API lookup", this clean-room variant trades the offline
   reference table for live `UClass` / `FProperty` / `UFunction` walks
   against whichever modules have already loaded into the editor.
-  Three ops keyed by `op`:
+  Six ops keyed by `op`:
   - `describe` (default): full surface for one class. Returns parent
     class, direct child class list (plus the recursive count),
     implemented interfaces, all UPROPERTY fields with type / flags /
@@ -1110,6 +1167,35 @@ ability" alongside `tag_registry_edit`.
   - `find_function`: case-insensitive substring search across one
     class's function list. Same record shape as `describe`'s
     `functions` array.
+  - `list_classes`: substring filter across every loaded `UClass`.
+    Iterates `TObjectIterator<UClass>` and emits a compact class
+    row per match (`class` / `class_path` / `super_class` /
+    `is_native` / `is_abstract` / `is_interface` / `is_blueprint`).
+    Optional `include_subclasses_of` (a class identifier) collapses
+    the walk to descendants of the given parent through
+    `GetDerivedClasses(Parent, Out, /*bRecursive=*/true)`.
+    `include_native` / `include_blueprint` / `include_interfaces` /
+    `include_abstract` filters trim the result by class flags.
+    Default `max_results=256`.
+  - `find_in_subclasses`: walks every descendant of `parent_class`
+    and reports each subclass that declares a property / function
+    whose name matches the supplied substring. `property` /
+    `function` filter the per-side search; `member` is a shorthand
+    that matches either side. Walks each candidate's own
+    declarations through `EFieldIteratorFlags::ExcludeSuper` so the
+    result tells the caller which descendant ADDS a member rather
+    than which inherits it. `include_parent=true` opts the parent
+    class itself in.
+  - `class_diff`: compares two classes' own (or inherited when
+    `include_inherited=true`) property + function surfaces.
+    Returns `properties.added` / `properties.removed` /
+    `properties.changed` plus the parallel function trio.
+    `properties.changed` rows surface when the canonical signature
+    (cpp_type plus container inner / map key / map value) differs;
+    `functions.changed` rows surface when the parameter list,
+    return type, or the relevant flag set (BlueprintPure /
+    BlueprintCallable / BlueprintEvent / Static / NetMulticast /
+    NetServer / NetClient / Const) differs.
   The class identifier accepts `/Script/Module.ClassName`, a
   `/Game/...` Blueprint class path (auto-suffixed with `_C`), or a
   short class name (probed against the loaded class set with A / U
@@ -1309,26 +1395,28 @@ ability" alongside `tag_registry_edit`.
   `unreal_api` for the runtime-class side and `cpp_source` for the
   in-engine-source side; the workflow docs sit one level higher
   for "what is the canonical pattern for X" questions.
-- `animation_graph_edit` (small, read-only first slice) — inspect
+- `animation_graph_edit` (small, read + edit slice) — inspect
   a `UAnimBlueprint`'s compiled state machines plus the flat
-  AnimGraph node list. Pairs with `animation_inspect`, which
-  already returns a state-machine summary keyed off
-  `UAnimBlueprintGeneratedClass::BakedStateMachines`; this slice
-  goes one level deeper: per state machine returns name +
-  initial-state index + per-state details (FName, state-root-node
-  index, notify indices, entry-rule node index, always-reset /
-  conduit flags, per-state exit-transition table) and the
-  per-machine transitions array (each row with `previous_state`
-  / `next_state` / `previous_state_name` / `next_state_name` /
-  `crossfade_duration` / `min_time_before_reentry` /
-  `blend_mode` token (linear / cubic_in / hermite_cubic /
-  sinusoidal / quadratic_in_out / cubic_in_out / quartic_in_out /
-  quintic_in_out / circular_in / circular_out / circular_in_out /
-  exp_in / exp_out / exp_in_out / custom) / `logic_type` token
-  (standard_blend / inertialization / custom) / start / end /
-  interrupt notify indices). The flat AnimGraph node-property
-  list off `UAnimBlueprintGeneratedClass::AnimNodeProperties`
-  emits `{index, struct_type, struct_path}` rows per node so a
+  AnimGraph node list, or spawn a new state on a chosen state
+  machine. Pairs with `animation_inspect`, which already returns
+  a state-machine summary keyed off
+  `UAnimBlueprintGeneratedClass::BakedStateMachines`. The
+  read-only inspect slice goes one level deeper: per state
+  machine returns name + initial-state index + per-state details
+  (FName, state-root-node index, notify indices, entry-rule node
+  index, always-reset / conduit flags, per-state exit-transition
+  table) and the per-machine transitions array (each row with
+  `previous_state` / `next_state` / `previous_state_name` /
+  `next_state_name` / `crossfade_duration` /
+  `min_time_before_reentry` / `blend_mode` token (linear /
+  cubic_in / hermite_cubic / sinusoidal / quadratic_in_out /
+  cubic_in_out / quartic_in_out / quintic_in_out / circular_in /
+  circular_out / circular_in_out / exp_in / exp_out / exp_in_out
+  / custom) / `logic_type` token (standard_blend /
+  inertialization / custom) / start / end / interrupt notify
+  indices). The flat AnimGraph node-property list off
+  `UAnimBlueprintGeneratedClass::AnimNodeProperties` emits
+  `{index, struct_type, struct_path}` rows per node so a
   downstream consumer can answer "what AnimGraph nodes does this
   AnimBP have" without needing the editor-only AnimGraph module.
   Filters: `include_state_machines` / `include_states` /
@@ -1337,9 +1425,33 @@ ability" alongside `tag_registry_edit`.
   `max_states_per_machine` (256) /
   `max_transitions_per_machine` (1024) / `max_anim_nodes`
   (2048)). Uncompiled AnimBPs report `compiled=false` with empty
-  arrays. Edit-side ops (state machine create / mutate, anim-
-  graph node add / connect, link a Linked Anim Graph by tag) stay
-  on this list.
+  arrays. The new edit op `add_state` resolves the target state
+  machine on the AnimBP by name (walks every UEdGraph reachable
+  through FunctionGraphs / UbergraphPages / MacroGraphs plus
+  per-node GetSubGraphs / per-graph SubGraphs for any
+  `UAnimGraphNode_StateMachineBase` whose `GetStateMachineName()`
+  matches case-insensitive), reaches through
+  `EditorStateMachineGraph` to the
+  `UAnimationStateMachineGraph`, and spawns a new
+  `UAnimStateNode` through the public schema-action template
+  `FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate<UAnimStateNode>(Graph, NewObject<UAnimStateNode>(), Location)`.
+  PerformAction wires the per-state `BoundGraph` (the per-state
+  AnimGraph that holds the pose subtree) via `PostPlacedNewNode`
+  plus `AllocateDefaultPins`. Renames the node to the caller-
+  supplied FName via
+  `Rename(NewName, nullptr, REN_DontCreateRedirectors)` so
+  `GetStateName()` returns the designer-readable label. Optional
+  2D `position` (`{x, y}`) writes the FVector2f location through
+  the schema action. The duplicate-name guard surfaces a clear
+  error rather than silently spawning. Recompile via
+  `FKismetEditorUtilities::CompileBlueprint` runs by default
+  unless `compile=false`; saves to disk by default unless
+  `save=false`. Adds `AnimGraph` to the editor-only
+  `PrivateDependencyModuleNames`. Edit-side follow-ons
+  (transition add / mutate, state-property writes, conduit /
+  alias spawn, anim-graph node add / connect inside a state's
+  BoundGraph, link a Linked Anim Graph by tag) stay on this
+  list.
 - `niagara_script_edit` (small, read-only first slice) — inspect
   a `UNiagaraScript` asset. Pairs with `niagara_inspect` (system /
   emitter side) and `material_inspect` (renderer side). Walks the
@@ -1396,11 +1508,25 @@ ability" alongside `tag_registry_edit`.
   / `output` for the graph IO nodes; `from_pin` / `to_pin`
   default to the first matching output / input pin), and
   `remove_node` (`UPCGGraph::RemoveNode` plus cascading edge
-  cleanup). Each mutating op runs `MarkPackageDirty` and saves
-  the asset by default unless `save=false`. Adds `PCG` to
-  PublicDependencyModuleNames and the PCG plugin to the uplugin
-  manifest. The pin-rename and per-node settings-property
-  mutate ops stay on this list.
+  cleanup). The newer edit op `set_node_settings` resolves a
+  target node by FName / title / substring (the same resolver
+  `connect_pins` and `remove_node` use), pulls the node's
+  `UPCGSettings` subobject through `UPCGNode::GetSettings()`,
+  walks a flat `properties` dict, and applies each entry through
+  `FProperty::ImportText_InContainer`. Accepts JSON booleans /
+  numbers / strings plus complex shapes (objects / arrays) which
+  re-serialize through the shared writer so a struct dict still
+  round-trips when ImportText understands the emitted shape.
+  Failed entries surface under `skipped` with a reason and the
+  attempted ImportText string (mirrors `chaos_edit
+  set_simulation_settings`). After the writes,
+  `Settings->PostEditChangeProperty` runs and
+  `Node->OnNodeChangedDelegate.Broadcast(Node, EPCGChangeType::Settings)`
+  fires so any open PCG editor refreshes the node's pin layout
+  / cached settings. Each mutating op runs `MarkPackageDirty`
+  and saves the asset by default unless `save=false`. Adds
+  `PCG` to PublicDependencyModuleNames and the PCG plugin to
+  the uplugin manifest. The pin-rename op stays on this list.
 - `landscape_edit` (small variant retry) — multi-op tool for
   ALandscape authoring, keyed by `op`. Two ops:
   - `set_landscape_material`: writes the proxy's master
@@ -1635,18 +1761,22 @@ helpers.
   the IAnimationDataController surface, sync-marker authoring,
   composite section authoring on UAnimMontage (slot tracks,
   sections, transitions), and per-notify property dict on add.
-- `animation_graph_edit` (small read-only first slice ships in this
+- `animation_graph_edit` (small read + edit slice ships in this
   fork) — inspect a `UAnimBlueprint`'s compiled state machines
   plus the flat AnimGraph node list off
   `UAnimBlueprintGeneratedClass::BakedStateMachines` and
-  `AnimNodeProperties`. Open follow-ons: state machine create /
-  mutate (add / remove state, add / remove transition, set
-  initial state, override per-transition crossfade / blend
-  mode), AnimGraph node add / connect / disconnect, link a
-  Linked Anim Graph by tag, sub-state-machine / nested-state-
-  machine surface, and an editor-only walker that emits the
-  AnimGraph node titles + per-node UPROPERTY defaults so a caller
-  can reason about an existing AnimBP without round-tripping the
+  `AnimNodeProperties`, plus one edit op `add_state` that spawns
+  a new `UAnimStateNode` on a chosen state machine through
+  `FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate`.
+  Open follow-ons: state machine create / mutate (add / remove
+  transition, remove state, set initial state, override per-
+  transition crossfade / blend mode), per-state property writes
+  (always-reset / conduit / state-entered / state-left notify),
+  AnimGraph node add / connect / disconnect, link a Linked Anim
+  Graph by tag, sub-state-machine / nested-state-machine
+  surface, and an editor-only walker that emits the AnimGraph
+  node titles + per-node UPROPERTY defaults so a caller can
+  reason about an existing AnimBP without round-tripping the
   raw FStructProperty list.
 - `ik_rig_edit` (small read-only first slice ships in this fork) —
   inspect a `UIKRigDefinition` asset. Walks asset public surface
@@ -1812,19 +1942,24 @@ helpers.
 
 ## Procedural (large)
 
-- `pcg_graph_edit` (small read-only first slice ships in this fork) —
-  inspect a `UPCGGraph` asset. Walks `UPCGGraph::GetNodes` plus per-node
-  pins (with type / status / usage tokens off `FPCGPinProperties` and
+- `pcg_graph_edit` (small read + edit slice ships in this fork) —
+  inspect a `UPCGGraph` asset, plus four edit ops:
+  `add_node` / `connect_pins` / `remove_node` / `set_node_settings`.
+  The walk covers `UPCGGraph::GetNodes` plus per-node pins (with
+  type / status / usage tokens off `FPCGPinProperties` and
   `FPCGDataTypeIdentifier::ToString`), the graph's exposed input /
   output pin surface, and a flat edge list with `from` / `to` edge
   endpoints (PCG's UPCGEdge stores upstream as `InputPin` and
   downstream as `OutputPin`; we normalise to the editor convention).
-  Open follow-ons: edit-side ops (add / remove node, add / remove
-  edge, rename pin, mutate per-node settings through the per-settings
-  reflection surface), graph parameter readout
-  (`UPCGGraph::UserParameters` instanced property bag), and a
-  follow-on read of the per-node `bIsDisabled` / `bDebug` editor
-  flags.
+  `set_node_settings` applies a flat property dict to the target
+  node's `UPCGSettings` subobject through
+  `FProperty::ImportText_InContainer`, runs
+  `Settings->PostEditChangeProperty`, and broadcasts
+  `Node->OnNodeChangedDelegate.Broadcast(Node, EPCGChangeType::Settings)`
+  so any open PCG editor refreshes. Open follow-ons: pin-rename
+  op, graph parameter readout (`UPCGGraph::UserParameters`
+  instanced property bag), and a follow-on read of the per-node
+  `bIsDisabled` / `bDebug` editor flags.
 
 ## Data assets (small to medium each, on the asset_factory umbrella)
 
@@ -1896,15 +2031,23 @@ helpers.
   output streaming for long-running scripts, and richer typed result
   marshalling beyond the current stdout / stderr / repr capture.
 - `unreal_api` (small variant ships in this fork) — `describe` /
-  `find_property` / `find_function` ops keyed off the live UE5
-  reflection database. Open follow-ons: a recursive `find_in_subclasses`
-  pass that searches the union of properties / functions across a
-  class plus all its descendants, a `list_classes` op that enumerates
-  every loaded UClass under a `/Script/Module.` namespace prefix or
-  with a substring filter, an offline JSON dump path that pre-computes
-  the full reflection surface for the project's enabled modules, and
-  a `class_diff` op that compares two related UClasses (parent vs
-  child, or two cousins) and emits the property / function delta.
+  `find_property` / `find_function` / `list_classes` /
+  `find_in_subclasses` / `class_diff` ops keyed off the live UE5
+  reflection database. `list_classes` walks
+  `TObjectIterator<UClass>` (or descendants of a chosen parent
+  class via `GetDerivedClasses(Parent, Out, /*bRecursive=*/true)`)
+  with substring + flag filters. `find_in_subclasses` walks each
+  descendant's own declarations through
+  `EFieldIteratorFlags::ExcludeSuper` so the result tells the
+  caller which descendant ADDS a member rather than which
+  inherits. `class_diff` compares two classes' property +
+  function surfaces and surfaces `added` / `removed` /
+  `changed` arrays per side. Open follow-ons: an offline JSON
+  dump path that pre-computes the full reflection surface for
+  the project's enabled modules, and a `find_in_class_chain`
+  op that walks the parent chain (rather than the descendant
+  set) for "where in the inheritance tree did this member get
+  declared".
 - `skills` (small variant ships in this fork) — fetch on-demand
   workflow docs over a curated `Python/skills/*.md` index. Three
   ops keyed by `op`: `get` (default; returns one skill body),
@@ -1919,18 +2062,16 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-The latest pass shipped the `ik_retarget` edit slice
-(`set_source_ik_rig` / `set_target_ik_rig` / `set_retarget_pose`
-through `UIKRetargeterController`) plus the BehaviorTree
-Blackboard key edits (`set_blackboard` / `add_blackboard_key` /
-`remove_blackboard_key`), and re-synced the bundled
-`FlopperamUnrealMCP/Plugins/UnrealMCP/Source/` tree with the
-canonical `UnrealMCP/Source/` tree. The `animation_graph_edit`
-edit slice was on the list for that pass but stayed skipped because
-the AnimGraph editor module surface (UAnimStateNode +
-UAnimStateTransitionNode + the per-state UEdGraph subgraph
-authoring) is wider than our small-variant cut. The next set should
-pick up:
+The latest pass shipped one maintenance fix (per-file rename of every
+helper that collided across two or more `Sproft*Commands.cpp` files,
+so the unity-build sweep stops failing) plus three deepening tools:
+`unreal_api` adds `list_classes` / `find_in_subclasses` / `class_diff`
+keyed off the live UE5 reflection database, `pcg_graph_edit` adds
+the per-node `set_node_settings` write that the earlier slice left
+open, and `animation_graph_edit` adds the focused-minimum-cut
+`add_state` op through the public schema-action template
+`FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate`. The
+next set should pick up:
 
 1. `landscape_edit` edit slice — per-edit-layer write
    (`SetHeightDataForLayer`), the paint-layer-by-stroke surface
@@ -1938,79 +2079,74 @@ pick up:
    per layer), the sculpt brush primitives that `LandscapeEdMode`
    wraps, and a heightmap export counterpart
    (`GetHeightDataTempl` -> 16-bit grayscale PNG).
-2. `pcg_graph_edit` edit slice — add / remove node through
-   `UPCGGraph::AddNodeOfType` / `RemoveNode`, add / remove edge
-   through `UPCGGraph::AddEdge` / `RemoveEdge` (using the from-pin
-   / to-pin label pair the read side already returns), rename pin
-   through the per-settings reflection surface, and a
-   `set_node_position` op that writes through `UPCGNode::SetNodePosition`.
-3. `niagara_script_edit` edit slice — Module / DynamicInput script
+2. `niagara_script_edit` edit slice — Module / DynamicInput script
    creation with a typed `inputs` / `outputs` list off
    `FNiagaraVariable`, plus a `compile` op that drives the script's
    own `RequestCompile`.
-4. `animation_graph_edit` edit slice — state machine create / add
-   state / add transition through the editor-only AnimGraph
-   module, AnimGraph node add / connect, and a `link_anim_graph_by_tag`
-   op that writes the LinkedAnimGraph slot for a chosen tag.
-5. `ik_rig_edit` edit slice — rebind preview mesh, append /
+3. `animation_graph_edit` follow-on edit ops — `add_transition`
+   through `UAnimStateTransitionNode` between two existing states,
+   per-transition crossfade / blend mode writes, per-state property
+   writes (always-reset / conduit, state-entered / state-left
+   notify), AnimGraph node add / connect inside a state's
+   `BoundGraph`, and a `link_anim_graph_by_tag` op that writes the
+   LinkedAnimGraph slot for a chosen tag. The `add_state` op
+   shipped in the most recent pass.
+4. `ik_rig_edit` edit slice — rebind preview mesh, append /
    remove solver via `UIKRigController::AddSolverToStack`, append /
    remove retarget chain through `AddRetargetChain`, rename
    retarget root, override goal transform, and mutate per-solver
    bone settings via `SetBoneSettings`. Pairs with the
    already-shipped `ik_retarget` read side and the IKRig dep we
    already pulled in.
-6. `chaos_edit` edit slice — set / mutate per-fracture-level
+5. `chaos_edit` edit slice — set / mutate per-fracture-level
    damage threshold list, toggle clustering / per-cluster-only
    damage threshold, write the simulation block (mass, density,
    removal surface), and the heavier fracture authoring side
    (driver via the dataflow asset under `DataflowInstance` or the
    `FFractureToolContext` API).
-7. `niagara_edit` next-cut — emitter add through
+6. `niagara_edit` next-cut — emitter add through
    `FNiagaraEditorUtilities::AddEmitterToSystem`, parameter store
    write via `UNiagaraSystem::GetExposedParameters()`, per-emitter
    sim-target / determinism flag writes, module add through the
    per-emitter spawn / update script source, and a
    `request_compile` op that drives `RequestCompile` after the
    writes.
-8. `ik_retarget` follow-on edit ops — append op / remove op (the
+7. `ik_retarget` follow-on edit ops — append op / remove op (the
    polymorphic `FInstancedStruct` array on the asset), set chain
    mapping pair on a chosen op, per-pose bone-rotation-offset
    override, and profile management through
-   `UIKRetargeter::GetProfileByName`. The source / target IK Rig
-   rebind plus the active-retarget-pose switch shipped in the most
-   recent pass.
-9. `sound_asset_edit` heavier ops — composite-node insertion
+   `UIKRetargeter::GetProfileByName`.
+8. `sound_asset_edit` heavier ops — composite-node insertion
    (random / sequence / mixer / modulator / delay / loop / branch /
    concatenator), attenuation-node insertion with FAttenuationSettings
    overrides, and distance-crossfade authoring. Plus a
    `sound_asset_inspect` read-only counterpart that walks the cue's
    node graph and emits it as a JSON tree paired with the existing
    create surface.
-10. `unreal_api` follow-ons — a `list_classes` op that enumerates
-   every loaded UClass under a `/Script/Module.` namespace prefix,
-   a recursive `find_in_subclasses` pass that aggregates properties /
-   functions across one root class plus all its descendants, and a
-   `class_diff` op that compares two related UClasses (parent vs
-   child, or two cousins) and emits the property / function delta.
+9. `pcg_graph_edit` follow-ons — pin-rename op, graph parameter
+   readout (`UPCGGraph::UserParameters` instanced property bag),
+   and a follow-on read of the per-node `bIsDisabled` / `bDebug`
+   editor flags. The `add_node` / `connect_pins` / `remove_node` /
+   `set_node_settings` ops shipped in the most recent pass.
+10. `unreal_api` follow-ons — an offline JSON dump path that
+    pre-computes the full reflection surface for the project's
+    enabled modules, and a `find_in_class_chain` op that walks
+    the parent chain (rather than the descendant set) for "where
+    in the inheritance tree did this member get declared". The
+    `list_classes` / `find_in_subclasses` / `class_diff` ops
+    shipped in the most recent pass.
 11. `gas_edit` remaining ops — rebind cost / cooldown classes on a
-   UGameplayAbility through the CDO, and a GameplayCue authoring
-   slice (cue-tag set + level range + magnitude attribute). The
-   modifier add / remove / attribute-default override ops shipped
-   in the most recent pass.
+    UGameplayAbility through the CDO, and a GameplayCue authoring
+    slice (cue-tag set + level range + magnitude attribute).
 12. `behavior_tree` heavier edit ops — Blackboard key rename /
-   type-change ops, parent-Blackboard re-bind, and tree-level
-   RootDecorator authoring. The Blackboard re-bind plus key
-   add / remove ops shipped in the most recent pass; the
-   append-child-task, add-decorator, and add-service ops shipped
-   in the pass before that.
+    type-change ops, parent-Blackboard re-bind, and tree-level
+    RootDecorator authoring.
 13. `sequencer_edit` remaining edit ops — section move, spawnable
-   creation, and per-row edits. The track-add and section-add ops
-   shipped in the most recent pass.
+    creation, and per-row edits.
 14. `metasound_edit` follow-ons — member-default writes through the
     builder, and a `metasound_inspect` read-only counterpart that
     walks the asset's document and emits the node graph as a JSON
-    edge list. The `add_node` / `connect_nodes` graph-authoring
-    ops shipped in the most recent pass.
+    edge list.
 15. `pie_test_bp` heavier kinds — `function_returns` (invoke a
     Blueprint function in PIE and assert on its return value),
     `event_fired` (custom-event broadcast assertion in PIE), and
