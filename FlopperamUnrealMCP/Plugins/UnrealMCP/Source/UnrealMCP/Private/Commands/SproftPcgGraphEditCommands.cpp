@@ -10,9 +10,13 @@
 #include "PCGPin.h"
 #include "PCGSettings.h"
 #include "Data/Registry/PCGDataTypeIdentifier.h"
+#include "Misc/StringOutputDevice.h"
 #include "Modules/ModuleManager.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
+#include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 
 namespace
@@ -237,8 +241,12 @@ TSharedPtr<FJsonObject> FSproftPcgGraphEditCommands::HandleCommand(const FString
     {
         return HandleRemoveNode(Params);
     }
+    if (Op.Equals(TEXT("set_node_settings"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetNodeSettings(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("pcg_graph_edit: unsupported op '%s'. Supported: inspect, add_node, connect_pins, remove_node"), *Op));
+        FString::Printf(TEXT("pcg_graph_edit: unsupported op '%s'. Supported: inspect, add_node, connect_pins, remove_node, set_node_settings"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftPcgGraphEditCommands::HandleAddNode(const TSharedPtr<FJsonObject>& Params)
@@ -648,4 +656,158 @@ TSharedPtr<FJsonObject> FSproftPcgGraphEditCommands::HandlePcgGraphInspect(const
     }
 
     return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftPcgGraphEditCommands::HandleSetNodeSettings(const TSharedPtr<FJsonObject>& Params)
+{
+    FString GraphParam;
+    if (!Params->TryGetStringField(TEXT("graph"), GraphParam)
+        && !Params->TryGetStringField(TEXT("path"), GraphParam)
+        && !Params->TryGetStringField(TEXT("asset"), GraphParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'graph' parameter"));
+    }
+    UPCGGraph* Graph = ResolvePcgGraph(GraphParam);
+    if (!Graph)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UPCGGraph '%s'"), *GraphParam));
+    }
+
+    FString NodeQuery;
+    if (!Params->TryGetStringField(TEXT("node"), NodeQuery)
+        && !Params->TryGetStringField(TEXT("node_name"), NodeQuery)
+        && !Params->TryGetStringField(TEXT("name"), NodeQuery))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'node' parameter"));
+    }
+    UPCGNode* Node = PcgGraphEdit_ResolveNode(Graph, NodeQuery);
+    if (!Node)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve PCG node '%s' on graph '%s'"), *NodeQuery, *Graph->GetPathName()));
+    }
+
+    UPCGSettings* Settings = Node->GetSettings();
+    if (!Settings)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("PCG node '%s' has no Settings subobject"), *Node->GetFName().ToString()));
+    }
+
+    const TSharedPtr<FJsonObject>* PropertiesObj = nullptr;
+    if (!Params->TryGetObjectField(TEXT("properties"), PropertiesObj) || !PropertiesObj || !PropertiesObj->IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'properties' object parameter"));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Walk every entry in the property dict, resolve the matching
+    // FProperty on the Settings subobject's class, and apply via
+    // `FProperty::ImportText_InContainer`. Failed entries surface
+    // under `skipped` so a caller can spot a typo without poking at
+    // the engine log.
+    UClass* SettingsClass = Settings->GetClass();
+    TArray<TSharedPtr<FJsonValue>> AppliedArr;
+    TArray<TSharedPtr<FJsonValue>> SkippedArr;
+
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : (*PropertiesObj)->Values)
+    {
+        const FString& PropName = Entry.Key;
+        const TSharedPtr<FJsonValue>& Value = Entry.Value;
+
+        FProperty* Prop = SettingsClass->FindPropertyByName(*PropName);
+        if (!Prop)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), PropName);
+            Skip->SetStringField(TEXT("reason"), TEXT("property not found on Settings class"));
+            SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+
+        // Convert JSON value to ImportText form. We accept literal
+        // bool / number / string entries; complex JSON objects fall
+        // through as their stringified form so a struct dict still
+        // round-trips when the engine's ImportText understands the
+        // emitted JSON-object shape.
+        FString ImportLiteral;
+        if (Value.IsValid())
+        {
+            switch (Value->Type)
+            {
+            case EJson::Boolean:
+                ImportLiteral = Value->AsBool() ? TEXT("true") : TEXT("false");
+                break;
+            case EJson::Number:
+                ImportLiteral = LexToString(Value->AsNumber());
+                break;
+            case EJson::String:
+                ImportLiteral = Value->AsString();
+                break;
+            default:
+                {
+                    // Re-serialize complex shapes through the shared writer.
+                    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ImportLiteral);
+                    FJsonSerializer::Serialize(Value.ToSharedRef(), TEXT(""), Writer);
+                    Writer->Close();
+                }
+                break;
+            }
+        }
+
+        FStringOutputDevice ErrorBuf;
+        const TCHAR* Result = Prop->ImportText_InContainer(*ImportLiteral, Settings, /*OwnerObject=*/Settings, PPF_None, &ErrorBuf);
+        if (!Result)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), PropName);
+            Skip->SetStringField(TEXT("reason"), TEXT("ImportText_InContainer rejected the value"));
+            Skip->SetStringField(TEXT("attempted"), ImportLiteral);
+            const FString ErrorString = static_cast<FString>(ErrorBuf);
+            if (!ErrorString.IsEmpty()) Skip->SetStringField(TEXT("error"), ErrorString);
+            SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+        Applied->SetStringField(TEXT("name"), PropName);
+        Applied->SetStringField(TEXT("cpp_type"), Prop->GetCPPType());
+        Applied->SetStringField(TEXT("imported"), ImportLiteral);
+        AppliedArr.Add(MakeShared<FJsonValueObject>(Applied));
+    }
+
+    // Fire the editor change machinery: PostEditChangeProperty on the
+    // settings subobject (so the engine's own listeners that listen
+    // through PostEditChangeProperty fire), then broadcast the node-
+    // change delegate so any open PCG editor refreshes.
+    if (AppliedArr.Num() > 0)
+    {
+        FProperty* AnyProp = nullptr;
+        FPropertyChangedEvent ChangeEvent(AnyProp, EPropertyChangeType::ValueSet);
+        Settings->PostEditChangeProperty(ChangeEvent);
+        Node->OnNodeChangedDelegate.Broadcast(Node, EPCGChangeType::Settings);
+    }
+
+    Graph->MarkPackageDirty();
+    Settings->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Graph->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_node_settings"));
+    Out->SetStringField(TEXT("graph"), Graph->GetPathName());
+    Out->SetStringField(TEXT("node"), Node->GetFName().ToString());
+    Out->SetStringField(TEXT("settings_class"), SettingsClass->GetName());
+    Out->SetStringField(TEXT("settings_class_path"), SettingsClass->GetPathName());
+    Out->SetArrayField(TEXT("applied"), AppliedArr);
+    Out->SetNumberField(TEXT("applied_count"), AppliedArr.Num());
+    Out->SetArrayField(TEXT("skipped"), SkippedArr);
+    Out->SetNumberField(TEXT("skipped_count"), SkippedArr.Num());
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
 }

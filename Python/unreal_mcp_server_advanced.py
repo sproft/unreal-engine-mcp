@@ -7264,6 +7264,7 @@ def pcg_graph_edit(
     to_node: Optional[str] = None,
     to_pin: Optional[str] = None,
     node: Optional[str] = None,
+    properties: Optional[Dict[str, Any]] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
@@ -7289,6 +7290,14 @@ def pcg_graph_edit(
           the graph IO nodes.
         - ``remove_node``: removes one named node through
           ``UPCGGraph::RemoveNode``. Cascades any hanging edges.
+        - ``set_node_settings``: applies a flat ``properties`` dict
+          to the target node's ``UPCGSettings`` subobject through
+          ``FProperty::ImportText_InContainer``. Failed entries
+          surface under the response's ``skipped`` array.
+          ``PostEditChangeProperty`` runs on the settings object
+          and ``OnNodeChangedDelegate`` broadcasts
+          ``EPCGChangeType::Settings`` so any open PCG editor
+          refreshes.
 
     Each mutating op writes ``MarkPackageDirty`` and (when ``save``
     stays True, the default) saves the asset to disk.
@@ -7324,8 +7333,14 @@ def pcg_graph_edit(
         to_pin: connect_pins optional. FName of the downstream
             pin label. Defaults to the downstream node's first
             input pin.
-        node: remove_node. FName / title / substring of the node
-            to remove.
+        node: remove_node / set_node_settings. FName / title /
+            substring of the target node.
+        properties: set_node_settings only. Flat ``{name: value}``
+            dict applied to the node's UPCGSettings subobject
+            through ``FProperty::ImportText_InContainer``. Each
+            entry that fails to resolve as a UPROPERTY or refuses
+            ImportText is reported under the response's ``skipped``
+            array.
         save: Mutating ops only. Default True. False keeps the
             edit transient until the next manual save.
 
@@ -7368,6 +7383,8 @@ def pcg_graph_edit(
         params["to_pin"] = to_pin
     if node is not None:
         params["node"] = node
+    if properties is not None:
+        params["properties"] = properties
     if save is not None:
         params["save"] = save
 

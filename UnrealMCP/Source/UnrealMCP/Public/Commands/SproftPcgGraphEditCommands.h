@@ -70,4 +70,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddNode(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleConnectPins(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRemoveNode(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetNodeSettings(const TSharedPtr<FJsonObject>& Params);
 };
