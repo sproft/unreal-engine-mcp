@@ -8,27 +8,33 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped one minimum-cut runtime tool plus two
-small edit slices on existing read-only inspectors: `pie_test_scene`
-(scene-state assertion harness with two assertion kinds answered
-statically against the editor world without driving Play in
-Editor: `actor_exists` for actor-name presence and
-`actor_at_location` for distance-bounded location matches),
-`behavior_tree` edit slice (`create_behavior_tree` for a new
-UBehaviorTree at a `/Game/...` path with an optional linked
-Blackboard plus `add_root_composite` to assign a Selector /
-Sequence / SimpleParallel as the tree's RootNode in two
-declarative calls), and `sequencer_edit` edit slice
-(`create_level_sequence` for a new ULevelSequence with the default
-tick / display rates through `ULevelSequence::Initialize` plus
-`add_possessable` to bind a named editor-world actor through
-`UMovieScene::AddPossessable` + `BindPossessableObject`). Edit-
-side ops requiring a running PIE world (`var_equals`,
-`actor_overlapping_tag` for overlap-driven gameplay assertions)
-plus the heavier branches on each edit slice (BT child append /
-decorator insertion / blackboard key edits, Sequencer track add /
-section move / spawnable creation / camera-cut creation) stay on
-this list.
+The most recent pass extended `pie_test_scene` with two new
+assertion kinds and shipped two new edit-slice tools that pair with
+existing read-only inspectors. `pie_test_scene` now answers
+`actor_overlapping_tag` (target = actor name, expected = an FName
+tag string; pass = the actor's `Tags` array contains that FName)
+and `var_equals` (target = actor name, expected = a `{var, value}`
+dict; pass = the actor's UPROPERTY ImportText-matches the
+canonicalized representation of `value`, which lets vector /
+rotator / transform / FString / gameplay tag fields all flow
+through one comparison path). The earlier "PIE-only" framing on
+those kinds was overcautious; both run against the editor world
+fine. `animation_edit` (small) lays down `set_rate_scale` (float
+write on UAnimSequenceBase), `set_additive` (UAnimSequence
+AdditiveAnimType / RefPoseType / RefPoseSeq / RefFrameIndex),
+and `add_notify` (FAnimNotifyEvent append to a notify track
+through `UAnimationBlueprintLibrary::AddAnimationNotifyEvent` /
+`AddAnimationNotifyStateEvent`, with auto-create on the named
+track). `foliage_edit` (small) lays down `add_foliage_type`
+(UFoliageType registration on the level's
+`AInstancedFoliageActor`, spawning the IFA when missing) and
+`set_foliage_density` (Density / DensityAdjustmentFactor /
+Radius / per-axis ScaleX-Y-Z FFloatInterval writes on a
+UFoliageType asset). The heavier branches (animation curves /
+key frames / sync markers, foliage instance placement, BT child
+append / decorator insertion / Blackboard key edits, Sequencer
+track add / section move / spawnable creation / camera-cut
+creation) stay on this list.
 
 The pass before that shipped three small wide-domain read-only
 tools that round out the orientation surface the agent reaches
@@ -416,9 +422,9 @@ ability" alongside `tag_registry_edit`.
   look like" question. The `module` + `module_dir` metadata
   through `FindClassModuleName` + `FindModulePath` lets a caller
   jump straight to the .Build.cs without a second tool call.
-- `pie_test_scene` (small, minimum cut) — scene-state assertion
-  harness. Runs against the editor world without driving Play in
-  Editor. Two assertion kinds in this slice:
+- `pie_test_scene` (small) — scene-state assertion harness. Runs
+  against the editor world without driving Play in Editor. Four
+  assertion kinds:
   - `actor_exists`: `target` is an actor name (matched against
     `GetName()` first and Outliner label second). Pass = an
     actor with that name or label is present in the current
@@ -428,16 +434,82 @@ ability" alongside `tag_registry_edit`.
     (default 1.0 cm) is the pass radius. Pass = the resolved
     actor's `GetActorLocation` is within `tolerance` of
     `expected`.
+  - `actor_overlapping_tag`: `target` is an actor name,
+    `expected` is an FName tag string. Pass = the resolved
+    actor's `Tags` array contains that FName. Despite the
+    historical "PIE-only" framing, `AActor::Tags` is populated
+    in the editor world too, so the kind answers statically
+    against the loaded level.
+  - `var_equals`: `target` is an actor name, `expected` is a
+    `{var, value}` dict. Pass = the resolved actor's UPROPERTY
+    (looked up by FName) ImportText-matches the canonicalized
+    representation of `value`. The expected JSON literal is
+    routed through the property's `ImportText` into a transient
+    buffer, then re-emitted through `ExportText` so the
+    comparison runs against the engine's own canonical form
+    (so `{"X":1,"Y":2,"Z":3}` matches `(X=1.000000,Y=2.000000,Z=3.000000)`
+    on an FVector property). Works against transform fields,
+    Blueprint-exposed variables, gameplay tags, FString fields,
+    and any other reflected actor property in the editor world.
   Per-assertion the response carries `index`, `kind`, `target`,
   `passed` flag, optional `actual` / `expected` / `delta` /
-  `tolerance` for distance-based kinds, and a human-readable
-  `message`. Aggregate counts (`total`, `passed`, `failed`,
-  `unsupported`, `all_passed`) sit at the top of the response.
-  Open follow-ons: PIE-driven kinds (`var_equals` against a
-  Blueprint instance variable, `actor_overlapping_tag` for
-  overlap-driven gameplay assertions), per-assertion timeout for
-  PIE-driven kinds, and an over-PIE harness option for callers
-  who want the same surface but inside a running PIE world.
+  `tolerance` / `var` / `property_class` / `expected_imported`
+  for the relevant kinds, and a human-readable `message`.
+  Aggregate counts (`total`, `passed`, `failed`, `unsupported`,
+  `all_passed`) sit at the top of the response. Open follow-ons:
+  per-assertion timeout for kinds that need a running PIE world,
+  and an over-PIE harness option for callers who want the same
+  surface but inside a running PIE world.
+- `animation_edit` (small) — multi-op tool for targeted
+  UAnimSequence / UAnimMontage edits, keyed by `op`:
+  - `set_rate_scale`: writes `RateScale` (float) on
+    UAnimSequenceBase. Works on UAnimSequence and UAnimMontage.
+  - `set_additive`: toggles the additive shape on UAnimSequence.
+    Writes `AdditiveAnimType` (`none` / `local_space` /
+    `rotation_offset_mesh_space`) plus optional `RefPoseType`
+    (`none` / `ref_pose` / `anim_scaled` / `anim_frame`),
+    `RefPoseSeq` (a `/Game/...` UAnimSequence path applied when
+    ref_pose_type is anim_scaled / anim_frame), and
+    `RefFrameIndex` (integer frame index applied when
+    ref_pose_type is anim_frame).
+  - `add_notify`: appends an FAnimNotifyEvent to a notify track
+    on UAnimSequenceBase. Resolves the optional `notify_class`
+    to either UAnimNotify or UAnimNotifyState (or treats the
+    entry as a custom-event notify when no class is given).
+    Auto-creates the named notify track through
+    `UAnimationBlueprintLibrary::AddAnimationNotifyTrack` when
+    missing, then routes through `AddAnimationNotifyEvent` /
+    `AddAnimationNotifyStateEvent`. `frame` (integer) wins over
+    `time` (float seconds) when both are present; the
+    frame-to-seconds conversion uses the asset's
+    `GetSamplingFrameRate`. `duration` is required for
+    UAnimNotifyState subclasses.
+  Each op saves the asset by default. Adds
+  AnimationBlueprintLibrary to PrivateDependencyModuleNames.
+  Pairs with `animation_inspect`. Heavier branches (curves, key
+  frames, sync markers, anim composite section authoring,
+  AnimBP state-machine edits, IK rig / retargeting) remain on
+  this list.
+- `foliage_edit` (small) — multi-op tool for foliage authoring,
+  keyed by `op`:
+  - `add_foliage_type`: registers a UFoliageType asset on the
+    `AInstancedFoliageActor` for a chosen level. Resolves (or
+    spawns) the IFA through
+    `AInstancedFoliageActor::GetInstancedFoliageActorForLevel(Level, /*bCreateIfNone=*/true)`
+    and binds the type through
+    `AInstancedFoliageActor::AddFoliageType`. Reuses an existing
+    FFoliageInfo when the type is already registered. Optional
+    `level` is a substring on the owning ULevel name; defaults
+    to the persistent level. `created_actor` /
+    `type_already_bound` flags surface in the response.
+  - `set_foliage_density`: writes `Density`,
+    `DensityAdjustmentFactor`, `Radius`, and the per-axis
+    `ScaleX` / `ScaleY` / `ScaleZ` FFloatInterval pairs on a
+    UFoliageType asset. All fields are optional; only the ones
+    present in the call are written. Each axis interval requires
+    both `_min` and `_max` to be present together.
+  Pairs with `foliage_inspect`. The "place N instances at
+  locations" op stays on this list.
 - `behavior_tree` edit slice (small) — adds two edit ops to the
   existing read-only inspector through a new `op` discriminator
   (default stays `inspect`):
@@ -761,7 +833,17 @@ helpers.
   toggle on UAnimBlueprint that walks the EventGraph + AnimGraph
   pages and emits the K2 nodes' titles + classes (matches
   `bp_inspect`'s shape).
-- `animation_edit` — create / modify the same.
+- `animation_edit` (small variant ships in this fork) — multi-op
+  tool keyed by `op` covering `set_rate_scale` (UAnimSequenceBase
+  RateScale write), `set_additive` (UAnimSequence AdditiveAnimType
+  / RefPoseType / RefPoseSeq / RefFrameIndex), and `add_notify`
+  (FAnimNotifyEvent append through
+  `UAnimationBlueprintLibrary::AddAnimationNotifyEvent` /
+  `AddAnimationNotifyStateEvent`, with auto-create on the named
+  notify track). Open follow-ons: per-curve key authoring through
+  the IAnimationDataController surface, sync-marker authoring,
+  composite section authoring on UAnimMontage (slot tracks,
+  sections, transitions), and per-notify property dict on add.
 - `animation_graph_edit` — AnimBP state machines, transitions, blend nodes.
 - `ik_rig_edit` — IK rig setup.
 - `ik_retarget` — retarget animations.
@@ -827,7 +909,18 @@ helpers.
   foliage spawner + procedural foliage volume readout, and a
   spatial-bound query that returns "every foliage instance whose
   origin is inside this FBox / FSphere".
-- `foliage_edit` — paint, scatter, remove instances.
+- `foliage_edit` (small variant ships in this fork) — multi-op
+  tool keyed by `op` covering `add_foliage_type` (registers a
+  UFoliageType on the level's `AInstancedFoliageActor`, spawning
+  the IFA when missing through
+  `AInstancedFoliageActor::GetInstancedFoliageActorForLevel(Level, /*bCreateIfNone=*/true)`)
+  and `set_foliage_density` (Density / DensityAdjustmentFactor /
+  Radius / per-axis ScaleX-Y-Z FFloatInterval writes on a
+  UFoliageType asset). Open follow-ons: place N instances at
+  caller-chosen world locations through `FFoliageInfo::AddInstance`,
+  remove instances by index or spatial bound, paint instances by
+  spawning under a chosen base component, and procedural foliage
+  spawner authoring.
 
 ## Cinematics & audio (large each)
 
@@ -882,16 +975,18 @@ helpers.
 ## Runtime verification (large each)
 
 - `pie_test_bp` — Blueprint test harness with assertions during PIE.
-- `pie_test_scene` (small minimum cut ships in this fork) — scene-
-  state assertion harness with the two assertion kinds we can
-  answer statically against the editor world: `actor_exists` for
-  actor-name presence and `actor_at_location` for distance-bounded
-  location matches. Open follow-ons: PIE-driven kinds
-  (`var_equals` against a Blueprint instance variable,
-  `actor_overlapping_tag` for overlap-driven gameplay assertions),
-  per-assertion timeout for PIE-driven kinds, and an over-PIE
-  harness option for callers who want the same surface but inside
-  a running PIE world.
+- `pie_test_scene` (small variant ships in this fork) — scene-state
+  assertion harness with four assertion kinds that all answer
+  statically against the editor world: `actor_exists` for actor-name
+  presence, `actor_at_location` for distance-bounded location
+  matches, `actor_overlapping_tag` for tag-list membership on
+  `AActor::Tags`, and `var_equals` for canonicalized UPROPERTY
+  value matches through `FProperty::ImportText` /
+  `ExportText_Direct`. Open follow-ons: per-assertion timeout for
+  kinds that need a running PIE world, an over-PIE harness option
+  for callers who want the same surface but inside a running PIE
+  world, and a `component_var_equals` kind that walks one level
+  deeper to a named UActorComponent's UPROPERTY.
 
 ## Execution (large each)
 
@@ -904,15 +999,16 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`pie_test_scene` minimum cut, `behavior_tree`
-edit slice, `sequencer_edit` edit slice), the next set should pick
-up:
+After the latest pass (`pie_test_scene` extension to four assertion
+kinds, `animation_edit` small slice, `foliage_edit` small slice),
+the next set should pick up:
 
-1. `pie_test_scene` PIE-driven kinds — `var_equals` against a
-   Blueprint instance variable in a running PIE world, and
-   `actor_overlapping_tag` for overlap-driven gameplay assertions.
-   Adds the live-PIE harness path that the minimum cut deferred so
-   we could ship the static-world half of the tool first.
+1. `gas_edit` edit slice — append a modifier to a UGameplayEffect,
+   set DurationPolicy / DurationMagnitude through CDO writes +
+   recompile, rebind cost / cooldown classes on a UGameplayAbility,
+   write asset / granted / blocked-ability tags through the
+   `GetAssetTags()` / `GetGrantedTags()` / `GetBlockedAbilityTags()`
+   mutator surface. Reuses the existing GameplayAbilities dep.
 2. `behavior_tree` heavier edit ops — append a child task / composite
    to a chosen parent, insert a decorator on a chosen child slot,
    append a service on a composite, and the full Blackboard key
@@ -926,14 +1022,15 @@ up:
    sets up SystemSpawnScript / SystemUpdateScript so no per-call
    scripting is needed), then `add_emitter` once the parent emitter
    surface is scoped clean-room. Pairs with `niagara_inspect`.
-5. `gas_edit` edit slice — append a modifier to a UGameplayEffect,
-   set DurationPolicy / DurationMagnitude through CDO writes +
-   recompile, rebind cost / cooldown classes on a UGameplayAbility.
-   Reuses the existing GameplayAbilities dep.
-6. `animation_edit` (small variant) — set montage section timings,
-   add notify entries on a UAnimSequence / UAnimMontage through the
-   public Notifies array, and toggle additive flags through the
-   CDO. Pairs with `animation_inspect`.
+5. `animation_edit` heavier branches — per-curve key authoring
+   through the `IAnimationDataController` surface, sync-marker
+   authoring, and composite section authoring on UAnimMontage
+   (slot tracks, sections, transitions). Reuses the
+   AnimationBlueprintLibrary dep already pulled in.
+6. `foliage_edit` instance placement — `FFoliageInfo::AddInstance`
+   for "place N instances at world locations", remove instances by
+   index or spatial bound, and a procedural-foliage spawner
+   authoring slice.
 
 `python_execution` still covers any operation we have not wrapped
 natively; prefer wrapping the high-frequency calls as dedicated tools
