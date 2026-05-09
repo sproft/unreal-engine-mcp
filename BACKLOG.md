@@ -355,6 +355,39 @@ ability" alongside `tag_registry_edit`.
   `level_filter`. Adds `Foliage` to PublicDependencyModuleNames.
   Edit-side ops (paint, scatter, remove instances) remain on the
   backlog.
+- `animation_inspect` (small, read-only) — structured dump for
+  animation assets. Resolves the asset by short name or
+  `/Game/...` path and branches by class:
+  - USkeletalMesh: skeleton path + LOD count + bone list (each
+    `{name, parent_index, parent_name}`) + socket list (mesh-level
+    sockets first, then non-overridden skeleton-level sockets,
+    each with `relative_location` / `relative_rotation` /
+    `relative_scale` plus a `source` discriminator).
+  - UAnimSequence: play length + rate scale + sampling frame rate
+    (numerator / denominator / approx_fps) + sampled key count +
+    additive anim type token + notify list. Each notify carries
+    name + absolute time + duration + track index + trigger
+    chance + linked UAnimNotify / UAnimNotifyState class path
+    plus a `notify_kind` discriminator (`instant` / `state` /
+    `event`).
+  - UAnimMontage: play length + rate scale + composite sections
+    (name + time + next-section) + slot tracks (slot_name +
+    animation count) + notifies through the same shape.
+  - UBlendSpace (and UBlendSpace1D): per-axis FBlendParameter
+    (display_name + min + max + grid_num + snap_to_grid +
+    wrap_input) plus axis_count and sample count. Reads through
+    the public `UBlendSpace::GetBlendParameter(int32)` so we
+    avoid the fixed-size FBlendParameter[3] reflection dance.
+  - UAnimBlueprint: parent class + target skeleton path +
+    template flag + variable count + state-machine list (each
+    machine's name + state count + transition count + initial
+    state index + initial state name). The state-machine list
+    reads off the cached UAnimBlueprintGeneratedClass through
+    the `BakedStateMachines` array so we do not need the
+    editor-only AnimGraph module.
+  Pairs with `bp_brief` for AnimBP-specific orientation. Edit-side
+  ops (sequence / montage authoring, AnimBP state-machine
+  authoring, IK rig / retargeting) remain on the backlog.
 - `project_context` (small, read-only) — one-shot designer summary
   of the loaded project. Returns project name + uproject path +
   project dir + content dir, the .uproject metadata (description,
@@ -582,7 +615,18 @@ helpers.
 
 ## Animation (large each)
 
-- `animation_inspect` — read sequences, montages, BlendSpaces, AnimBP graphs.
+- `animation_inspect` (small read-only variant ships in this fork) —
+  branch by class for USkeletalMesh / UAnimSequence / UAnimMontage /
+  UBlendSpace / UAnimBlueprint. Open follow-ons: per-LOD bone-name
+  delta against the skeleton, virtual-bone surface (USkeleton::GetVirtualBones)
+  beyond the basic bone list, AnimComposite + AimOffsetBlendSpace
+  + UAnimSequence's TrackToSkeletonMapTable readback, Anim Notify
+  Track readout (Tracks array on UAnimSequenceBase) so the agent
+  can ask "which track is this notify on", FCompositeSection's
+  `MetaData` array dump on UAnimMontage, and an `include_anim_graph_dump`
+  toggle on UAnimBlueprint that walks the EventGraph + AnimGraph
+  pages and emits the K2 nodes' titles + classes (matches
+  `bp_inspect`'s shape).
 - `animation_edit` — create / modify the same.
 - `animation_graph_edit` — AnimBP state machines, transitions, blend nodes.
 - `ik_rig_edit` — IK rig setup.

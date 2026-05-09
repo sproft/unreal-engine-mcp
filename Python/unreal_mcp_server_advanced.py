@@ -5632,6 +5632,100 @@ def project_context(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def animation_inspect(
+    asset: str,
+    op: Optional[str] = None,
+    include_bones: Optional[bool] = None,
+    include_sockets: Optional[bool] = None,
+    include_notifies: Optional[bool] = None,
+    include_sections: Optional[bool] = None,
+    include_slot_tracks: Optional[bool] = None,
+    include_state_machines: Optional[bool] = None,
+    max_bones: Optional[int] = None,
+    max_notifies: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only structured dump for animation assets.
+
+    Resolves the asset by short name or ``/Game/...`` path and branches
+    by class. USkeletalMesh returns skeleton path + LOD count + bones
+    + sockets. UAnimSequence returns sampling frame rate + play length
+    + additive flag + key count + notifies. UAnimMontage returns
+    composite sections + slot tracks + notifies. UBlendSpace (and 1D)
+    returns the per-axis FBlendParameter list and the sample count.
+    UAnimBlueprint returns parent class + target skeleton +
+    state-machine list + variable count. The state-machine list reads
+    off the cached UAnimBlueprintGeneratedClass so it requires the BP
+    to have compiled at least once.
+
+    Args:
+        asset: Short asset name or full ``/Game/...`` asset path.
+        op: Operation discriminator. Only ``inspect`` (default) is
+            supported.
+        include_bones: Emit per-bone records on USkeletalMesh.
+            Default True.
+        include_sockets: Emit the socket list on USkeletalMesh.
+            Default True.
+        include_notifies: Emit the notify list on UAnimSequence /
+            UAnimMontage. Default True.
+        include_sections: Emit the composite-section list on
+            UAnimMontage. Default True.
+        include_slot_tracks: Emit the slot-track list on
+            UAnimMontage. Default True.
+        include_state_machines: Emit the state-machine list on
+            UAnimBlueprint. Default True.
+        max_bones: Cap on bone emission. Default 4096.
+        max_notifies: Cap on notify emission. Default 1024.
+
+    Returns:
+        Dict with ``name`` / ``path`` / ``class`` / ``class_path`` and
+        a ``kind`` discriminator (``skeletal_mesh`` /
+        ``anim_sequence`` / ``anim_montage`` / ``blend_space`` /
+        ``anim_blueprint`` / ``unknown``). Per-kind fields follow:
+        skeletal_mesh has ``skeleton_path`` / ``lod_count`` /
+        ``bone_count`` / ``bones`` / ``sockets``; anim_sequence has
+        ``play_length`` / ``rate_scale`` / ``sampling_frame_rate`` /
+        ``sampled_key_count`` / ``additive_anim_type`` / ``notifies``;
+        anim_montage has ``play_length`` / ``rate_scale`` /
+        ``composite_sections`` / ``slot_tracks`` / ``notifies``;
+        blend_space has ``axis_count`` / ``sample_count`` / ``axes``;
+        anim_blueprint has ``parent_class`` / ``parent_class_path`` /
+        ``target_skeleton_path`` / ``is_template`` / ``variable_count``
+        / ``state_machines``.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"asset": asset}
+    if op is not None:
+        params["op"] = op
+    if include_bones is not None:
+        params["include_bones"] = include_bones
+    if include_sockets is not None:
+        params["include_sockets"] = include_sockets
+    if include_notifies is not None:
+        params["include_notifies"] = include_notifies
+    if include_sections is not None:
+        params["include_sections"] = include_sections
+    if include_slot_tracks is not None:
+        params["include_slot_tracks"] = include_slot_tracks
+    if include_state_machines is not None:
+        params["include_state_machines"] = include_state_machines
+    if max_bones is not None:
+        params["max_bones"] = max_bones
+    if max_notifies is not None:
+        params["max_notifies"] = max_notifies
+
+    try:
+        response = unreal.send_command("animation_inspect", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"animation_inspect error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

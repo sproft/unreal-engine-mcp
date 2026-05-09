@@ -48,6 +48,7 @@
 #include "Commands/SproftFoliageInspectCommands.h"
 #include "Commands/SproftSequencerEditCommands.h"
 #include "Commands/SproftProjectContextCommands.h"
+#include "Commands/SproftAnimationInspectCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -132,4 +133,5 @@ private:
 	TSharedPtr<FSproftFoliageInspectCommands> SproftFoliageInspect;
 	TSharedPtr<FSproftSequencerEditCommands> SproftSequencerEdit;
 	TSharedPtr<FSproftProjectContextCommands> SproftProjectContext;
+	TSharedPtr<FSproftAnimationInspectCommands> SproftAnimationInspect;
 };
