@@ -38,6 +38,16 @@
  *      named expression through `FProperty::ImportText`. Used to set
  *      ConstA / ConstB on a Multiply, R on a Constant, parameter
  *      name + default on a Scalar / Vector / Texture parameter, etc.
+ *   - "add_expressions": bulk variant of `add_expression`. Takes a list
+ *      of expression specs (each with class + optional name + position
+ *      + property dict) plus an optional list of edge specs (each
+ *      `{source, source_output?, dest, dest_input?}` between expressions
+ *      or `{source, property}` to a material attribute). Cuts the
+ *      round-trip count for typical "build me a panner-driven UV
+ *      chain" asks. Each expression's resolved FName comes back in the
+ *      response so a follow-up call can address it. Recompiles + saves
+ *      once after the whole batch unless `recompile=false` /
+ *      `save=false` is passed.
  *
  * Material Functions and Material Parameter Collections remain on the
  * backlog; the per-expression authoring above closes the largest gap.
@@ -73,4 +83,5 @@ private:
     TSharedPtr<FJsonObject> AddExpression(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> ConnectExpressions(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetExpressionProperty(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddExpressionsBulk(const TSharedPtr<FJsonObject>& Params);
 };

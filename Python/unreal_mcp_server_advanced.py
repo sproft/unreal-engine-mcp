@@ -3468,6 +3468,8 @@ def material_edit(
     dest: Optional[str] = None,
     dest_input: Optional[str] = None,
     expression: Optional[str] = None,
+    expressions: Optional[List[Dict[str, Any]]] = None,
+    connections: Optional[List[Dict[str, Any]]] = None,
     recompile: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -3504,6 +3506,16 @@ def material_edit(
         - "set_expression_property": apply a flat property dict to a
           named expression on the material (e.g. tweak ``ConstA`` on a
           Multiply or ``ParameterName`` on a Scalar Parameter).
+        - "add_expressions": bulk variant. Takes ``expressions`` (list
+          of expression specs, each with ``class`` plus optional
+          ``name`` alias / ``position`` / ``properties`` dict) and an
+          optional ``connections`` list (each entry either
+          ``{source, source_output?, dest, dest_input?}`` between
+          expressions or ``{source, property}`` to a material
+          attribute). Uses each spec's ``name`` as a friendly alias so
+          a connection can reference an expression created earlier in
+          the same call without waiting for the engine's resolved FName
+          to come back. Recompiles + saves once after the whole batch.
 
     Material Functions and Material Parameter Collections remain on the
     backlog.
@@ -3545,6 +3557,13 @@ def material_edit(
         dest: For connect_expressions: destination expression FName.
         dest_input: Input pin name on the destination expression.
         expression: For set_expression_property: target expression FName.
+        expressions: For add_expressions: list of expression specs.
+            Each spec is ``{class, name?, position?, properties?}``.
+            ``name`` is a friendly alias so connection rows can refer
+            back to it within the same call.
+        connections: For add_expressions: list of edge specs. Each is
+            either ``{source, source_output?, dest, dest_input?}`` or
+            ``{source, property}`` (to a material attribute).
         recompile: For expression-graph ops: recompile the material on
             success. Defaults True.
 
@@ -3594,6 +3613,10 @@ def material_edit(
         params["dest_input"] = dest_input
     if expression is not None:
         params["expression"] = expression
+    if expressions is not None:
+        params["expressions"] = expressions
+    if connections is not None:
+        params["connections"] = connections
     if recompile is False:
         # The C++ default is true; only forward when caller wants false.
         params["recompile"] = False

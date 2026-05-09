@@ -437,9 +437,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return SetExpressionProperty(Params);
     }
+    if (Operation == TEXT("add_expressions") || Operation == TEXT("bulk_add_expressions")
+        || Operation == TEXT("build_graph"))
+    {
+        return AddExpressionsBulk(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, connect_expressions, set_expression_property"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -1165,6 +1170,330 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetExpressionProperty(const
         }
         ResultObj->SetArrayField(TEXT("property_errors"), Arr);
     }
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddExpressionsBulk(const TSharedPtr<FJsonObject>& Params)
+{
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'material' parameter"));
+    }
+    UMaterial* Material = Cast<UMaterial>(UEditorAssetLibrary::LoadAsset(MaterialPath));
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial"), *MaterialPath));
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* ExpressionsArray = nullptr;
+    if (!Params->TryGetArrayField(TEXT("expressions"), ExpressionsArray) || !ExpressionsArray)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'expressions' array (each entry needs at least 'class')"));
+    }
+
+    // Track every expression created in this call so a connection spec
+    // can address it by either the spec's `name` field (a friendly tag)
+    // or the engine's resolved FName (the `name` field in the response).
+    TMap<FString, UMaterialExpression*> AliasToExpr;
+    TArray<TSharedPtr<FJsonValue>> ExpressionLog;
+
+    int32 CascadeIndex = 0;
+    for (const TSharedPtr<FJsonValue>& Entry : *ExpressionsArray)
+    {
+        TSharedPtr<FJsonObject> EntryRow = MakeShared<FJsonObject>();
+        if (!Entry.IsValid() || Entry->Type != EJson::Object)
+        {
+            EntryRow->SetBoolField(TEXT("success"), false);
+            EntryRow->SetStringField(TEXT("error"), TEXT("entry must be an object"));
+            ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+            continue;
+        }
+        const TSharedPtr<FJsonObject>& EntryObj = Entry->AsObject();
+
+        FString Alias;
+        EntryObj->TryGetStringField(TEXT("name"), Alias);
+        if (!Alias.IsEmpty())
+        {
+            EntryRow->SetStringField(TEXT("alias"), Alias);
+        }
+
+        FString ClassToken;
+        if (!EntryObj->TryGetStringField(TEXT("class"), ClassToken)
+            && !EntryObj->TryGetStringField(TEXT("expression_class"), ClassToken))
+        {
+            EntryRow->SetBoolField(TEXT("success"), false);
+            EntryRow->SetStringField(TEXT("error"), TEXT("missing 'class'"));
+            ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+            continue;
+        }
+        EntryRow->SetStringField(TEXT("class_requested"), ClassToken);
+
+        TSubclassOf<UMaterialExpression> ExprClass = ResolveExpressionClass(ClassToken);
+        if (!ExprClass)
+        {
+            EntryRow->SetBoolField(TEXT("success"), false);
+            EntryRow->SetStringField(TEXT("error"),
+                FString::Printf(TEXT("Could not resolve expression class '%s'"), *ClassToken));
+            ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+            continue;
+        }
+
+        int32 PosX = -300;
+        int32 PosY = 200 * CascadeIndex;
+        if (EntryObj->HasField(TEXT("position")))
+        {
+            const TSharedPtr<FJsonValue> PosVal = EntryObj->TryGetField(TEXT("position"));
+            if (PosVal.IsValid() && PosVal->Type == EJson::Array)
+            {
+                const TArray<TSharedPtr<FJsonValue>>& Arr = PosVal->AsArray();
+                if (Arr.Num() >= 2)
+                {
+                    PosX = static_cast<int32>(Arr[0]->AsNumber());
+                    PosY = static_cast<int32>(Arr[1]->AsNumber());
+                }
+            }
+            else if (PosVal.IsValid() && PosVal->Type == EJson::Object)
+            {
+                const TSharedPtr<FJsonObject> PosObj = PosVal->AsObject();
+                double X = 0.0, Y = 0.0;
+                if (PosObj.IsValid() && (PosObj->TryGetNumberField(TEXT("x"), X) || PosObj->TryGetNumberField(TEXT("X"), X))
+                    && (PosObj->TryGetNumberField(TEXT("y"), Y) || PosObj->TryGetNumberField(TEXT("Y"), Y)))
+                {
+                    PosX = static_cast<int32>(X);
+                    PosY = static_cast<int32>(Y);
+                }
+            }
+        }
+
+        UMaterialExpression* NewExpr = UMaterialEditingLibrary::CreateMaterialExpression(Material, ExprClass, PosX, PosY);
+        if (!NewExpr)
+        {
+            EntryRow->SetBoolField(TEXT("success"), false);
+            EntryRow->SetStringField(TEXT("error"),
+                FString::Printf(TEXT("CreateMaterialExpression failed for class '%s'"), *ExprClass->GetName()));
+            ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+            continue;
+        }
+
+        TArray<FString> PropertyErrors;
+        int32 PropertyAppliedCount = 0;
+        if (EntryObj->HasField(TEXT("properties")))
+        {
+            const TSharedPtr<FJsonValue> PropsVal = EntryObj->TryGetField(TEXT("properties"));
+            if (PropsVal.IsValid() && PropsVal->Type == EJson::Object)
+            {
+                PropertyAppliedCount = ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
+            }
+        }
+
+        if (!Alias.IsEmpty())
+        {
+            AliasToExpr.Add(Alias, NewExpr);
+        }
+        // Index the resolved name too so a downstream connection spec
+        // can reference the expression by either alias or actual FName.
+        AliasToExpr.Add(NewExpr->GetName(), NewExpr);
+
+        EntryRow->SetBoolField(TEXT("success"), true);
+        EntryRow->SetStringField(TEXT("name"), NewExpr->GetName());
+        EntryRow->SetStringField(TEXT("class"), NewExpr->GetClass()->GetName());
+        EntryRow->SetNumberField(TEXT("position_x"), NewExpr->MaterialExpressionEditorX);
+        EntryRow->SetNumberField(TEXT("position_y"), NewExpr->MaterialExpressionEditorY);
+        EntryRow->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
+        if (PropertyErrors.Num() > 0)
+        {
+            TArray<TSharedPtr<FJsonValue>> Arr;
+            for (const FString& E : PropertyErrors)
+            {
+                Arr.Add(MakeShared<FJsonValueString>(E));
+            }
+            EntryRow->SetArrayField(TEXT("property_errors"), Arr);
+        }
+        ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+        ++CascadeIndex;
+    }
+
+    // Optional list of edges. Each edge can be either expression-to-
+    // expression (`{source, source_output?, dest, dest_input?}`) or
+    // expression-to-material-attribute (`{source, property}`).
+    TArray<TSharedPtr<FJsonValue>> ConnectionLog;
+    const TArray<TSharedPtr<FJsonValue>>* ConnectionsArray = nullptr;
+    if (Params->TryGetArrayField(TEXT("connections"), ConnectionsArray) && ConnectionsArray)
+    {
+        for (const TSharedPtr<FJsonValue>& Entry : *ConnectionsArray)
+        {
+            TSharedPtr<FJsonObject> EntryRow = MakeShared<FJsonObject>();
+            if (!Entry.IsValid() || Entry->Type != EJson::Object)
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"), TEXT("entry must be an object"));
+                ConnectionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                continue;
+            }
+            const TSharedPtr<FJsonObject>& EntryObj = Entry->AsObject();
+
+            FString Source;
+            if (!EntryObj->TryGetStringField(TEXT("source"), Source)
+                && !EntryObj->TryGetStringField(TEXT("from"), Source))
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"), TEXT("missing 'source'"));
+                ConnectionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                continue;
+            }
+            UMaterialExpression* SourceExpr = nullptr;
+            if (UMaterialExpression** Found = AliasToExpr.Find(Source))
+            {
+                SourceExpr = *Found;
+            }
+            if (!SourceExpr)
+            {
+                SourceExpr = FindExpressionByName(Material, Source);
+            }
+            if (!SourceExpr)
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"),
+                    FString::Printf(TEXT("source expression '%s' not found"), *Source));
+                ConnectionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                continue;
+            }
+            EntryRow->SetStringField(TEXT("source"), SourceExpr->GetName());
+
+            FString SourceOutput;
+            EntryObj->TryGetStringField(TEXT("source_output"), SourceOutput);
+            EntryRow->SetStringField(TEXT("source_output"), SourceOutput);
+
+            FString PropertyToken;
+            if (EntryObj->TryGetStringField(TEXT("property"), PropertyToken)
+                || EntryObj->TryGetStringField(TEXT("dest_property"), PropertyToken))
+            {
+                EMaterialProperty MaterialProperty;
+                if (!TryParseMaterialProperty(PropertyToken, MaterialProperty))
+                {
+                    EntryRow->SetBoolField(TEXT("success"), false);
+                    EntryRow->SetStringField(TEXT("error"),
+                        FString::Printf(TEXT("Unknown property token '%s'"), *PropertyToken));
+                    ConnectionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                    continue;
+                }
+                if (UMaterialEditingLibrary::ConnectMaterialProperty(SourceExpr, SourceOutput, MaterialProperty))
+                {
+                    EntryRow->SetBoolField(TEXT("success"), true);
+                    EntryRow->SetStringField(TEXT("property"), PropertyToken);
+                }
+                else
+                {
+                    EntryRow->SetBoolField(TEXT("success"), false);
+                    EntryRow->SetStringField(TEXT("error"),
+                        FString::Printf(TEXT("ConnectMaterialProperty failed for '%s'"), *PropertyToken));
+                }
+                ConnectionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                continue;
+            }
+
+            FString Dest;
+            if (!EntryObj->TryGetStringField(TEXT("dest"), Dest)
+                && !EntryObj->TryGetStringField(TEXT("to"), Dest))
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"), TEXT("missing 'dest' or 'property'"));
+                ConnectionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                continue;
+            }
+            UMaterialExpression* DestExpr = nullptr;
+            if (UMaterialExpression** Found = AliasToExpr.Find(Dest))
+            {
+                DestExpr = *Found;
+            }
+            if (!DestExpr)
+            {
+                DestExpr = FindExpressionByName(Material, Dest);
+            }
+            if (!DestExpr)
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"),
+                    FString::Printf(TEXT("dest expression '%s' not found"), *Dest));
+                ConnectionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                continue;
+            }
+            EntryRow->SetStringField(TEXT("dest"), DestExpr->GetName());
+
+            FString DestInput;
+            EntryObj->TryGetStringField(TEXT("dest_input"), DestInput);
+            EntryRow->SetStringField(TEXT("dest_input"), DestInput);
+
+            if (UMaterialEditingLibrary::ConnectMaterialExpressions(SourceExpr, SourceOutput, DestExpr, DestInput))
+            {
+                EntryRow->SetBoolField(TEXT("success"), true);
+            }
+            else
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"),
+                    FString::Printf(TEXT("ConnectMaterialExpressions failed: %s.%s -> %s.%s"),
+                        *SourceExpr->GetName(), *SourceOutput, *DestExpr->GetName(), *DestInput));
+            }
+            ConnectionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+        }
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    int32 ExpressionsCreated = 0;
+    int32 ExpressionFailures = 0;
+    for (const TSharedPtr<FJsonValue>& V : ExpressionLog)
+    {
+        if (V.IsValid() && V->Type == EJson::Object && V->AsObject().IsValid())
+        {
+            bool bOk = false;
+            V->AsObject()->TryGetBoolField(TEXT("success"), bOk);
+            if (bOk) { ++ExpressionsCreated; } else { ++ExpressionFailures; }
+        }
+    }
+    int32 ConnectionsApplied = 0;
+    int32 ConnectionFailures = 0;
+    for (const TSharedPtr<FJsonValue>& V : ConnectionLog)
+    {
+        if (V.IsValid() && V->Type == EJson::Object && V->AsObject().IsValid())
+        {
+            bool bOk = false;
+            V->AsObject()->TryGetBoolField(TEXT("success"), bOk);
+            if (bOk) { ++ConnectionsApplied; } else { ++ConnectionFailures; }
+        }
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_expressions"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetArrayField(TEXT("expressions"), ExpressionLog);
+    ResultObj->SetArrayField(TEXT("connections"), ConnectionLog);
+    ResultObj->SetNumberField(TEXT("expressions_created"), ExpressionsCreated);
+    ResultObj->SetNumberField(TEXT("expression_failures"), ExpressionFailures);
+    ResultObj->SetNumberField(TEXT("connections_applied"), ConnectionsApplied);
+    ResultObj->SetNumberField(TEXT("connection_failures"), ConnectionFailures);
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
     ResultObj->SetBoolField(TEXT("saved"), bSave);
     return ResultObj;
 }
