@@ -5306,54 +5306,132 @@ def behavior_tree(
 
 
 @mcp.tool()
-def gas_edit(asset: str) -> Dict[str, Any]:
+def gas_edit(
+    asset: Optional[str] = None,
+    op: Optional[str] = None,
+    path: Optional[str] = None,
+    parent_class: Optional[str] = None,
+    duration_policy: Optional[str] = None,
+    duration_magnitude: Optional[float] = None,
+    tags: Optional[Dict[str, Any]] = None,
+    overwrite: Optional[bool] = None,
+    compile: Optional[bool] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
     """
-    Read-only structured dump of a Gameplay Ability System asset.
+    Multi-op tool over Gameplay Ability System assets.
 
-    Resolves the target path to one of:
-        - UGameplayAbility (or a Blueprint with a UGameplayAbility CDO):
+    Operations (selected through ``op``):
+        - ``inspect`` (default): structured read-only dump.
+          UGameplayAbility (or a Blueprint with a UGameplayAbility CDO)
           returns ability tags, cancel / block / activation owned /
-          activation required / activation blocked tags, source / target
-          required / blocked tags, cost + cooldown gameplay-effect class
-          paths, and any AbilityTriggers.
-        - UGameplayEffect (or a Blueprint with a UGameplayEffect CDO):
-          returns DurationPolicy, DurationMagnitude /
-          MaxDurationMagnitude when Has-Duration, the modifier list
-          (each with attribute name + owning AttributeSet class +
-          ModifierOp + literal magnitude when scalable),
+          required / blocked tags, source / target required / blocked
+          tags, cost + cooldown gameplay-effect class paths, and any
+          AbilityTriggers. UGameplayEffect (or a Blueprint with a
+          UGameplayEffect CDO) returns DurationPolicy, DurationMagnitude
+          / MaxDurationMagnitude when Has-Duration, the modifier list,
           executions list, GameplayCues, and the cached asset / granted
-          / blocked-ability tag containers through the public
-          accessors that the GE component model migrated to in 5.3+.
-        - UAttributeSet (or a Blueprint with a UAttributeSet CDO):
-          walks the CDO's FProperty list filtering on
-          ``FGameplayAttribute::IsSupportedProperty`` and returns each
-          attribute's name, CPP type, base / current default value, and
-          storage mode (legacy float vs. FGameplayAttributeData).
+          / blocked-ability tag containers through the public accessors
+          that the GE component model migrated to in 5.3+. UAttributeSet
+          (or a Blueprint with a UAttributeSet CDO) walks the CDO's
+          FProperty list filtering on
+          ``FGameplayAttribute::IsSupportedProperty``.
+        - ``create_gameplay_ability``: NewObject's a UBlueprint at a
+          ``/Game/...`` path with a UGameplayAbility-derived parent
+          class (default ``/Script/GameplayAbilities.GameplayAbility``).
+          Compiles and saves by default.
+        - ``create_gameplay_effect``: NewObject's a UBlueprint at a
+          ``/Game/...`` path with a UGameplayEffect-derived parent
+          class (default ``/Script/GameplayAbilities.GameplayEffect``).
+          Optional ``duration_policy`` (``instant`` / ``has_duration`` /
+          ``infinite``) plus an optional ``duration_magnitude`` (literal
+          float on a HasDuration effect's ScalableFloat magnitude) write
+          through the CDO before the first compile.
+        - ``set_gameplay_tags``: tag-container mutation on either asset
+          shape. UGameplayAbility writes through the reflected
+          ``AbilityTags`` / ``CancelAbilitiesWithTag`` /
+          ``BlockAbilitiesWithTag`` / ``ActivationOwnedTags`` /
+          ``ActivationRequiredTags`` / ``ActivationBlockedTags`` /
+          ``SourceRequiredTags`` / ``SourceBlockedTags`` /
+          ``TargetRequiredTags`` / ``TargetBlockedTags`` UPROPERTY
+          fields. UGameplayEffect routes through
+          ``FindOrAddComponent<UAssetTagsGameplayEffectComponent>`` /
+          ``UTargetTagsGameplayEffectComponent`` /
+          ``UBlockAbilityTagsGameplayEffectComponent`` and calls each
+          component's ``SetAndApplyAssetTagChanges`` /
+          ``SetAndApplyTargetTagChanges`` /
+          ``SetAndApplyBlockedAbilityTagChanges`` mutator so the cached
+          tag-container snapshot on the GE refreshes.
 
-    The edit-side ops (tag mutation, modifier add / remove, cost /
-    cooldown rebind, attribute default override) remain on the backlog.
-    Pairs with ``tag_registry_edit`` so a caller can answer "what tags
-    drive what ability" in two read-only calls.
+    Heavier ops (modifier add / remove, cost / cooldown rebind,
+    attribute default override, GameplayCue authoring) remain on the
+    backlog.
 
     Args:
-        asset: Short asset name or full ``/Game/...`` path. Either a
-            native UGameplayAbility / UGameplayEffect / UAttributeSet
-            class or a Blueprint asset whose generated class is one of
-            those three.
+        asset: Required for ``inspect`` / ``set_gameplay_tags``. Short
+            asset name or full ``/Game/...`` path.
+        op: One of ``inspect`` (default), ``create_gameplay_ability``,
+            ``create_gameplay_effect``, or ``set_gameplay_tags``.
+        path: Required for the create ops. Target ``/Game/...`` package
+            path for the new Blueprint.
+        parent_class: Optional override for the create ops. Accepts a
+            full ``/Script/Module.ClassName`` path, a ``/Game/...``
+            Blueprint class path (auto-suffixed with ``_C``), or a short
+            class name probed against in-memory classes plus a
+            ``/Script/GameplayAbilities.<Name>`` fallback.
+        duration_policy: ``create_gameplay_effect`` only. One of
+            ``instant`` / ``has_duration`` / ``infinite``.
+        duration_magnitude: ``create_gameplay_effect`` only. Literal
+            float, applied as the ScalableFloat magnitude on a
+            HasDuration effect.
+        tags: ``set_gameplay_tags`` only. Dict whose keys name a tag
+            container on the asset (e.g. ``ability_tags``,
+            ``cancel_abilities_with_tag``, ``asset_tags``,
+            ``granted_tags``, ``blocked_ability_tags``) and whose
+            values are arrays of fully-qualified tag strings.
+        overwrite: Reuse an existing Blueprint at the create-op path
+            instead of erroring. Default False.
+        compile: Compile the Blueprint after the edit. Default True.
+        save: Save the asset after the edit. Default True.
 
     Returns:
-        Dict with ``name`` / ``path`` / ``asset_class`` /
-        ``resolved_class`` / ``resolved_class_path`` /
-        ``is_blueprint``, plus a ``kind`` discriminator
-        (``gameplay_ability`` / ``gameplay_effect`` /
-        ``attribute_set``) and the kind-specific fields above.
+        For ``inspect`` see the read-only slice's contract. For
+        ``create_*`` returns ``operation`` + ``name`` + ``path`` +
+        ``class`` + ``parent_class`` + ``parent_class_short`` +
+        ``compiled`` + ``saved`` (and ``duration_policy_written`` /
+        ``duration_magnitude_written`` for the effect path). For
+        ``set_gameplay_tags`` returns ``operation`` + ``name`` +
+        ``path`` + ``resolved_class`` + ``applied`` + ``skipped`` +
+        ``compiled`` + ``saved``.
     """
     unreal = get_unreal_connection()
     if not unreal:
         return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
+    params: Dict[str, Any] = {}
+    if asset is not None:
+        params["asset"] = asset
+    if op is not None:
+        params["op"] = op
+    if path is not None:
+        params["path"] = path
+    if parent_class is not None:
+        params["parent_class"] = parent_class
+    if duration_policy is not None:
+        params["duration_policy"] = duration_policy
+    if duration_magnitude is not None:
+        params["duration_magnitude"] = duration_magnitude
+    if tags is not None:
+        params["tags"] = tags
+    if overwrite is not None:
+        params["overwrite"] = overwrite
+    if compile is not None:
+        params["compile"] = compile
+    if save is not None:
+        params["save"] = save
+
     try:
-        response = unreal.send_command("gas_edit", {"asset": asset})
+        response = unreal.send_command("gas_edit", params)
         return response or {"success": False, "message": "No response from Unreal"}
     except Exception as e:
         logger.error(f"gas_edit error: {e}")
