@@ -95,6 +95,7 @@
 #include "Commands/SproftAnimationEditCommands.h"
 #include "Commands/SproftFoliageEditCommands.h"
 #include "Commands/SproftPerformanceAuditCommands.h"
+#include "Commands/SproftPieTestBpCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -148,6 +149,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftAnimationEdit = MakeShared<FSproftAnimationEditCommands>();
     SproftFoliageEdit = MakeShared<FSproftFoliageEditCommands>();
     SproftPerformanceAudit = MakeShared<FSproftPerformanceAuditCommands>();
+    SproftPieTestBp = MakeShared<FSproftPieTestBpCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -198,6 +200,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftAnimationEdit.Reset();
     SproftFoliageEdit.Reset();
     SproftPerformanceAudit.Reset();
+    SproftPieTestBp.Reset();
 }
 
 // Initialize subsystem
@@ -560,6 +563,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("performance_audit"))
             {
                 ResultJson = SproftPerformanceAudit->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("pie_test_bp"))
+            {
+                ResultJson = SproftPieTestBp->HandleCommand(CommandType, Params);
             }
             else
             {

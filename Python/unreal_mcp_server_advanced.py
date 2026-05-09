@@ -6262,6 +6262,66 @@ def performance_audit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def pie_test_bp(
+    blueprint: str,
+    assertions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Blueprint-side assertion harness (small variant).
+
+    Runs against a Blueprint asset's CDO without needing a running PIE
+    session. Sits next to ``pie_test_scene`` (which targets actors in
+    the active editor world).
+
+    Currently supports one assertion kind:
+
+        - ``default_value_equals``: ``target`` is a UPROPERTY FName on
+          the Blueprint's generated class (or its parent class).
+          ``expected`` is a JSON literal that is canonicalized through
+          the property's ``ImportText`` -> ``ExportText`` round-trip
+          and compared against the CDO's ``ExportText`` output. Vector
+          / rotator / transform / FString / gameplay tag fields all
+          flow through one path because the canonicalisation happens
+          on the engine side.
+
+    The kinds that need a running PIE session (``function_returns``,
+    ``event_fired``) stay on the backlog; ``pie_test_scene`` already
+    covers actor-instance assertions in the editor world.
+
+    Args:
+        blueprint: Short asset name or full ``/Game/...`` Blueprint
+            path.
+        assertions: List of ``{kind, target, expected}`` specs.
+
+    Returns:
+        Dict with ``blueprint`` + ``blueprint_name`` +
+        ``generated_class``, aggregate counts (``total`` / ``passed``
+        / ``failed`` / ``unsupported`` / ``all_passed``), and a
+        per-assertion ``assertions`` array. Each assertion row carries
+        ``index``, ``kind``, ``target``, ``passed`` flag, and
+        kind-specific fields (``var`` / ``actual`` / ``expected`` /
+        ``expected_raw`` / ``property_class`` / ``expected_imported``
+        for ``default_value_equals``) plus a human-readable
+        ``message``.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {
+        "blueprint": blueprint,
+        "assertions": assertions,
+    }
+
+    try:
+        response = unreal.send_command("pie_test_bp", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"pie_test_bp error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
