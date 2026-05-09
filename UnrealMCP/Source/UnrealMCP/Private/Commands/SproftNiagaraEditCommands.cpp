@@ -3,6 +3,8 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "EditorAssetLibrary.h"
+#include "NiagaraEmitter.h"
+#include "NiagaraEmitterHandle.h"
 #include "NiagaraSystem.h"
 #include "NiagaraSystemFactoryNew.h"
 #include "UObject/Package.h"
@@ -33,6 +35,30 @@ namespace
             OutAssetName = OutAssetName.Left(DotIdx);
         }
     }
+
+    /** Resolve a UObject by `/Game/...` path or short asset name. The
+     *  short-name fallback walks the asset registry filtered to the
+     *  given UClass. */
+    template <typename T>
+    T* ResolveAssetOfClass(const FString& Token)
+    {
+        if (Token.IsEmpty()) return nullptr;
+        if (Token.StartsWith(TEXT("/")))
+        {
+            return Cast<T>(UEditorAssetLibrary::LoadAsset(Token));
+        }
+        FAssetRegistryModule& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        TArray<FAssetData> Found;
+        AssetRegistry.Get().GetAssetsByClass(T::StaticClass()->GetClassPathName(), Found, /*bSearchSubClasses=*/true);
+        for (const FAssetData& Data : Found)
+        {
+            if (Data.AssetName.ToString().Equals(Token, ESearchCase::IgnoreCase))
+            {
+                return Cast<T>(Data.GetAsset());
+            }
+        }
+        return nullptr;
+    }
 }
 
 FSproftNiagaraEditCommands::FSproftNiagaraEditCommands()
@@ -57,8 +83,12 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleCreateSystem(Params);
     }
+    if (Op.Equals(TEXT("add_emitter_from_asset"), ESearchCase::IgnoreCase))
+    {
+        return HandleAddEmitterFromAsset(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -139,4 +169,96 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSh
         TEXT("System has no emitters; the Niagara editor will surface a 'no emitter' warning. "
              "Emitter authoring stays on the BACKLOG for this minimum-cut slice."));
     return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleAddEmitterFromAsset(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString EmitterToken;
+    if (!Params->TryGetStringField(TEXT("emitter"), EmitterToken)
+        && !Params->TryGetStringField(TEXT("emitter_path"), EmitterToken)
+        && !Params->TryGetStringField(TEXT("source_emitter"), EmitterToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'emitter' parameter"));
+    }
+    UNiagaraEmitter* SourceEmitter = ResolveAssetOfClass<UNiagaraEmitter>(EmitterToken);
+    if (!SourceEmitter)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraEmitter '%s'"), *EmitterToken));
+    }
+
+    // Pick the system-side display name. Default mirrors the source
+    // emitter's GetName() so the system surfaces a designer-readable
+    // row in the emitter list.
+    FString HandleNameStr;
+    Params->TryGetStringField(TEXT("handle_name"), HandleNameStr);
+    if (HandleNameStr.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("name"), HandleNameStr);
+    }
+    if (HandleNameStr.IsEmpty())
+    {
+        HandleNameStr = SourceEmitter->GetName();
+    }
+
+    // Resolve the version GUID. Default to the source emitter's
+    // currently exposed version so the system pulls the active branch.
+    const FNiagaraAssetVersion ExposedVersion = SourceEmitter->GetExposedVersion();
+    FGuid VersionGuid = ExposedVersion.VersionGuid;
+    FString VersionToken;
+    if (Params->TryGetStringField(TEXT("version_guid"), VersionToken) && !VersionToken.IsEmpty())
+    {
+        FGuid Parsed;
+        if (FGuid::Parse(VersionToken, Parsed))
+        {
+            VersionGuid = Parsed;
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    FNiagaraEmitterHandle NewHandle = System->AddEmitterHandle(*SourceEmitter, FName(*HandleNameStr), VersionGuid);
+    if (!NewHandle.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UNiagaraSystem::AddEmitterHandle returned an invalid handle for source emitter '%s'"),
+                *SourceEmitter->GetPathName()));
+    }
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("add_emitter_from_asset"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("source_emitter"), SourceEmitter->GetPathName());
+    Out->SetStringField(TEXT("handle_name"), NewHandle.GetName().ToString());
+    Out->SetStringField(TEXT("handle_id"), NewHandle.GetId().ToString());
+    Out->SetStringField(TEXT("version_guid"), VersionGuid.ToString());
+    Out->SetNumberField(TEXT("emitter_count"), System->GetEmitterHandles().Num());
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit add_emitter_from_asset requires WITH_EDITORONLY_DATA"));
+#endif
 }

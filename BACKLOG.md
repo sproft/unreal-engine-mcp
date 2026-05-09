@@ -1003,17 +1003,23 @@ ability" alongside `tag_registry_edit`.
   `max_materials`. Adds `GeometryCollectionEngine` + `Chaos` to
   PublicDependencyModuleNames. Edit-side ops (the fracture /
   authoring write side, dataflow driver) remain on the backlog.
-- `niagara_edit` (small, ultra-minimum cut) — one op:
-  `create_niagara_system`. NewObject's a `UNiagaraSystem` at a
-  `/Game/...` path through
+- `niagara_edit` (small, system + emitter authoring) — two ops
+  keyed by `op`. Default op `create_niagara_system` NewObject's a
+  `UNiagaraSystem` at a `/Game/...` path through
   `UNiagaraSystemFactoryNew::InitializeSystem(System, /*bCreateDefaultNodes=*/false)`.
-  No emitters, no parameter store mutations, no module / sim-stage
-  authoring. The bar this slice clears is "the persistent four-skip
-  is broken"; the broader Niagara authoring surface stays on this
-  list. Editor-side warning: a Niagara System with no emitters
-  opens cleanly in the Niagara editor but produces a "no emitter"
-  warning in the asset's status banner. That is by design for this
-  minimum-cut slice. Adds `NiagaraEditor` to the editor-only
+  A system with no emitters opens cleanly in the Niagara editor
+  but surfaces a "no emitter" warning in the asset's status
+  banner. New op `add_emitter_from_asset` resolves an existing
+  system and an existing `UNiagaraEmitter` and routes through
+  the editor-only `UNiagaraSystem::AddEmitterHandle(SourceEmitter,
+  HandleName, VersionGuid)` overload. The emitter handle display
+  name defaults to the source emitter's `GetName()`; the version
+  GUID defaults to the source emitter's currently exposed version
+  (`UNiagaraEmitter::GetExposedVersion().VersionGuid`). Saves the
+  system to disk by default unless `save=false`. The broader
+  authoring surface (parameter store mutations, module / sim-stage
+  authoring, sim-target / determinism flag writes, request-compile)
+  stays on this list. Adds `NiagaraEditor` to the editor-only
   `PrivateDependencyModuleNames` for the `InitializeSystem`
   linkage; we deliberately bypass the
   `bCreateDefaultNodes=true` path so we never have to pull

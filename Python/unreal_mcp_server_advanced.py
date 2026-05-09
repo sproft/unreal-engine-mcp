@@ -6821,52 +6821,89 @@ def chaos_edit(
 
 @mcp.tool()
 def niagara_edit(
-    path: str,
+    path: Optional[str] = None,
     op: Optional[str] = None,
     overwrite: Optional[bool] = None,
     save: Optional[bool] = None,
+    system: Optional[str] = None,
+    emitter: Optional[str] = None,
+    handle_name: Optional[str] = None,
+    version_guid: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Niagara system authoring (ultra-minimum cut).
+    Niagara system + emitter authoring.
 
-    One op: ``create_niagara_system``. Spawns a ``UNiagaraSystem``
-    asset at a ``/Game/...`` path through
-    ``UNiagaraSystemFactoryNew::InitializeSystem`` with no emitters
-    and no default nodes. The bar this slice clears is "the
-    persistent four-skip is broken"; the broader Niagara authoring
-    surface (emitter authoring, parameter store, modules,
-    simulation stages) stays in BACKLOG.md.
+    Two ops keyed by ``op``:
+        - ``create_niagara_system`` (default, ultra-minimum cut):
+          spawns a ``UNiagaraSystem`` asset at a ``/Game/...`` path
+          through ``UNiagaraSystemFactoryNew::InitializeSystem`` with
+          no emitters and no default nodes. The bar this slice
+          clears is "the persistent four-skip is broken". A system
+          with no emitters opens cleanly in the Niagara editor but
+          surfaces a "no emitter" warning in the asset's status
+          banner.
+        - ``add_emitter_from_asset``: resolves an existing
+          ``UNiagaraSystem`` and an existing ``UNiagaraEmitter`` and
+          routes through ``UNiagaraSystem::AddEmitterHandle``.
+          The emitter handle's display name defaults to the source
+          emitter's ``GetName()`` and the version GUID defaults to
+          the source emitter's currently exposed version.
 
-    Editor-side warning: a Niagara System with no emitters opens
-    cleanly in the Niagara editor but produces a "no emitter"
-    warning in the asset's status banner. That is by design for
-    this minimum-cut slice.
+    The broader authoring surface (parameter store, modules,
+    simulation stages, sim-target / determinism flag writes) stays
+    in BACKLOG.md.
 
     Args:
-        path: ``/Game/...`` package path. Required.
-        op: Operation discriminator. Only
-            ``create_niagara_system`` (default) is supported.
-        overwrite: Replace an existing asset at the path. Default
-            False.
-        save: Save the new asset to disk. Default True.
+        path: create_niagara_system: ``/Game/...`` package path.
+        op: Operation discriminator. ``create_niagara_system`` /
+            ``add_emitter_from_asset``. Default
+            ``create_niagara_system``.
+        overwrite: create_niagara_system: replace an existing asset
+            at the path. Default False.
+        save: Save the new / mutated asset to disk. Default True.
+        system: add_emitter_from_asset: ``/Game/...`` path or short
+            name of an existing UNiagaraSystem.
+        emitter: add_emitter_from_asset: ``/Game/...`` path or
+            short name of an existing UNiagaraEmitter to copy in.
+        handle_name: add_emitter_from_asset: optional system-side
+            display name for the new emitter handle. Defaults to
+            the source emitter's ``GetName()``.
+        version_guid: add_emitter_from_asset: optional emitter
+            version GUID. Defaults to the source emitter's
+            currently exposed version.
 
     Returns:
-        Dict with ``operation``, ``name``, ``path``, ``class``,
-        ``saved`` flag, ``has_emitters`` (always False on this
-        slice), and an ``editor_warning`` documenting the
-        "no emitter" status banner.
+        For ``create_niagara_system``: dict with ``operation``,
+        ``name``, ``path``, ``class``, ``saved``, ``has_emitters``,
+        plus an ``editor_warning`` documenting the "no emitter"
+        status banner.
+        For ``add_emitter_from_asset``: dict with ``operation``,
+        ``system``, ``source_emitter``, ``handle_name``, ``handle_id``
+        (the handle's GUID string), ``version_guid``,
+        ``emitter_count`` (the system's total emitter count after
+        the add), and ``saved``.
     """
     unreal = get_unreal_connection()
     if not unreal:
         return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
-    params: Dict[str, Any] = {"path": path}
+    params: Dict[str, Any] = {}
+    if path is not None:
+        params["path"] = path
     if op is not None:
         params["op"] = op
     if overwrite is not None:
         params["overwrite"] = overwrite
     if save is not None:
         params["save"] = save
+    if system is not None:
+        params["system"] = system
+    if emitter is not None:
+        params["emitter"] = emitter
+    if handle_name is not None:
+        params["handle_name"] = handle_name
+    if version_guid is not None:
+        params["version_guid"] = version_guid
 
     try:
         response = unreal.send_command("niagara_edit", params)
