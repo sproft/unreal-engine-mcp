@@ -5210,53 +5210,74 @@ def bp_export(
 @mcp.tool()
 def behavior_tree(
     tree: str,
+    op: Optional[str] = None,
     include_blackboard: Optional[bool] = None,
     include_decorators: Optional[bool] = None,
     include_services: Optional[bool] = None,
     max_depth: Optional[int] = None,
+    blackboard: Optional[str] = None,
+    composite_class: Optional[str] = None,
+    overwrite: Optional[bool] = None,
+    replace: Optional[bool] = None,
+    save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Read-only structured dump of a UBehaviorTree asset.
+    Multi-op tool over a UBehaviorTree asset.
 
-    Returns the full tree structure (composite root + recursive children
-    + decorators per child + services per composite), the linked
-    Blackboard data asset path, and the Blackboard's key list (each
-    name + type + sync flag + parent-inherited flag, with the inner
-    BaseClass / EnumType / DefaultValue struct for typed Object / Class
-    / Enum / Struct keys). Symmetric with ``niagara_inspect`` for AI
-    assets. The edit side (re-rooting, decorator insertion, blackboard
-    key edits) lives on the backlog.
+    Operations (selected through ``op``):
+        - ``inspect`` (default): structured read-only dump of an
+          existing tree (composite root + recursive children +
+          decorators per child + services per composite + linked
+          Blackboard key list).
+        - ``create_behavior_tree``: create a new UBehaviorTree at a
+          ``/Game/...`` package path with an optional linked
+          Blackboard.
+        - ``add_root_composite``: assign a Selector / Sequence /
+          SimpleParallel as the tree's RootNode. Used right after
+          ``create_behavior_tree`` to land a usable empty tree.
+
+    Edit-slice future work (append child task / composite, insert
+    decorator, append service, blackboard key edits) stays on the
+    backlog.
 
     Args:
         tree: Short asset name or full ``/Game/...`` Behavior Tree
-            path.
-        include_blackboard: Include the linked Blackboard's key list.
-            Default True.
-        include_decorators: Include each composite-child's decorator
-            chain plus the tree-level RootDecorators. Default True.
-        include_services: Include each composite's service chain.
-            Default True.
-        max_depth: Cap on the recursive walk. Default 32. Reaching the
-            cap sets ``children_truncated: true`` on the offending
-            composite and skips its children.
+            path. For ``create_behavior_tree`` this is the target
+            package path; for ``inspect`` / ``add_root_composite`` it
+            is the existing asset path.
+        op: One of ``inspect`` (default), ``create_behavior_tree``,
+            or ``add_root_composite``.
+        include_blackboard / include_decorators / include_services /
+            max_depth: ``inspect``-only flags. See the read-only slice
+            for details.
+        blackboard: ``create_behavior_tree``-only optional
+            ``/Game/...`` UBlackboardData path to link as the new
+            tree's BlackboardAsset.
+        composite_class: ``add_root_composite``-only token. One of
+            ``selector`` / ``sequence`` / ``simple_parallel``
+            (case-insensitive); a full UClass path is also accepted
+            for any UBTCompositeNode subclass.
+        overwrite: ``create_behavior_tree``-only flag. Replace an
+            existing asset at the path. Default False.
+        replace: ``add_root_composite``-only flag. Replace an existing
+            RootNode. Default False; the call errors out if a
+            RootNode is already present and ``replace=False``.
+        save: Save the asset after the edit. Default True for both
+            edit ops.
 
     Returns:
-        Dict with ``name``, ``path``, ``class``, ``root_decorators``
-        array (when requested), ``root_node`` (a recursive composite
-        descriptor with ``name``, ``class``, ``class_path``, ``kind``,
-        ``depth``, optional ``finish_mode`` for SimpleParallel,
-        ``services`` array, and ``children`` array of
-        ``{decorators, node}`` rows where each ``node`` is either a
-        composite or a task), and the Blackboard side
-        (``blackboard_path``, ``blackboard_name``, optional
-        ``blackboard_parent_path``, ``blackboard_keys`` array, and
-        ``blackboard_has_synced_keys``).
+        For ``inspect`` see the read-only slice's contract. For the
+        edit ops, a dict with ``operation``, ``name`` / ``path`` /
+        ``class``, the input echo (``composite_class`` /
+        ``blackboard_path`` etc.), and the ``saved`` flag.
     """
     unreal = get_unreal_connection()
     if not unreal:
         return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
     params: Dict[str, Any] = {"tree": tree}
+    if op is not None:
+        params["op"] = op
     if include_blackboard is not None:
         params["include_blackboard"] = include_blackboard
     if include_decorators is not None:
@@ -5265,6 +5286,16 @@ def behavior_tree(
         params["include_services"] = include_services
     if max_depth is not None:
         params["max_depth"] = max_depth
+    if blackboard is not None:
+        params["blackboard"] = blackboard
+    if composite_class is not None:
+        params["composite_class"] = composite_class
+    if overwrite is not None:
+        params["overwrite"] = overwrite
+    if replace is not None:
+        params["replace"] = replace
+    if save is not None:
+        params["save"] = save
 
     try:
         response = unreal.send_command("behavior_tree", params)

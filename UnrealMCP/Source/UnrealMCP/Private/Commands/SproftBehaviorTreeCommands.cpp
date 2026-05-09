@@ -1,6 +1,7 @@
 #include "Commands/SproftBehaviorTreeCommands.h"
 #include "Commands/EpicUnrealMCPCommonUtils.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BTCompositeNode.h"
 #include "BehaviorTree/BTDecorator.h"
@@ -13,9 +14,12 @@
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Class.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Enum.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Struct.h"
+#include "BehaviorTree/Composites/BTComposite_Selector.h"
+#include "BehaviorTree/Composites/BTComposite_Sequence.h"
 #include "BehaviorTree/Composites/BTComposite_SimpleParallel.h"
 #include "EditorAssetLibrary.h"
 #include "UObject/Class.h"
+#include "UObject/Package.h"
 
 namespace
 {
@@ -199,6 +203,74 @@ namespace
         Row->SetNumberField(TEXT("depth"), Depth);
         return Row;
     }
+
+    /** Split a `/Game/Subdir/AssetName` path into directory + asset
+     *  name. Mirrors the helper in `SproftAssetFactoryCommands` so the
+     *  edit slice does not fight the asset-creation flow. */
+    void SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
+    {
+        FString Trim = InPath;
+        Trim.TrimEndInline();
+        Trim.RemoveFromEnd(TEXT("/"));
+
+        int32 LastSlash = INDEX_NONE;
+        if (Trim.FindLastChar('/', LastSlash))
+        {
+            OutPackageDir = Trim.Left(LastSlash + 1);
+            OutAssetName = Trim.Mid(LastSlash + 1);
+        }
+        else
+        {
+            OutPackageDir = TEXT("/Game/");
+            OutAssetName = Trim;
+        }
+
+        int32 DotIdx = INDEX_NONE;
+        if (OutAssetName.FindChar('.', DotIdx))
+        {
+            OutAssetName = OutAssetName.Left(DotIdx);
+        }
+    }
+
+    /** Resolve the small set of root-composite classes the edit slice
+     *  ships, plus an escape hatch for any UBTCompositeNode subclass
+     *  loaded by full UClass path. */
+    UClass* ResolveCompositeClass(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        FString Lower = Token.ToLower();
+        if (Lower == TEXT("selector") || Lower == TEXT("btcomposite_selector"))
+        {
+            return UBTComposite_Selector::StaticClass();
+        }
+        if (Lower == TEXT("sequence") || Lower == TEXT("btcomposite_sequence"))
+        {
+            return UBTComposite_Sequence::StaticClass();
+        }
+        if (Lower == TEXT("simple_parallel") || Lower == TEXT("simpleparallel")
+            || Lower == TEXT("parallel") || Lower == TEXT("btcomposite_simpleparallel"))
+        {
+            return UBTComposite_SimpleParallel::StaticClass();
+        }
+        if (Token.StartsWith(TEXT("/")))
+        {
+            if (UClass* Loaded = LoadClass<UBTCompositeNode>(nullptr, *Token))
+            {
+                return Loaded;
+            }
+        }
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            if (Found->IsChildOf(UBTCompositeNode::StaticClass()))
+            {
+                return Found;
+            }
+        }
+        return nullptr;
+    }
 }
 
 FSproftBehaviorTreeCommands::FSproftBehaviorTreeCommands()
@@ -207,12 +279,31 @@ FSproftBehaviorTreeCommands::FSproftBehaviorTreeCommands()
 
 TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params)
 {
-    if (CommandType == TEXT("behavior_tree"))
+    if (CommandType != TEXT("behavior_tree"))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown behavior_tree command: %s"), *CommandType));
+    }
+    if (!Params.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing params object"));
+    }
+    FString Op;
+    Params->TryGetStringField(TEXT("op"), Op);
+    if (Op.IsEmpty() || Op == TEXT("inspect"))
     {
         return HandleBehaviorTree(Params);
     }
+    if (Op == TEXT("create_behavior_tree"))
+    {
+        return HandleCreateBehaviorTree(Params);
+    }
+    if (Op == TEXT("add_root_composite"))
+    {
+        return HandleAddRootComposite(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unknown behavior_tree command: %s"), *CommandType));
+        FString::Printf(TEXT("behavior_tree: unsupported op '%s'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleBehaviorTree(const TSharedPtr<FJsonObject>& Params)
@@ -354,5 +445,177 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleBehaviorTree(const TS
         Result->SetBoolField(TEXT("has_blackboard"), false);
     }
 
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCreateBehaviorTree(const TSharedPtr<FJsonObject>& Params)
+{
+    FString PackagePath;
+    if (!Params->TryGetStringField(TEXT("tree"), PackagePath)
+        && !Params->TryGetStringField(TEXT("path"), PackagePath)
+        && !Params->TryGetStringField(TEXT("tree_path"), PackagePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'tree' parameter"));
+    }
+    if (!PackagePath.StartsWith(TEXT("/Game/")))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Tree path '%s' must start with /Game/"), *PackagePath));
+    }
+
+    FString PackageDir;
+    FString AssetName;
+    SplitPackagePath(PackagePath, PackageDir, AssetName);
+    if (AssetName.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not derive asset name from '%s'"), *PackagePath));
+    }
+    const FString AssetObjectPath = PackageDir + AssetName;
+
+    bool bOverwrite = false;
+    Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    if (UEditorAssetLibrary::DoesAssetExist(AssetObjectPath) && !bOverwrite)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset already exists: %s (set 'overwrite': true to replace)"),
+                *AssetObjectPath));
+    }
+
+    // Resolve the optional Blackboard before we touch the package so an
+    // unresolvable path errors out early.
+    UBlackboardData* BlackboardAsset = nullptr;
+    FString BlackboardPath;
+    if (Params->TryGetStringField(TEXT("blackboard"), BlackboardPath)
+        || Params->TryGetStringField(TEXT("blackboard_path"), BlackboardPath))
+    {
+        if (!BlackboardPath.IsEmpty())
+        {
+            UObject* Loaded = UEditorAssetLibrary::LoadAsset(BlackboardPath);
+            BlackboardAsset = Cast<UBlackboardData>(Loaded);
+            if (!BlackboardAsset)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Asset at '%s' is not a UBlackboardData"), *BlackboardPath));
+            }
+        }
+    }
+
+    UPackage* Package = CreatePackage(*AssetObjectPath);
+    if (!Package)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to create package at '%s'"), *AssetObjectPath));
+    }
+    Package->FullyLoad();
+
+    UBehaviorTree* Tree = NewObject<UBehaviorTree>(
+        Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+    if (!Tree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create UBehaviorTree"));
+    }
+    if (BlackboardAsset)
+    {
+        Tree->BlackboardAsset = BlackboardAsset;
+    }
+
+    FAssetRegistryModule::AssetCreated(Tree);
+    Package->MarkPackageDirty();
+
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(AssetObjectPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("create_behavior_tree"));
+    Result->SetStringField(TEXT("name"), AssetName);
+    Result->SetStringField(TEXT("path"), AssetObjectPath);
+    Result->SetStringField(TEXT("class"), Tree->GetClass()->GetName());
+    if (BlackboardAsset)
+    {
+        Result->SetStringField(TEXT("blackboard_path"), BlackboardAsset->GetPathName());
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddRootComposite(const TSharedPtr<FJsonObject>& Params)
+{
+    FString TreePath;
+    if (!Params->TryGetStringField(TEXT("tree"), TreePath)
+        && !Params->TryGetStringField(TEXT("tree_path"), TreePath)
+        && !Params->TryGetStringField(TEXT("path"), TreePath)
+        && !Params->TryGetStringField(TEXT("asset"), TreePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'tree' parameter"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(TreePath);
+    UBehaviorTree* Tree = Cast<UBehaviorTree>(Asset);
+    if (!Tree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UBehaviorTree"), *TreePath));
+    }
+
+    FString CompositeToken;
+    if (!Params->TryGetStringField(TEXT("composite_class"), CompositeToken)
+        && !Params->TryGetStringField(TEXT("composite"), CompositeToken)
+        && !Params->TryGetStringField(TEXT("class"), CompositeToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'composite_class' parameter (selector / sequence / simple_parallel)"));
+    }
+    UClass* CompositeClass = ResolveCompositeClass(CompositeToken);
+    if (!CompositeClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unrecognised composite class '%s'. Use 'selector', 'sequence', 'simple_parallel', or a /Script/... UBTCompositeNode subclass path."),
+                *CompositeToken));
+    }
+
+    bool bReplace = false;
+    Params->TryGetBoolField(TEXT("replace"), bReplace);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    if (Tree->RootNode && !bReplace)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Tree '%s' already has a RootNode (%s); pass 'replace': true to overwrite"),
+                *Tree->GetName(), *Tree->RootNode->GetClass()->GetName()));
+    }
+
+    // Outer the new composite under the tree asset so it travels with
+    // the package on save.
+    UBTCompositeNode* NewRoot = NewObject<UBTCompositeNode>(
+        Tree, CompositeClass, NAME_None, RF_Transactional);
+    if (!NewRoot)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to NewObject composite of class '%s'"), *CompositeClass->GetName()));
+    }
+
+    Tree->RootNode = NewRoot;
+    Tree->MarkPackageDirty();
+
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Tree->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_root_composite"));
+    Result->SetStringField(TEXT("tree"), Tree->GetPathName());
+    Result->SetStringField(TEXT("composite_class"), CompositeClass->GetName());
+    Result->SetStringField(TEXT("composite_class_path"), CompositeClass->GetPathName());
+    Result->SetStringField(TEXT("root_node_name"), NewRoot->GetName());
+    Result->SetBoolField(TEXT("saved"), bSave);
+    Result->SetBoolField(TEXT("replaced"), bReplace);
     return Result;
 }
