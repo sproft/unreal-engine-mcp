@@ -84,7 +84,8 @@ public class UnrealMCP : ModuleRules
 					"ToolMenus",           // For editor UI
 					"BlueprintEditorLibrary", // For Blueprint utilities
 					"MaterialEditor",      // For UMaterialEditingLibrary (Sproft material_edit)
-					"GameplayTagsEditor"   // For IGameplayTagsEditorModule (Sproft tag_registry_edit)
+					"GameplayTagsEditor",  // For IGameplayTagsEditorModule (Sproft tag_registry_edit)
+					"AnimationBlueprintLibrary" // For UAnimationBlueprintLibrary (Sproft animation_edit)
 				}
 			);
 		}

@@ -5919,6 +5919,114 @@ def pie_test_scene(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def animation_edit(
+    op: str,
+    asset: str,
+    rate_scale: Optional[float] = None,
+    additive_type: Optional[str] = None,
+    ref_pose_type: Optional[str] = None,
+    ref_pose_seq: Optional[str] = None,
+    ref_frame_index: Optional[int] = None,
+    track: Optional[str] = None,
+    frame: Optional[int] = None,
+    time: Optional[float] = None,
+    notify_class: Optional[str] = None,
+    event_name: Optional[str] = None,
+    duration: Optional[float] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Targeted UAnimSequence / UAnimMontage edits (small variant).
+
+    Multi-op tool keyed by ``op``:
+
+        - ``set_rate_scale``: write ``RateScale`` (float) on a
+          UAnimSequenceBase. Applies to both UAnimSequence and
+          UAnimMontage.
+        - ``set_additive``: toggle the additive shape on a
+          UAnimSequence. Writes ``AdditiveAnimType`` (none /
+          local_space / rotation_offset_mesh_space) plus optional
+          ``ref_pose_type`` (none / ref_pose / anim_scaled /
+          anim_frame), ``ref_pose_seq`` (a ``/Game/...`` UAnimSequence
+          path) and ``ref_frame_index``.
+        - ``add_notify``: append an FAnimNotifyEvent to a notify
+          track on a UAnimSequenceBase. Auto-creates the track when
+          missing. ``notify_class`` resolves to either UAnimNotify
+          or UAnimNotifyState; ``duration`` is required for
+          UAnimNotifyState. When ``notify_class`` is omitted we
+          treat the entry as a custom-event notify (writes
+          ``event_name`` only).
+
+    Args:
+        op: One of ``set_rate_scale`` / ``set_additive`` /
+            ``add_notify``. Required.
+        asset: Short asset name or full ``/Game/...`` path. Required.
+        rate_scale: Float; required for ``set_rate_scale``.
+        additive_type: Token; required for ``set_additive``.
+        ref_pose_type: Optional ref-pose type token for
+            ``set_additive``.
+        ref_pose_seq: Optional ``/Game/...`` UAnimSequence path for
+            ``set_additive``.
+        ref_frame_index: Optional integer frame index for
+            ``set_additive``.
+        track: Notify track FName; required for ``add_notify``.
+        frame: Integer frame index; one of ``frame`` / ``time`` is
+            required for ``add_notify``.
+        time: Float seconds; alternative to ``frame``.
+        notify_class: Optional UAnimNotify or UAnimNotifyState
+            class (short name or full path). When omitted the
+            notify is treated as a custom-event notify.
+        event_name: Optional FName for the custom-event notify.
+        duration: Float seconds; required for UAnimNotifyState
+            subclasses.
+        save: Persist the asset on success. Default True.
+
+    Returns:
+        Op-specific dict. ``set_rate_scale`` reports the previous
+        and new ``rate_scale``; ``set_additive`` reports the
+        resolved enum tokens; ``add_notify`` reports
+        ``track_name``, ``time``, ``notify_class``, ``notify_kind``,
+        ``notify_count``.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"op": op, "asset": asset}
+    if rate_scale is not None:
+        params["rate_scale"] = rate_scale
+    if additive_type is not None:
+        params["additive_type"] = additive_type
+    if ref_pose_type is not None:
+        params["ref_pose_type"] = ref_pose_type
+    if ref_pose_seq is not None:
+        params["ref_pose_seq"] = ref_pose_seq
+    if ref_frame_index is not None:
+        params["ref_frame_index"] = ref_frame_index
+    if track is not None:
+        params["track"] = track
+    if frame is not None:
+        params["frame"] = frame
+    if time is not None:
+        params["time"] = time
+    if notify_class is not None:
+        params["notify_class"] = notify_class
+    if event_name is not None:
+        params["event_name"] = event_name
+    if duration is not None:
+        params["duration"] = duration
+    if save is not None:
+        params["save"] = save
+
+    try:
+        response = unreal.send_command("animation_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"animation_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
