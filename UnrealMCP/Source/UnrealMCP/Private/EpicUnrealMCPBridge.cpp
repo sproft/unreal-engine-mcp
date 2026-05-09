@@ -88,6 +88,7 @@
 #include "Commands/SproftLandscapeInspectCommands.h"
 #include "Commands/SproftFoliageInspectCommands.h"
 #include "Commands/SproftSequencerEditCommands.h"
+#include "Commands/SproftProjectContextCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -134,6 +135,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftLandscapeInspect = MakeShared<FSproftLandscapeInspectCommands>();
     SproftFoliageInspect = MakeShared<FSproftFoliageInspectCommands>();
     SproftSequencerEdit = MakeShared<FSproftSequencerEditCommands>();
+    SproftProjectContext = MakeShared<FSproftProjectContextCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -177,6 +179,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftLandscapeInspect.Reset();
     SproftFoliageInspect.Reset();
     SproftSequencerEdit.Reset();
+    SproftProjectContext.Reset();
 }
 
 // Initialize subsystem
@@ -511,6 +514,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("sequencer_edit"))
             {
                 ResultJson = SproftSequencerEdit->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("project_context"))
+            {
+                ResultJson = SproftProjectContext->HandleCommand(CommandType, Params);
             }
             else
             {

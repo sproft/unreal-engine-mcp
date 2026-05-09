@@ -355,6 +355,29 @@ ability" alongside `tag_registry_edit`.
   `level_filter`. Adds `Foliage` to PublicDependencyModuleNames.
   Edit-side ops (paint, scatter, remove instances) remain on the
   backlog.
+- `project_context` (small, read-only) — one-shot designer summary
+  of the loaded project. Returns project name + uproject path +
+  project dir + content dir, the .uproject metadata (description,
+  category, EngineAssociation, enterprise flag), the full engine
+  version strings plus per-component major / minor / patch /
+  changelist / branch / licensee flag, the current editor level
+  (name + path), the per-level GameMode override + default pawn
+  through `AWorldSettings::DefaultGameMode`, the project-wide
+  GameMapsSettings surface (`default_game_mode_class_project`,
+  `default_game_map`, `transition_map`, `editor_startup_map`,
+  `game_instance_class`), an `enabled_plugins` array filtered by
+  default to project / external / mod / enterprise plugins (each
+  entry with name + friendly_name + type + location + version +
+  version_name + category + description + created_by +
+  engine_version + can_contain_content + is_beta + is_experimental
+  + base_dir; engine plugins opt-in through
+  `include_engine_plugins=true`), a `source_modules` array from
+  the .uproject (name + type + loading_phase), and a
+  `content_roots` array of every immediate `/Game/*` subfolder
+  with a recursive asset count through `IAssetRegistry::GetAssets`.
+  Pairs with `scene_brief` for the orientation pass: one tells
+  the agent what project it is in, the other tells it what level
+  it is in. Adds EngineSettings to PublicDependencyModuleNames.
 - `sequencer_edit` (small, read-only first slice) — `inspect` op
   on a `sequencer_edit` umbrella that resolves a target
   `ULevelSequence` (or any UMovieSceneSequence subclass) and
@@ -512,7 +535,16 @@ helpers.
   category support beyond the current package-only walk, return-by-
   level grouping when the seed package is a level, and a `dot_graph`
   output mode for one-shot rendering of the dependency closure.
-- `project_context` — project settings, plugins, content roots.
+- `project_context` (small variant ships in this fork) — one-shot
+  read-only project summary covering identity, engine version,
+  enabled plugins (filtered to user-installed by default), source
+  modules from the .uproject, top-level Content folders with
+  recursive asset counts, and the active map + GameMode +
+  default pawn (per-level override and project-wide). Open
+  follow-ons: per-plugin module list (descriptor's `Modules` array)
+  beyond the project's modules, project-wide tag categories /
+  feature packs surface, and an `additional_plugin_directories`
+  array exposing the .uproject's external plugin search paths.
 
 ## Materials & shading (large)
 

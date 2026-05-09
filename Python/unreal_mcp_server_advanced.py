@@ -5547,6 +5547,91 @@ def sequencer_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def project_context(
+    op: Optional[str] = None,
+    include_plugins: Optional[bool] = None,
+    include_modules: Optional[bool] = None,
+    include_content_roots: Optional[bool] = None,
+    include_engine_plugins: Optional[bool] = None,
+    content_roots_recursive_count: Optional[bool] = None,
+    max_content_roots: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only one-shot summary of the loaded Unreal project.
+
+    Designer-readable handle for "what kind of project am I in" before
+    chasing assets. Returns project name + uproject path, engine
+    version, the .uproject's user-installed plugins, the source-module
+    list, the top-level Content folders with asset counts, the current
+    level path, and the GameMode + default pawn (per-level override
+    plus project-wide default).
+
+    Args:
+        op: Operation discriminator. Only ``context`` (default) is
+            supported in this slice.
+        include_plugins: Emit ``enabled_plugins``. Default True.
+        include_modules: Emit ``source_modules``. Default True.
+        include_content_roots: Emit ``content_roots``. Default True.
+        include_engine_plugins: Include engine-shipped plugins in the
+            plugins array. Default False; we filter to project / external
+            / mod / enterprise plugins so the response is bounded.
+        content_roots_recursive_count: Count assets recursively under
+            each top-level folder. Default True.
+        max_content_roots: Cap on the content-roots emission. Default
+            64.
+
+    Returns:
+        Dict with ``project_name``, ``uproject_path``, ``project_dir``,
+        ``project_content_dir``, optional ``project_description`` /
+        ``project_category`` / ``engine_association`` /
+        ``is_enterprise_project``, ``engine_version`` /
+        ``engine_compatible_version`` / ``engine_major`` /
+        ``engine_minor`` / ``engine_patch`` / ``engine_changelist`` /
+        ``engine_branch`` / ``engine_is_licensee``,
+        ``current_level_name`` / ``current_level_path``,
+        optional ``default_game_mode_class`` /
+        ``default_pawn_class`` (per-level override) and
+        ``default_game_mode_class_project`` /
+        ``default_game_map`` / ``transition_map`` /
+        ``editor_startup_map`` / ``game_instance_class``,
+        ``enabled_plugins`` (with per-plugin ``name`` / ``friendly_name``
+        / ``type`` / ``location`` / ``version`` / ``version_name`` /
+        ``category`` / ``description`` / ``created_by`` /
+        ``engine_version`` / ``can_contain_content`` / ``is_beta`` /
+        ``is_experimental`` / ``base_dir``), ``source_modules`` (per
+        module ``name`` / ``type`` / ``loading_phase``),
+        ``content_roots`` (per root ``name`` / ``path`` /
+        ``asset_count``).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {}
+    if op is not None:
+        params["op"] = op
+    if include_plugins is not None:
+        params["include_plugins"] = include_plugins
+    if include_modules is not None:
+        params["include_modules"] = include_modules
+    if include_content_roots is not None:
+        params["include_content_roots"] = include_content_roots
+    if include_engine_plugins is not None:
+        params["include_engine_plugins"] = include_engine_plugins
+    if content_roots_recursive_count is not None:
+        params["content_roots_recursive_count"] = content_roots_recursive_count
+    if max_content_roots is not None:
+        params["max_content_roots"] = max_content_roots
+
+    try:
+        response = unreal.send_command("project_context", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"project_context error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
