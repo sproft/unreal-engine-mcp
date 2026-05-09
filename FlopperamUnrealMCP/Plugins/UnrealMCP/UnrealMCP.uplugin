@@ -30,6 +30,42 @@
 		{
 			"Name": "EditorScriptingUtilities",
 			"Enabled": true
+		},
+		{
+			"Name": "EnhancedInput",
+			"Enabled": true
+		},
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true
+		},
+		{
+			"Name": "Niagara",
+			"Enabled": true
+		},
+		{
+			"Name": "Metasound",
+			"Enabled": true
+		},
+		{
+			"Name": "IKRig",
+			"Enabled": true
+		},
+		{
+			"Name": "PCG",
+			"Enabled": true
+		},
+		{
+			"Name": "GameplayAbilities",
+			"Enabled": true
+		},
+		{
+			"Name": "GameplayTagsEditor",
+			"Enabled": true
+		},
+		{
+			"Name": "GeometryCollectionPlugin",
+			"Enabled": true
 		}
 	]
-} 
+}

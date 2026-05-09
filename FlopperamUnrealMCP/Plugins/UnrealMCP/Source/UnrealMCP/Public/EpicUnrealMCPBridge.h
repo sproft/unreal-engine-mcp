@@ -11,6 +11,61 @@
 #include "Commands/EpicUnrealMCPEditorCommands.h"
 #include "Commands/EpicUnrealMCPBlueprintCommands.h"
 #include "Commands/EpicUnrealMCPBlueprintGraphCommands.h"
+#include "Commands/SproftEditorActionsCommands.h"
+#include "Commands/SproftWindowCaptureCommands.h"
+#include "Commands/SproftAssetFactoryCommands.h"
+#include "Commands/SproftWidgetEditCommands.h"
+#include "Commands/SproftEditorLogCommands.h"
+#include "Commands/SproftBpInputCommands.h"
+#include "Commands/SproftWidgetInspectCommands.h"
+#include "Commands/SproftBpComponentCommands.h"
+#include "Commands/SproftSceneQueryCommands.h"
+#include "Commands/SproftMaterialEditCommands.h"
+#include "Commands/SproftActorInspectCommands.h"
+#include "Commands/SproftSceneComposeCommands.h"
+#include "Commands/SproftPythonExecutionCommands.h"
+#include "Commands/SproftSceneBriefCommands.h"
+#include "Commands/SproftLevelInspectCommands.h"
+#include "Commands/SproftTagRegistryEditCommands.h"
+#include "Commands/SproftBpCreateCommands.h"
+#include "Commands/SproftBpBriefCommands.h"
+#include "Commands/SproftBpInspectCommands.h"
+#include "Commands/SproftBpVariableCommands.h"
+#include "Commands/SproftBpClassCommands.h"
+#include "Commands/SproftBpGraphCommands.h"
+#include "Commands/SproftBpNodesCommands.h"
+#include "Commands/SproftBpWireCommands.h"
+#include "Commands/SproftBpCommitCommands.h"
+#include "Commands/SproftBpFunctionCreateCommands.h"
+#include "Commands/SproftNiagaraInspectCommands.h"
+#include "Commands/SproftMaterialInspectCommands.h"
+#include "Commands/SproftSearchAssetsCommands.h"
+#include "Commands/SproftAssetReferencesCommands.h"
+#include "Commands/SproftBpExportCommands.h"
+#include "Commands/SproftBehaviorTreeCommands.h"
+#include "Commands/SproftGasEditCommands.h"
+#include "Commands/SproftLandscapeInspectCommands.h"
+#include "Commands/SproftFoliageInspectCommands.h"
+#include "Commands/SproftSequencerEditCommands.h"
+#include "Commands/SproftProjectContextCommands.h"
+#include "Commands/SproftAnimationInspectCommands.h"
+#include "Commands/SproftCppSourceCommands.h"
+#include "Commands/SproftPieTestSceneCommands.h"
+#include "Commands/SproftAnimationEditCommands.h"
+#include "Commands/SproftFoliageEditCommands.h"
+#include "Commands/SproftPerformanceAuditCommands.h"
+#include "Commands/SproftPieTestBpCommands.h"
+#include "Commands/SproftMetaSoundEditCommands.h"
+#include "Commands/SproftUnrealApiCommands.h"
+#include "Commands/SproftSoundAssetEditCommands.h"
+#include "Commands/SproftIkRetargetCommands.h"
+#include "Commands/SproftIkRigEditCommands.h"
+#include "Commands/SproftChaosEditCommands.h"
+#include "Commands/SproftNiagaraEditCommands.h"
+#include "Commands/SproftLandscapeEditCommands.h"
+#include "Commands/SproftPcgGraphEditCommands.h"
+#include "Commands/SproftNiagaraScriptEditCommands.h"
+#include "Commands/SproftAnimationGraphEditCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -57,4 +112,60 @@ private:
 	TSharedPtr<FEpicUnrealMCPEditorCommands> EditorCommands;
 	TSharedPtr<FEpicUnrealMCPBlueprintCommands> BlueprintCommands;
 	TSharedPtr<FEpicUnrealMCPBlueprintGraphCommands> BlueprintGraphCommands;
-}; 
+	// Sproft fork additions: lower-level primitives mirroring the hosted Flop tools
+	TSharedPtr<FSproftEditorActionsCommands> SproftEditorActions;
+	TSharedPtr<FSproftWindowCaptureCommands> SproftWindowCapture;
+	TSharedPtr<FSproftAssetFactoryCommands> SproftAssetFactory;
+	TSharedPtr<FSproftWidgetEditCommands> SproftWidgetEdit;
+	TSharedPtr<FSproftEditorLogCommands> SproftEditorLog;
+	TSharedPtr<FSproftBpInputCommands> SproftBpInput;
+	TSharedPtr<FSproftWidgetInspectCommands> SproftWidgetInspect;
+	TSharedPtr<FSproftBpComponentCommands> SproftBpComponent;
+	TSharedPtr<FSproftSceneQueryCommands> SproftSceneQuery;
+	TSharedPtr<FSproftMaterialEditCommands> SproftMaterialEdit;
+	TSharedPtr<FSproftActorInspectCommands> SproftActorInspect;
+	TSharedPtr<FSproftSceneComposeCommands> SproftSceneCompose;
+	TSharedPtr<FSproftPythonExecutionCommands> SproftPythonExecution;
+	TSharedPtr<FSproftSceneBriefCommands> SproftSceneBrief;
+	TSharedPtr<FSproftLevelInspectCommands> SproftLevelInspect;
+	TSharedPtr<FSproftTagRegistryEditCommands> SproftTagRegistryEdit;
+	TSharedPtr<FSproftBpCreateCommands> SproftBpCreate;
+	TSharedPtr<FSproftBpBriefCommands> SproftBpBrief;
+	TSharedPtr<FSproftBpInspectCommands> SproftBpInspect;
+	TSharedPtr<FSproftBpVariableCommands> SproftBpVariable;
+	TSharedPtr<FSproftBpClassCommands> SproftBpClass;
+	TSharedPtr<FSproftBpGraphCommands> SproftBpGraph;
+	TSharedPtr<FSproftBpNodesCommands> SproftBpNodes;
+	TSharedPtr<FSproftBpWireCommands> SproftBpWire;
+	TSharedPtr<FSproftBpCommitCommands> SproftBpCommit;
+	TSharedPtr<FSproftBpFunctionCreateCommands> SproftBpFunctionCreate;
+	TSharedPtr<FSproftNiagaraInspectCommands> SproftNiagaraInspect;
+	TSharedPtr<FSproftMaterialInspectCommands> SproftMaterialInspect;
+	TSharedPtr<FSproftSearchAssetsCommands> SproftSearchAssets;
+	TSharedPtr<FSproftAssetReferencesCommands> SproftAssetReferences;
+	TSharedPtr<FSproftBpExportCommands> SproftBpExport;
+	TSharedPtr<FSproftBehaviorTreeCommands> SproftBehaviorTree;
+	TSharedPtr<FSproftGasEditCommands> SproftGasEdit;
+	TSharedPtr<FSproftLandscapeInspectCommands> SproftLandscapeInspect;
+	TSharedPtr<FSproftFoliageInspectCommands> SproftFoliageInspect;
+	TSharedPtr<FSproftSequencerEditCommands> SproftSequencerEdit;
+	TSharedPtr<FSproftProjectContextCommands> SproftProjectContext;
+	TSharedPtr<FSproftAnimationInspectCommands> SproftAnimationInspect;
+	TSharedPtr<FSproftCppSourceCommands> SproftCppSource;
+	TSharedPtr<FSproftPieTestSceneCommands> SproftPieTestScene;
+	TSharedPtr<FSproftAnimationEditCommands> SproftAnimationEdit;
+	TSharedPtr<FSproftFoliageEditCommands> SproftFoliageEdit;
+	TSharedPtr<FSproftPerformanceAuditCommands> SproftPerformanceAudit;
+	TSharedPtr<FSproftPieTestBpCommands> SproftPieTestBp;
+	TSharedPtr<FSproftMetaSoundEditCommands> SproftMetaSoundEdit;
+	TSharedPtr<FSproftUnrealApiCommands> SproftUnrealApi;
+	TSharedPtr<FSproftSoundAssetEditCommands> SproftSoundAssetEdit;
+	TSharedPtr<FSproftIkRetargetCommands> SproftIkRetarget;
+	TSharedPtr<FSproftIkRigEditCommands> SproftIkRigEdit;
+	TSharedPtr<FSproftChaosEditCommands> SproftChaosEdit;
+	TSharedPtr<FSproftNiagaraEditCommands> SproftNiagaraEdit;
+	TSharedPtr<FSproftLandscapeEditCommands> SproftLandscapeEdit;
+	TSharedPtr<FSproftPcgGraphEditCommands> SproftPcgGraphEdit;
+	TSharedPtr<FSproftNiagaraScriptEditCommands> SproftNiagaraScriptEdit;
+	TSharedPtr<FSproftAnimationGraphEditCommands> SproftAnimationGraphEdit;
+};

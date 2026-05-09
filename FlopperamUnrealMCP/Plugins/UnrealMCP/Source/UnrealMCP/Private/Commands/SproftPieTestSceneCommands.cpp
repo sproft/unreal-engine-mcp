@@ -1,0 +1,537 @@
+#include "Commands/SproftPieTestSceneCommands.h"
+#include "Commands/EpicUnrealMCPCommonUtils.h"
+
+#include "Editor.h"
+#include "Engine/World.h"
+#include "EngineUtils.h"
+#include "GameFramework/Actor.h"
+#include "UObject/UnrealType.h"
+#include "UObject/Class.h"
+
+namespace
+{
+    /** Actor lookup that mirrors `actor_inspect` / `scene_compose`: try
+     *  GetName() first (object name; what scripts spell out) and fall
+     *  back to GetActorLabel() (the Outliner label; what designers
+     *  spell out). We want assertions to feel symmetric with the
+     *  scene-mutation tools so a designer can spawn an actor with a
+     *  preferred name and reference it by the same string here. */
+    AActor* ResolveActorByName(UWorld* World, const FString& Target)
+    {
+        if (!World || Target.IsEmpty())
+        {
+            return nullptr;
+        }
+        for (TActorIterator<AActor> It(World); It; ++It)
+        {
+            AActor* Actor = *It;
+            if (!Actor)
+            {
+                continue;
+            }
+            if (Actor->GetName() == Target)
+            {
+                return Actor;
+            }
+        }
+        for (TActorIterator<AActor> It(World); It; ++It)
+        {
+            AActor* Actor = *It;
+            if (!Actor)
+            {
+                continue;
+            }
+            if (Actor->GetActorLabel() == Target)
+            {
+                return Actor;
+            }
+        }
+        return nullptr;
+    }
+
+    /** Pull a 3-element vector from a JSON value. Accepts arrays of
+     *  three numbers and `{x, y, z}` object shapes; rejects everything
+     *  else. */
+    bool VectorFromJson(const TSharedPtr<FJsonValue>& Value, FVector& Out)
+    {
+        if (!Value.IsValid())
+        {
+            return false;
+        }
+        const TArray<TSharedPtr<FJsonValue>>* AsArray = nullptr;
+        if (Value->TryGetArray(AsArray) && AsArray && AsArray->Num() == 3)
+        {
+            const double X = (*AsArray)[0]->AsNumber();
+            const double Y = (*AsArray)[1]->AsNumber();
+            const double Z = (*AsArray)[2]->AsNumber();
+            Out = FVector(X, Y, Z);
+            return true;
+        }
+        const TSharedPtr<FJsonObject>* AsObject = nullptr;
+        if (Value->TryGetObject(AsObject) && AsObject->IsValid())
+        {
+            double X = 0.0, Y = 0.0, Z = 0.0;
+            if ((*AsObject)->TryGetNumberField(TEXT("x"), X)
+                && (*AsObject)->TryGetNumberField(TEXT("y"), Y)
+                && (*AsObject)->TryGetNumberField(TEXT("z"), Z))
+            {
+                Out = FVector(X, Y, Z);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Render an FVector as a JSON array `[x, y, z]` so the response
+     *  echoes the same shape as the input expected vector. */
+    TSharedPtr<FJsonValue> VectorToJsonArray(const FVector& V)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        Arr.Add(MakeShared<FJsonValueNumber>(V.X));
+        Arr.Add(MakeShared<FJsonValueNumber>(V.Y));
+        Arr.Add(MakeShared<FJsonValueNumber>(V.Z));
+        return MakeShared<FJsonValueArray>(Arr);
+    }
+
+    /** Render a JSON value as a plain string. Numbers / bools / strings
+     *  flatten to their primitive text form; objects / arrays go through
+     *  the standard Json writer so callers see a stable canonicalized
+     *  representation when ImportText fails. */
+    FString JsonValueToString(const TSharedPtr<FJsonValue>& Value)
+    {
+        if (!Value.IsValid())
+        {
+            return FString();
+        }
+        FString Out;
+        switch (Value->Type)
+        {
+            case EJson::String:
+                Value->TryGetString(Out);
+                return Out;
+            case EJson::Number:
+            {
+                double N = 0.0;
+                if (Value->TryGetNumber(N))
+                {
+                    return FString::SanitizeFloat(N);
+                }
+                return TEXT("0");
+            }
+            case EJson::Boolean:
+            {
+                bool B = false;
+                Value->TryGetBool(B);
+                return B ? TEXT("true") : TEXT("false");
+            }
+            case EJson::Null:
+                return TEXT("None");
+            default:
+                break;
+        }
+        // Fall through for objects / arrays: serialize compact.
+        TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer
+            = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
+        FJsonSerializer::Serialize(Value.ToSharedRef(), TEXT(""), Writer);
+        return Out;
+    }
+
+    /** Walk the actor's `Tags` array looking for an exact FName match.
+     *  Returns true when the tag is present plus an `actual` snapshot of
+     *  the tag list for the response message. */
+    bool ActorHasTag(const AActor* Actor, const FName& TagName, TArray<FString>& OutAllTags)
+    {
+        OutAllTags.Reset();
+        if (!Actor)
+        {
+            return false;
+        }
+        for (const FName& Existing : Actor->Tags)
+        {
+            OutAllTags.Add(Existing.ToString());
+        }
+        return Actor->Tags.Contains(TagName);
+    }
+}
+
+FSproftPieTestSceneCommands::FSproftPieTestSceneCommands()
+{
+}
+
+TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandleCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params)
+{
+    if (CommandType == TEXT("pie_test_scene"))
+    {
+        return HandlePieTestScene(Params);
+    }
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        FString::Printf(TEXT("Unknown pie_test_scene command: %s"), *CommandType));
+}
+
+TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandlePieTestScene(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!Params.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing params object"));
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* AssertionsArr = nullptr;
+    if (!Params->TryGetArrayField(TEXT("assertions"), AssertionsArr) || !AssertionsArr || AssertionsArr->Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing or empty 'assertions' array"));
+    }
+
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!World)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
+    }
+
+    int32 Passed = 0;
+    int32 Failed = 0;
+    int32 Unsupported = 0;
+    TArray<TSharedPtr<FJsonValue>> Results;
+
+    for (int32 Index = 0; Index < AssertionsArr->Num(); ++Index)
+    {
+        const TSharedPtr<FJsonValue>& Entry = (*AssertionsArr)[Index];
+        TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+        Out->SetNumberField(TEXT("index"), Index);
+
+        const TSharedPtr<FJsonObject>* AsObject = nullptr;
+        if (!Entry.IsValid() || !Entry->TryGetObject(AsObject) || !AsObject->IsValid())
+        {
+            Out->SetBoolField(TEXT("passed"), false);
+            Out->SetStringField(TEXT("kind"), TEXT(""));
+            Out->SetStringField(TEXT("message"),
+                TEXT("Assertion entry is not a JSON object"));
+            ++Failed;
+            Results.Add(MakeShared<FJsonValueObject>(Out));
+            continue;
+        }
+        const TSharedPtr<FJsonObject>& Spec = *AsObject;
+
+        FString Kind;
+        Spec->TryGetStringField(TEXT("kind"), Kind);
+        Out->SetStringField(TEXT("kind"), Kind);
+
+        FString Target;
+        Spec->TryGetStringField(TEXT("target"), Target);
+        Out->SetStringField(TEXT("target"), Target);
+
+        if (Kind == TEXT("actor_exists"))
+        {
+            if (Target.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_exists: missing 'target' actor name"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            AActor* Found = ResolveActorByName(World, Target);
+            const bool bFound = (Found != nullptr);
+            Out->SetBoolField(TEXT("passed"), bFound);
+            if (bFound)
+            {
+                Out->SetStringField(TEXT("actual"), Found->GetName());
+                Out->SetStringField(TEXT("actual_label"), Found->GetActorLabel());
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("Found actor '%s' (label '%s') in editor world"),
+                        *Found->GetName(), *Found->GetActorLabel()));
+                ++Passed;
+            }
+            else
+            {
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("No actor with name or label '%s' in editor world"), *Target));
+                ++Failed;
+            }
+            Results.Add(MakeShared<FJsonValueObject>(Out));
+            continue;
+        }
+
+        if (Kind == TEXT("actor_at_location"))
+        {
+            if (Target.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_at_location: missing 'target' actor name"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            FVector Expected = FVector::ZeroVector;
+            const TSharedPtr<FJsonValue> ExpectedField = Spec->TryGetField(TEXT("expected"));
+            if (!VectorFromJson(ExpectedField, Expected))
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_at_location: 'expected' must be a [x, y, z] array or {x, y, z} object"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            double Tolerance = 1.0;
+            Spec->TryGetNumberField(TEXT("tolerance"), Tolerance);
+            if (Tolerance < 0.0)
+            {
+                Tolerance = 0.0;
+            }
+
+            AActor* Found = ResolveActorByName(World, Target);
+            if (!Found)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("actor_at_location: no actor with name or label '%s'"), *Target));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const FVector Actual = Found->GetActorLocation();
+            const double Delta = FVector::Dist(Actual, Expected);
+            const bool bPassed = Delta <= Tolerance;
+
+            Out->SetBoolField(TEXT("passed"), bPassed);
+            Out->SetField(TEXT("actual"), VectorToJsonArray(Actual));
+            Out->SetField(TEXT("expected"), VectorToJsonArray(Expected));
+            Out->SetNumberField(TEXT("tolerance"), Tolerance);
+            Out->SetNumberField(TEXT("delta"), Delta);
+            Out->SetStringField(TEXT("message"),
+                bPassed
+                    ? FString::Printf(TEXT("Actor '%s' is %.4f cm from expected (tolerance %.4f)"),
+                        *Found->GetName(), Delta, Tolerance)
+                    : FString::Printf(TEXT("Actor '%s' is %.4f cm from expected (tolerance %.4f)"),
+                        *Found->GetName(), Delta, Tolerance));
+            if (bPassed)
+            {
+                ++Passed;
+            }
+            else
+            {
+                ++Failed;
+            }
+            Results.Add(MakeShared<FJsonValueObject>(Out));
+            continue;
+        }
+
+        if (Kind == TEXT("actor_overlapping_tag"))
+        {
+            if (Target.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_overlapping_tag: missing 'target' actor name"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            FString TagString;
+            const TSharedPtr<FJsonValue> ExpectedField = Spec->TryGetField(TEXT("expected"));
+            if (ExpectedField.IsValid())
+            {
+                if (!ExpectedField->TryGetString(TagString))
+                {
+                    TagString = JsonValueToString(ExpectedField);
+                }
+            }
+            if (TagString.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_overlapping_tag: 'expected' must be a non-empty tag string"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            AActor* Found = ResolveActorByName(World, Target);
+            if (!Found)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("expected"), TagString);
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("actor_overlapping_tag: no actor with name or label '%s'"), *Target));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const FName ExpectedTag(*TagString);
+            TArray<FString> AllTags;
+            const bool bHasTag = ActorHasTag(Found, ExpectedTag, AllTags);
+
+            TArray<TSharedPtr<FJsonValue>> TagList;
+            for (const FString& T : AllTags)
+            {
+                TagList.Add(MakeShared<FJsonValueString>(T));
+            }
+            Out->SetArrayField(TEXT("actual"), TagList);
+            Out->SetStringField(TEXT("expected"), TagString);
+            Out->SetBoolField(TEXT("passed"), bHasTag);
+            Out->SetStringField(TEXT("message"),
+                bHasTag
+                    ? FString::Printf(TEXT("Actor '%s' has tag '%s' (%d total tag(s))"),
+                        *Found->GetName(), *TagString, AllTags.Num())
+                    : FString::Printf(TEXT("Actor '%s' has %d tag(s); none match '%s'"),
+                        *Found->GetName(), AllTags.Num(), *TagString));
+            if (bHasTag)
+            {
+                ++Passed;
+            }
+            else
+            {
+                ++Failed;
+            }
+            Results.Add(MakeShared<FJsonValueObject>(Out));
+            continue;
+        }
+
+        if (Kind == TEXT("var_equals"))
+        {
+            if (Target.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("var_equals: missing 'target' actor name"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const TSharedPtr<FJsonValue> ExpectedField = Spec->TryGetField(TEXT("expected"));
+            const TSharedPtr<FJsonObject>* ExpectedObj = nullptr;
+            if (!ExpectedField.IsValid() || !ExpectedField->TryGetObject(ExpectedObj) || !ExpectedObj->IsValid())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("var_equals: 'expected' must be a {var, value} object"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            FString VarName;
+            if (!(*ExpectedObj)->TryGetStringField(TEXT("var"), VarName) || VarName.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("var_equals: 'expected.var' must be a non-empty UPROPERTY name"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const TSharedPtr<FJsonValue> ValueField = (*ExpectedObj)->TryGetField(TEXT("value"));
+            if (!ValueField.IsValid())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("var_equals: 'expected.value' is required"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+
+            AActor* Found = ResolveActorByName(World, Target);
+            if (!Found)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("var"), VarName);
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("var_equals: no actor with name or label '%s'"), *Target));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+
+            UClass* ActorClass = Found->GetClass();
+            FProperty* Prop = ActorClass ? ActorClass->FindPropertyByName(FName(*VarName)) : nullptr;
+            if (!Prop)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("var"), VarName);
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("var_equals: actor '%s' has no UPROPERTY named '%s'"),
+                        *Found->GetName(), *VarName));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+
+            // Read the actor's current value as ExportText so we can compare
+            // string against string after canonicalizing the expected value
+            // through ImportText -> ExportText on a transient buffer.
+            void* PropPtr = Prop->ContainerPtrToValuePtr<void>(Found);
+            FString ActualText;
+            Prop->ExportText_Direct(ActualText, PropPtr, PropPtr, Found, PPF_None);
+
+            // Canonicalize the expected JSON value through the same
+            // property's ImportText into a transient stack buffer so we
+            // compare apples to apples (e.g. "1" -> "1", "1.0" -> "1.0",
+            // {"X":1,"Y":2,"Z":3} -> "(X=1.000000,Y=2.000000,Z=3.000000)").
+            TArray<uint8> Scratch;
+            Scratch.SetNumZeroed(Prop->GetSize());
+            Prop->InitializeValue(Scratch.GetData());
+
+            const FString ExpectedRaw = JsonValueToString(ValueField);
+            const TCHAR* ImportPtr = *ExpectedRaw;
+            const TCHAR* ImportResult = Prop->ImportText_Direct(ImportPtr, Scratch.GetData(), Found, PPF_None);
+            FString ExpectedCanonical;
+            bool bExpectedImported = (ImportResult != nullptr);
+            if (bExpectedImported)
+            {
+                Prop->ExportText_Direct(ExpectedCanonical, Scratch.GetData(), Scratch.GetData(), Found, PPF_None);
+            }
+            else
+            {
+                // Fall back to direct string compare against the raw input
+                // when ImportText refuses the JSON literal (rare for the
+                // typed properties this tool targets, but keeps the
+                // assertion useful).
+                ExpectedCanonical = ExpectedRaw;
+            }
+            Prop->DestroyValue(Scratch.GetData());
+
+            const bool bMatch = ActualText.Equals(ExpectedCanonical, ESearchCase::CaseSensitive);
+
+            Out->SetStringField(TEXT("var"), VarName);
+            Out->SetStringField(TEXT("actual"), ActualText);
+            Out->SetStringField(TEXT("expected"), ExpectedCanonical);
+            Out->SetStringField(TEXT("expected_raw"), ExpectedRaw);
+            Out->SetBoolField(TEXT("passed"), bMatch);
+            Out->SetStringField(TEXT("property_class"), Prop->GetClass()->GetName());
+            Out->SetBoolField(TEXT("expected_imported"), bExpectedImported);
+            Out->SetStringField(TEXT("message"),
+                bMatch
+                    ? FString::Printf(TEXT("Actor '%s'.%s == %s"),
+                        *Found->GetName(), *VarName, *ActualText)
+                    : FString::Printf(TEXT("Actor '%s'.%s = %s; expected %s"),
+                        *Found->GetName(), *VarName, *ActualText, *ExpectedCanonical));
+            if (bMatch)
+            {
+                ++Passed;
+            }
+            else
+            {
+                ++Failed;
+            }
+            Results.Add(MakeShared<FJsonValueObject>(Out));
+            continue;
+        }
+
+        Out->SetBoolField(TEXT("passed"), false);
+        Out->SetStringField(TEXT("message"),
+            FString::Printf(TEXT("Unsupported assertion kind '%s'; this build supports 'actor_exists', 'actor_at_location', 'actor_overlapping_tag', 'var_equals'"), *Kind));
+        ++Unsupported;
+        Results.Add(MakeShared<FJsonValueObject>(Out));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetNumberField(TEXT("total"), AssertionsArr->Num());
+    Result->SetNumberField(TEXT("passed"), Passed);
+    Result->SetNumberField(TEXT("failed"), Failed);
+    Result->SetNumberField(TEXT("unsupported"), Unsupported);
+    Result->SetBoolField(TEXT("all_passed"), Failed == 0 && Unsupported == 0);
+    Result->SetArrayField(TEXT("results"), Results);
+    return Result;
+}
