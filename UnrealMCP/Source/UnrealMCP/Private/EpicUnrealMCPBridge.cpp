@@ -83,6 +83,7 @@
 #include "Commands/SproftSearchAssetsCommands.h"
 #include "Commands/SproftAssetReferencesCommands.h"
 #include "Commands/SproftBpExportCommands.h"
+#include "Commands/SproftBehaviorTreeCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -124,6 +125,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftSearchAssets = MakeShared<FSproftSearchAssetsCommands>();
     SproftAssetReferences = MakeShared<FSproftAssetReferencesCommands>();
     SproftBpExport = MakeShared<FSproftBpExportCommands>();
+    SproftBehaviorTree = MakeShared<FSproftBehaviorTreeCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -162,6 +164,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftSearchAssets.Reset();
     SproftAssetReferences.Reset();
     SproftBpExport.Reset();
+    SproftBehaviorTree.Reset();
 }
 
 // Initialize subsystem
@@ -476,6 +479,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("bp_export"))
             {
                 ResultJson = SproftBpExport->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("behavior_tree"))
+            {
+                ResultJson = SproftBehaviorTree->HandleCommand(CommandType, Params);
             }
             else
             {

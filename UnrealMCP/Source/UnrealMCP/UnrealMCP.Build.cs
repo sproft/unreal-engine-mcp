@@ -50,7 +50,8 @@ public class UnrealMCP : ModuleRules
 				"EnhancedInput",      // For UInputAction / UInputMappingContext (Sproft bp_input)
 				"InputBlueprintNodes", // For UK2Node_EnhancedInputAction (Sproft bp_input graph wiring)
 				"GameplayTags",       // For UGameplayTagsManager (Sproft tag_registry_edit)
-				"Niagara"             // For UNiagaraSystem / UNiagaraEmitter (Sproft niagara_inspect)
+				"Niagara",            // For UNiagaraSystem / UNiagaraEmitter (Sproft niagara_inspect)
+				"AIModule"            // For UBehaviorTree / UBlackboardData (Sproft behavior_tree)
 			}
 		);
 

@@ -5171,6 +5171,73 @@ def bp_export(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def behavior_tree(
+    tree: str,
+    include_blackboard: Optional[bool] = None,
+    include_decorators: Optional[bool] = None,
+    include_services: Optional[bool] = None,
+    max_depth: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only structured dump of a UBehaviorTree asset.
+
+    Returns the full tree structure (composite root + recursive children
+    + decorators per child + services per composite), the linked
+    Blackboard data asset path, and the Blackboard's key list (each
+    name + type + sync flag + parent-inherited flag, with the inner
+    BaseClass / EnumType / DefaultValue struct for typed Object / Class
+    / Enum / Struct keys). Symmetric with ``niagara_inspect`` for AI
+    assets. The edit side (re-rooting, decorator insertion, blackboard
+    key edits) lives on the backlog.
+
+    Args:
+        tree: Short asset name or full ``/Game/...`` Behavior Tree
+            path.
+        include_blackboard: Include the linked Blackboard's key list.
+            Default True.
+        include_decorators: Include each composite-child's decorator
+            chain plus the tree-level RootDecorators. Default True.
+        include_services: Include each composite's service chain.
+            Default True.
+        max_depth: Cap on the recursive walk. Default 32. Reaching the
+            cap sets ``children_truncated: true`` on the offending
+            composite and skips its children.
+
+    Returns:
+        Dict with ``name``, ``path``, ``class``, ``root_decorators``
+        array (when requested), ``root_node`` (a recursive composite
+        descriptor with ``name``, ``class``, ``class_path``, ``kind``,
+        ``depth``, optional ``finish_mode`` for SimpleParallel,
+        ``services`` array, and ``children`` array of
+        ``{decorators, node}`` rows where each ``node`` is either a
+        composite or a task), and the Blackboard side
+        (``blackboard_path``, ``blackboard_name``, optional
+        ``blackboard_parent_path``, ``blackboard_keys`` array, and
+        ``blackboard_has_synced_keys``).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"tree": tree}
+    if include_blackboard is not None:
+        params["include_blackboard"] = include_blackboard
+    if include_decorators is not None:
+        params["include_decorators"] = include_decorators
+    if include_services is not None:
+        params["include_services"] = include_services
+    if max_depth is not None:
+        params["max_depth"] = max_depth
+
+    try:
+        response = unreal.send_command("behavior_tree", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"behavior_tree error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
