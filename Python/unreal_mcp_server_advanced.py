@@ -7025,6 +7025,98 @@ def pcg_graph_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def niagara_script_edit(
+    script: str,
+    op: Optional[str] = None,
+    include_inputs: Optional[bool] = None,
+    include_outputs: Optional[bool] = None,
+    include_attributes: Optional[bool] = None,
+    include_data_interfaces: Optional[bool] = None,
+    include_compile_data: Optional[bool] = None,
+    max_inputs: Optional[int] = None,
+    max_outputs: Optional[int] = None,
+    max_attributes: Optional[int] = None,
+    max_data_interfaces: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Inspect a UNiagaraScript asset (read-only first slice).
+
+    Pairs with ``niagara_inspect`` (system / emitter side) and
+    ``material_inspect`` (renderer side). Walks the asset's public
+    API plus the cached VM compile data and reports the script's
+    usage, asset version GUID, the input / output / attribute
+    parameter sets, the compile status, the cached byte-code
+    length, the GPU shader parameter count, and aggregate counts.
+
+    One op (``inspect``, default). Edit-side ops stay in BACKLOG.
+
+    Args:
+        script: Short asset name or ``/Game/...`` UNiagaraScript
+            path. Required.
+        op: Operation discriminator. Only ``inspect`` (default) is
+            supported.
+        include_inputs: Default True. Per-input parameter dump
+            from the cached VM ``Parameters`` set.
+        include_outputs: Default True. Per-output parameter dump
+            from the cached VM ``AttributesWritten`` set.
+        include_attributes: Default True. Per-attribute parameter
+            dump from the runtime ``Attributes`` set.
+        include_data_interfaces: Default True. Per-DI compile-info
+            row from the cached ``DataInterfaceInfo``.
+        include_compile_data: Default True. ``compile_data`` block
+            with last-compile status, byte-code length, num temp
+            registers, num user pointers, and parallel parameter /
+            attribute / GPU shader counts.
+        max_inputs / max_outputs / max_attributes /
+        max_data_interfaces: Cap on each per-list walk. Default 512
+            each.
+
+    Returns:
+        Dict with ``operation``, asset metadata (``name`` / ``path``
+        / ``class``), ``usage`` (function / module / dynamic_input /
+        particle_spawn / particle_update / particle_event /
+        particle_simulation_stage / particle_gpu_compute /
+        emitter_spawn / emitter_update / system_spawn /
+        system_update / unknown), ``usage_id``, the optional
+        ``inputs`` / ``outputs`` / ``attributes`` /
+        ``data_interfaces`` arrays, the ``compile_data`` block,
+        plus per-list counts and ``*_truncated`` flags.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"script": script}
+    if op is not None:
+        params["op"] = op
+    if include_inputs is not None:
+        params["include_inputs"] = include_inputs
+    if include_outputs is not None:
+        params["include_outputs"] = include_outputs
+    if include_attributes is not None:
+        params["include_attributes"] = include_attributes
+    if include_data_interfaces is not None:
+        params["include_data_interfaces"] = include_data_interfaces
+    if include_compile_data is not None:
+        params["include_compile_data"] = include_compile_data
+    if max_inputs is not None:
+        params["max_inputs"] = max_inputs
+    if max_outputs is not None:
+        params["max_outputs"] = max_outputs
+    if max_attributes is not None:
+        params["max_attributes"] = max_attributes
+    if max_data_interfaces is not None:
+        params["max_data_interfaces"] = max_data_interfaces
+
+    try:
+        response = unreal.send_command("niagara_script_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"niagara_script_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Sproft fork addition: skills (workflow-doc lookup)
 #

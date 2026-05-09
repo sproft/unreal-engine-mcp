@@ -1020,6 +1020,30 @@ ability" alongside `tag_registry_edit`.
   `unreal_api` for the runtime-class side and `cpp_source` for the
   in-engine-source side; the workflow docs sit one level higher
   for "what is the canonical pattern for X" questions.
+- `niagara_script_edit` (small, read-only first slice) — inspect
+  a `UNiagaraScript` asset. Pairs with `niagara_inspect` (system /
+  emitter side) and `material_inspect` (renderer side). Walks the
+  asset's public API plus the cached VM compile data
+  (`UNiagaraScript::GetVMExecutableData`) and reports usage token
+  + usage GUID + `inputs` / `outputs` / `attributes` /
+  `data_interfaces` parameter sets (`{name, type, type_path,
+  kind}` rows mapped through `FNiagaraTypeDefinition::GetClass` /
+  `GetScriptStruct` / `GetEnum`) plus a `compile_data` block
+  (last-compile status, byte-code length, num temp registers,
+  num user pointers, parameter / internal-parameter /
+  baked-rapid-iteration counts, GPU shader parameter / loose-
+  metadata / external-constant counts off
+  `FNiagaraShaderScriptParametersMetadata`). Filters:
+  `include_inputs` / `include_outputs` / `include_attributes` /
+  `include_data_interfaces` / `include_compile_data` (default
+  true) plus per-list caps (`max_inputs` / `max_outputs` /
+  `max_attributes` / `max_data_interfaces`, default 512 each).
+  Editor-only fields (`Parameters`, `AttributesWritten`,
+  `BakedRapidIterationParameters`, `bReadsAttributeData`,
+  `RegisteredFunctions`) gate behind `WITH_EDITORONLY_DATA`; the
+  bridge runs editor-only so they always emit. Edit-side ops
+  (build a new module from a typed input list, mutate per-script
+  settings) stay on this list.
 - `pcg_graph_edit` (small, read-only first slice) — inspect a
   `UPCGGraph` asset. Walks `UPCGGraph::GetNodes()`, the per-node
   input / output pins, the graph's exposed input / output pin
@@ -1235,7 +1259,15 @@ helpers.
   add through the per-emitter spawn / update script source, and a
   `request_compile` op that drives `UNiagaraSystem::RequestCompile`
   after the writes.
-- `niagara_script_edit` — reusable Niagara module authoring.
+- `niagara_script_edit` (small read-only first slice ships in this
+  fork) — inspect a `UNiagaraScript` asset (cached VM compile
+  data plus typed parameter sets and the GPU shader parameter
+  metadata). Open follow-ons: reusable Niagara module authoring
+  (build a new module asset from a typed input / output list and
+  a literal HLSL body or a chosen op chain), per-script
+  validation rule walk, and a deep-dive `compile_metadata` op
+  that emits the byte-code disassembly through
+  `FNiagaraVMExecutableData::LastAssemblyTranslation`.
 - `chaos_edit` (small read-only variant ships in this fork) —
   inspect a `UGeometryCollection` asset. Returns geometry-source
   list + per-fracture-level histogram + cluster info + bone
