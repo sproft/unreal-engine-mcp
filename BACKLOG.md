@@ -8,9 +8,28 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped four new tool families that go wider
-into the remaining categories: `ik_rig_edit` (read-only first slice
-over `UIKRigDefinition` paired with the existing `ik_retarget`),
+The most recent pass shipped four new tool families that close out
+the remaining persistent skips: `landscape_edit` (small variant
+retry covering `set_landscape_material` and `import_heightmap_png`,
+the slice we dropped on the earlier pass because the sculpt brush
+surface did not collapse to one focused minimum), `pcg_graph_edit`
+(read-only first slice over `UPCGGraph` covering nodes / pins /
+edges plus the graph's exposed input / output surface),
+`niagara_script_edit` (read-only first slice over `UNiagaraScript`
+covering usage / input / output / attribute parameter sets plus
+the cached VM compile data including the GPU shader parameter
+metadata), and `animation_graph_edit` (read-only first slice over
+`UAnimBlueprint` going one level deeper than the existing
+`animation_inspect` AnimBP path: per state machine returns the
+per-state details, the per-machine transitions array with
+`previous_state` / `next_state` / blend-mode tokens, and the flat
+AnimGraph node-property list off
+`UAnimBlueprintGeneratedClass::AnimNodeProperties`). Together the
+four close `landscape_edit`, `pcg_graph_edit`,
+`niagara_script_edit`, and `animation_graph_edit` on the
+priority list. The earlier pass shipped four tool families that
+went wider: `ik_rig_edit` (read-only first slice over
+`UIKRigDefinition` paired with the existing `ik_retarget`),
 `chaos_edit` (read-only first slice over `UGeometryCollection`),
 `skills` (workflow-doc lookup over a curated `Python/skills/` index
 with `replication` / `enhanced-input` / `gameplay-tags` /
@@ -1614,75 +1633,98 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`ik_rig_edit`, `chaos_edit`, `skills`,
-`niagara_edit` ultra-minimum cut), the next set should pick up:
+After the latest pass (`landscape_edit` small variant retry,
+`pcg_graph_edit` read-only, `niagara_script_edit` read-only,
+`animation_graph_edit` read-only) the persistent four-skip on
+`landscape_edit` / `pcg_graph_edit` / `niagara_script_edit` /
+`animation_graph_edit` is closed. The next set should pick up:
 
-1. `ik_rig_edit` edit slice — rebind preview mesh, append /
+1. `landscape_edit` edit slice — per-edit-layer write
+   (`SetHeightDataForLayer`), the paint-layer-by-stroke surface
+   through the same FLandscapeEditDataInterface (`SetAlphaData`
+   per layer), the sculpt brush primitives that `LandscapeEdMode`
+   wraps, and a heightmap export counterpart
+   (`GetHeightDataTempl` -> 16-bit grayscale PNG).
+2. `pcg_graph_edit` edit slice — add / remove node through
+   `UPCGGraph::AddNodeOfType` / `RemoveNode`, add / remove edge
+   through `UPCGGraph::AddEdge` / `RemoveEdge` (using the from-pin
+   / to-pin label pair the read side already returns), rename pin
+   through the per-settings reflection surface, and a
+   `set_node_position` op that writes through `UPCGNode::SetNodePosition`.
+3. `niagara_script_edit` edit slice — Module / DynamicInput script
+   creation with a typed `inputs` / `outputs` list off
+   `FNiagaraVariable`, plus a `compile` op that drives the script's
+   own `RequestCompile`.
+4. `animation_graph_edit` edit slice — state machine create / add
+   state / add transition through the editor-only AnimGraph
+   module, AnimGraph node add / connect, and a `link_anim_graph_by_tag`
+   op that writes the LinkedAnimGraph slot for a chosen tag.
+5. `ik_rig_edit` edit slice — rebind preview mesh, append /
    remove solver via `UIKRigController::AddSolverToStack`, append /
    remove retarget chain through `AddRetargetChain`, rename
    retarget root, override goal transform, and mutate per-solver
    bone settings via `SetBoneSettings`. Pairs with the
    already-shipped `ik_retarget` read side and the IKRig dep we
    already pulled in.
-2. `chaos_edit` edit slice — set / mutate per-fracture-level
+6. `chaos_edit` edit slice — set / mutate per-fracture-level
    damage threshold list, toggle clustering / per-cluster-only
    damage threshold, write the simulation block (mass, density,
    removal surface), and the heavier fracture authoring side
    (driver via the dataflow asset under `DataflowInstance` or the
    `FFractureToolContext` API).
-3. `niagara_edit` next-cut — emitter add through
+7. `niagara_edit` next-cut — emitter add through
    `FNiagaraEditorUtilities::AddEmitterToSystem`, parameter store
    write via `UNiagaraSystem::GetExposedParameters()`, per-emitter
    sim-target / determinism flag writes, module add through the
    per-emitter spawn / update script source, and a
    `request_compile` op that drives `RequestCompile` after the
    writes.
-4. `ik_retarget` edit slice — rebind source / target IK Rig
+8. `ik_retarget` edit slice — rebind source / target IK Rig
    through `UIKRetargeterController`, append op / remove op (the
    polymorphic `FInstancedStruct` array on the asset), set chain
    mapping pair on a chosen op, override retarget pose, and
    profile management through `UIKRetargeter::GetProfileByName`.
-5. `sound_asset_edit` heavier ops — composite-node insertion
+9. `sound_asset_edit` heavier ops — composite-node insertion
    (random / sequence / mixer / modulator / delay / loop / branch /
    concatenator), attenuation-node insertion with FAttenuationSettings
    overrides, and distance-crossfade authoring. Plus a
    `sound_asset_inspect` read-only counterpart that walks the cue's
    node graph and emits it as a JSON tree paired with the existing
    create surface.
-6. `unreal_api` follow-ons — a `list_classes` op that enumerates
+10. `unreal_api` follow-ons — a `list_classes` op that enumerates
    every loaded UClass under a `/Script/Module.` namespace prefix,
    a recursive `find_in_subclasses` pass that aggregates properties /
    functions across one root class plus all its descendants, and a
    `class_diff` op that compares two related UClasses (parent vs
    child, or two cousins) and emits the property / function delta.
-7. `gas_edit` heavier ops — append a modifier to a UGameplayEffect
+11. `gas_edit` heavier ops — append a modifier to a UGameplayEffect
    with attribute target + ModifierOp + scalable-float magnitude,
    rebind cost / cooldown classes on a UGameplayAbility through the
    CDO, an attribute-default override path that writes through the
    CDO and recompiles the Blueprint, and a GameplayCue authoring
    slice (cue-tag set + level range + magnitude attribute).
-8. `behavior_tree` heavier edit ops — append a child task /
+12. `behavior_tree` heavier edit ops — append a child task /
    composite to a chosen parent, insert a decorator on a chosen
    child slot, append a service on a composite, and the full
    Blackboard key edit surface. Reuses the AIModule dep already
    pulled in.
-9. `sequencer_edit` heavier edit ops — track add (a chosen
+13. `sequencer_edit` heavier edit ops — track add (a chosen
    UMovieSceneTrack subclass), section add (with an explicit frame
    range), section move, spawnable creation, and camera-cut track
    creation. Reuses the MovieScene + LevelSequence deps.
-10. `metasound_edit` graph-authoring slice — add nodes / connect
+14. `metasound_edit` graph-authoring slice — add nodes / connect
     pins through the `UMetaSoundBuilder` API, member-default writes,
     and a `metasound_inspect` read-only counterpart that walks the
     asset's document and emits the node graph as a JSON edge list.
-11. `pie_test_bp` heavier kinds — `function_returns` (invoke a
+15. `pie_test_bp` heavier kinds — `function_returns` (invoke a
     Blueprint function in PIE and assert on its return value),
     `event_fired` (custom-event broadcast assertion in PIE), and
     `component_default_equals` (one level deeper to a named
     UActorComponent's UPROPERTY).
-12. `performance_audit` deep-dive captures — `stat startfile` /
+16. `performance_audit` deep-dive captures — `stat startfile` /
     `stat stopfile` for an offline `.ue4stats` chart, the FPSChart
     histogram surface, and an Insights `.utrace` capture wrapper.
-13. `skills` index expansion — pre-bake more workflow docs
+17. `skills` index expansion — pre-bake more workflow docs
     (multiplayer-replication-graph, materials-mvvm, perf-budget,
     landscape-painting, pcg-graph-essentials), per-skill front-
     matter for difficulty / area tags, and a cross-skill
