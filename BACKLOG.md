@@ -8,7 +8,19 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped `bp_export`, `behavior_tree` (read-only
+The most recent pass shipped three read-only inspectors covering
+broader-domain coverage that was previously locked behind
+`python_execution`: `landscape_inspect` (every `ALandscape` actor's
+component-grid configuration, materials, layers, bounds, and
+heightmap / weightmap texture sets), `foliage_inspect` (every
+`AInstancedFoliageActor`'s foliage type list with mesh / actor source
+paths, density / radius / scale intervals, instance counts, and
+optional sampled world locations), and the read-only first slice of
+`sequencer_edit` for `ULevelSequence` (master tracks, sections,
+possessables, spawnables, plus tick / display frame rates and
+playback range).
+
+The pass before that shipped `bp_export`, `behavior_tree` (read-only
 slice), the `widget_edit` slot-property surface, and `gas_edit`
 (read-only slice). Together they close the canonical Blueprint
 snapshot for diffable round-trips, give the agent a structured AI
@@ -305,6 +317,66 @@ ability" alongside `tag_registry_edit`.
   `skipped` with a reason. After applying the dict the slot's
   `SynchronizeProperties()` runs so a re-layout tick picks the change
   up.
+- `landscape_inspect` (small, read-only) — structured dump of every
+  `ALandscape` actor in the editor world. Per-actor record covers
+  name + label + transform + owning level + landscape GUID, the
+  section-grid tuple (ComponentSizeQuads / SubsectionSizeQuads /
+  NumSubsections / component_count), the proxy material driver and
+  any hole-material override, world-space proxy bounds (min / max /
+  size), the editor-only XY component-space extent rectangle when
+  ULandscapeInfo is registered, the registered layer list (each
+  entry with `layer_name`, `layer_info_object_path`,
+  `phys_material`, `blend_method` enum byte, `is_no_blend`,
+  `is_visibility_layer`), heightmap / weightmap texture
+  deduplication counts plus opt-in package-path arrays, and an
+  optional per-component records array (each with `name`,
+  `section_base`, `weightmap_count`, `weightmap_layer_allocation_count`,
+  `heightmap_path`). Filters: `name_pattern` (substring on actor
+  name + label) and `level_filter` (substring on owning ULevel
+  name). Adds `Landscape` to PublicDependencyModuleNames. Pairs
+  with `foliage_inspect` for terrain reasoning. Edit-side ops
+  (sculpting, paint layers, heightmap import / export) remain on
+  the backlog.
+- `foliage_inspect` (small, read-only) — structured dump of every
+  `AInstancedFoliageActor` in the editor world. Walks the public
+  `AInstancedFoliageActor::GetFoliageInfos` accessor and emits a
+  per-IFA actor block (name, label, transform, level, foliage type
+  count, total instance count) plus a per-type `foliage_types`
+  array. Each foliage_type carries the type asset path, source-mesh
+  or actor-class path with a `source_kind`
+  (`static_mesh` / `actor` / `unknown`) discriminator, density,
+  density adjustment factor, radius, per-axis scale interval
+  (ScaleX / ScaleY / ScaleZ min and max), instance counts (placed
+  and total), and the editor-only approximated-bounds box of all
+  its instances. Optional `sample_locations` draws a deterministic
+  seeded reservoir of N world-space instance locations per type
+  (capped at 1024) so the agent can probe density without us
+  shipping the full instance dump. Filters: `name_pattern` and
+  `level_filter`. Adds `Foliage` to PublicDependencyModuleNames.
+  Edit-side ops (paint, scatter, remove instances) remain on the
+  backlog.
+- `sequencer_edit` (small, read-only first slice) — `inspect` op
+  on a `sequencer_edit` umbrella that resolves a target
+  `ULevelSequence` (or any UMovieSceneSequence subclass) and
+  returns asset name + path + class plus the linked UMovieScene's
+  tick / display frame rates (each as
+  `{numerator, denominator, approx_fps}`), the playback range as a
+  start / end / duration triple with `playback_has_start` /
+  `playback_has_end` flags, the master tracks array (each track
+  with name + editor-only display_name + class + class_path +
+  section_count and an optional sections array reporting
+  `class` + `class_path` + `inclusive_start_frame` /
+  `exclusive_end_frame` / `duration_frames` plus the
+  `has_start_frame` / `has_end_frame` bound flags), the optional
+  camera-cut track stub when present, the possessables array
+  (binding GUID + name + possessed-class + parent_guid), and the
+  spawnables array (binding GUID + name + spawn-template class).
+  Per-track section emission caps at `max_sections_per_track`
+  (default 64), with `sections_truncated` set on the offending
+  track when the cap fires. Adds `MovieScene` and `LevelSequence`
+  to PublicDependencyModuleNames. The edit-side ops (track add,
+  section move, possessable / spawnable swap, camera-cut
+  creation) remain on the backlog.
 - `gas_edit` (small, read-only) — Gameplay Ability System dump for
   three asset shapes:
   - UGameplayAbility (or a Blueprint with a UGameplayAbility CDO):
@@ -523,14 +595,42 @@ helpers.
 
 ## Landscape & foliage (large each)
 
-- `landscape_inspect` — read landscape state.
-- `landscape_edit` — sculpting, paint layers, heightmap import / export.
-- `foliage_inspect` — read foliage instance state.
+- `landscape_inspect` (small read-only variant ships in this fork) —
+  per-actor dump for every `ALandscape`: section-grid configuration,
+  proxy material, registered layers, world-space bounds, deduplicated
+  heightmap / weightmap texture sets, optional per-component records.
+  Open follow-ons: per-edit-layer dump (each ULandscapeEditLayer's
+  Guid + name + visibility + paint / sculpt flags), spline component
+  dump for actors implementing ILandscapeSplineInterface, and a
+  height / weight sample at a chosen world location through
+  `ULandscapeInfo::GetLayerWeightAtLocation`.
+- `landscape_edit` — sculpting, paint layers, heightmap import /
+  export.
+- `foliage_inspect` (small read-only variant ships in this fork) —
+  per-IFA dump with foliage type list (mesh / actor source path,
+  density, radius, per-axis scale interval, instance counts) plus an
+  optional sampled world-location reservoir per type. Open follow-
+  ons: per-instance base-component lookup (which static mesh /
+  landscape component does each instance attach to), procedural
+  foliage spawner + procedural foliage volume readout, and a
+  spatial-bound query that returns "every foliage instance whose
+  origin is inside this FBox / FSphere".
 - `foliage_edit` — paint, scatter, remove instances.
 
 ## Cinematics & audio (large each)
 
-- `sequencer_edit` — Level Sequences, camera cuts, transform tracks.
+- `sequencer_edit` (small read-only first slice ships in this fork) —
+  master tracks list, camera-cut track stub, per-section
+  start / end / duration, possessables, spawnables, plus tick /
+  display frame rates and playback range for any
+  UMovieSceneSequence asset. Open follow-ons: per-track row dump
+  for multi-row tracks (UMovieSceneNameableTrack subclasses),
+  per-channel key dump for the standard transform / float /
+  bool / enum tracks through `UMovieSceneSection::GetChannelProxy`,
+  asset-bound resolution for possessables (which actor in the
+  current editor world is bound to a possessable GUID), and the
+  edit slice (track add, section move, possessable / spawnable
+  swap, camera-cut creation).
 - `metasound_edit` — MetaSound graphs.
 - `sound_asset_edit` — SoundCue graphs.
 
@@ -575,9 +675,9 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`bp_export`, `behavior_tree` read-only,
-`widget_edit` slot-property surface, and `gas_edit` read-only), the
-next set should pick up:
+After the latest pass (`landscape_inspect`, `foliage_inspect`,
+`sequencer_edit` read-only first slice), the next set should pick
+up:
 
 1. `behavior_tree` edit slice — append a child task / composite to
    a chosen parent, insert a decorator on a chosen child slot, and
@@ -591,10 +691,10 @@ next set should pick up:
    set system / emitter user-exposed parameters through the
    existing FNiagaraParameterStore surface, and append a renderer
    to an emitter. Pairs with `niagara_inspect`.
-4. `sequencer_edit` (read-only first slice) — list a Level
-   Sequence's tracks (transform, audio, event), bound objects, and
-   track sections. Cinematics has been pending since the first
-   pass.
+4. `sequencer_edit` edit slice — add a track of a chosen class to
+   a movie scene, add a section with an explicit frame range, and
+   add a possessable bound to a named actor in the editor world.
+   Reuses the MovieScene + LevelSequence deps already pulled in.
 
 `python_execution` still covers any operation we have not wrapped
 natively; prefer wrapping the high-frequency calls as dedicated tools
