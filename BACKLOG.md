@@ -8,7 +8,43 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass deepened edit-side coverage on four
+The most recent pass deepened edit-side coverage on two already-shipped
+multi-op tools and folded one maintenance fix on top. `ik_retarget`
+gains three edit ops routed through the editor-only
+`UIKRetargeterController::GetController(Retargeter)` accessor
+(already in IKRigEditor, which we picked up for `ik_rig_edit`):
+`set_source_ik_rig` and `set_target_ik_rig` rebind the retargeter's
+source / target IK Rig through `UIKRetargeterController::SetIKRig`
+(pass `clear=true` to unbind the side); `set_retarget_pose` switches
+the active retarget pose for either side through
+`SetCurrentRetargetPose(PoseName, Side)` with the missing-pose guard
+the controller already implements. `behavior_tree` gains three more
+edit ops on the Blackboard side of the BT/BB pair: `set_blackboard`
+rebinds the BT's BlackboardAsset slot; `add_blackboard_key` appends a
+typed FBlackboardEntry to a target Blackboard's `Keys` array (short
+token resolver covers `bool` / `int` / `float` / `string` / `name` /
+`vector` / `rotator` / `object` / `class` / `enum` / `struct` plus
+the `/Script/AIModule.UBlackboardKeyType_*` paths and short class
+names; wires `BaseClass` on Object / Class keys, `EnumType` on Enum
+keys, and `DefaultValue.InitializeAs(Struct)` on Struct keys when the
+caller passes the corresponding inner-type hint); `remove_blackboard_key`
+removes an own key by FName. The Blackboard target resolves either
+through an explicit `blackboard` arg or, when only `tree` is set,
+through the BT's BlackboardAsset slot. The maintenance fix re-syncs
+the bundled `FlopperamUnrealMCP/Plugins/UnrealMCP/Source/` tree with
+the canonical `UnrealMCP/Source/` tree, drops a `SOURCE_NOTE.md`
+beside the bundled `UnrealMCP.uplugin` so future readers know where
+the canonical tree lives, and brings the bundled uplugin manifest in
+line with the canonical one (the bundled tree had drifted far behind
+and the bundled project was failing to compile against the canonical
+bridge header). The `animation_graph_edit` edit slice was the
+fourth target on this pass but stayed skipped: the AnimGraph editor
+module surface (UAnimStateNode + UAnimStateTransitionNode + the
+state machine's UEdGraph plus the `BoundGraph` per-state subgraph
+authoring) is wider than the focused-minimum cut shape we ship for
+small variants.
+
+The pass before that deepened edit-side coverage on four
 already-shipped multi-op tools: `behavior_tree` adds three edit
 ops (`add_child_task` appends a UBTNode child slot under a target
 composite via `UBTCompositeNode::Children.AddDefaulted_GetRef()` +
@@ -578,7 +614,7 @@ ability" alongside `tag_registry_edit`.
   UBehaviorTree at a `/Game/...` path with an optional linked
   UBlackboardData) and `add_root_composite` (NewObject's a
   Selector / Sequence / SimpleParallel composite under the tree
-  and assigns it as `RootNode`). The newer edit ops are
+  and assigns it as `RootNode`). The next set of edit ops are
   `add_child_task` (appends a UBTNode child slot under a target
   composite via `UBTCompositeNode::Children.AddDefaulted_GetRef()`
   + `ChildComposite` / `ChildTask` assignment with
@@ -595,12 +631,30 @@ ability" alongside `tag_registry_edit`.
   / service set (`wait` / `move_to` / `blackboard` / `cooldown` /
   `loop` / `time_limit` / `default_focus` etc.) plus full
   `/Script/Module.ClassName` paths and `/Game/...` BP class paths.
-  All edit ops save by default. The runtime exec / memory indices
-  stay null on append; the BT graph editor's RebuildExecutionOrder
-  populates them when the asset is re-opened or re-compiled. Adds
-  AIModule to PublicDependencyModuleNames. Open follow-on:
-  Blackboard key edit surface (add / remove / rename / type change
-  / sync flag toggle).
+  The newest edit ops cover the Blackboard side of the BT/BB pair:
+  `set_blackboard` rebinds the BT's BlackboardAsset slot (pass
+  `clear=true` to unbind); `add_blackboard_key` appends a typed
+  FBlackboardEntry to a target Blackboard's `Keys` array (short
+  token resolver covers `bool` / `int` / `float` / `string` /
+  `name` / `vector` / `rotator` / `object` / `class` / `enum` /
+  `struct` plus `/Script/AIModule.UBlackboardKeyType_*` paths and
+  short class names; wires `BaseClass` on Object / Class keys,
+  `EnumType` on Enum keys, and `DefaultValue.InitializeAs(Struct)`
+  on Struct keys when the caller passes the matching inner-type
+  hint; the `instance_synced` flag, editor-only `description`, and
+  `category` land on the new entry; `UpdateIfHasSynchronizedKeys`
+  + `UpdateKeyIDs` + `PropagateKeyChangesToDerivedBlackboardAssets`
+  refresh the per-asset cache and any derived Blackboards after
+  the write); `remove_blackboard_key` removes an own key by FName
+  with the same post-write fix-up. The Blackboard target resolves
+  either through an explicit `blackboard` arg or, when only `tree`
+  is set, through the BT's BlackboardAsset slot. All edit ops save
+  by default. The runtime exec / memory indices stay null on
+  append; the BT graph editor's RebuildExecutionOrder populates
+  them when the asset is re-opened or re-compiled. Adds AIModule
+  to PublicDependencyModuleNames. Open follow-ons: Blackboard
+  rename / type-change ops, parent-Blackboard re-bind, and
+  tree-level RootDecorator authoring.
 - `widget_edit` slot-property surface — a third op `set_slot_property`
   on the existing `widget_edit` tool. Takes a target widget FName plus
   a flat property dict and applies the dict to the widget's UPanelSlot
@@ -1097,12 +1151,12 @@ ability" alongside `tag_registry_edit`.
   node, distance crossfade, random / sequence composites) remains
   on the backlog. Backed entirely by classes from
   `Engine/Classes/Sound/`; no new module deps required.
-- `ik_retarget` (small, read-only first slice) — inspect a
+- `ik_retarget` (small, read + edit slice) — inspect or mutate a
   `UIKRetargeter` asset. The 5.6 retargeter refactor moved chain
   mapping + root settings + global settings into a polymorphic op
   stack (`FInstancedStruct` of `FIKRetargetOpBase`-derived structs).
-  The read-only slice walks the asset's public surface plus the op
-  stack and reports asset path / class, source IK Rig path +
+  The read-only inspect slice walks the asset's public surface plus
+  the op stack and reports asset path / class, source IK Rig path +
   has_source_ik_rig flag, target IK Rig path + has_target_ik_rig
   flag, current source / target retarget pose names plus their
   bone-rotation-offset counts and root-offset flags, the retarget op
@@ -1112,11 +1166,23 @@ ability" alongside `tag_registry_edit`.
   reaching through `FIKRetargetOpBase::GetChainMapping()`), and
   aggregate counts (`op_count` / `op_count_total` / `ops_truncated`
   / `chain_pair_count`). Filters: `include_op_chain_mappings`
-  (default true), `max_ops` (default 64). Adds IKRig to
-  PublicDependencyModuleNames and the IKRig plugin to the uplugin
-  manifest. Edit-side ops (rebind source / target IK Rig, append op
-  / remove op, set chain mapping pair, override retarget pose,
-  profile management) remain on the backlog.
+  (default true), `max_ops` (default 64). The edit ops route
+  through the editor-only `UIKRetargeterController::GetController(Retargeter)`
+  accessor: `set_source_ik_rig` and `set_target_ik_rig` rebind the
+  retargeter's source / target IK Rig through
+  `UIKRetargeterController::SetIKRig(Source / Target, Rig)` (pass
+  `clear=true` to unbind the side); `set_retarget_pose` switches
+  the active retarget pose for either side through
+  `SetCurrentRetargetPose(PoseName, Side)` and surfaces the
+  controller's missing-pose guard as a clear error. Each mutating
+  op runs `MarkPackageDirty` and saves the asset by default. Adds
+  IKRig to PublicDependencyModuleNames and the IKRig plugin to the
+  uplugin manifest; the IKRigEditor private dependency was already
+  in the build.cs from the `ik_rig_edit` slice. Edit-side ops still
+  on the backlog: append op / remove op (the polymorphic
+  FInstancedStruct array on the asset), set chain mapping pair on a
+  chosen op, override per-bone retarget pose offsets, profile
+  management through `UIKRetargeter::GetProfileByName`.
 - `ik_rig_edit` (small, read + edit slice) — inspect or mutate
   a `UIKRigDefinition` asset. Pairs with `ik_retarget` for the
   rig side of the retargeting pipeline. The 5.6 IK Rig refactor
@@ -1597,19 +1663,23 @@ helpers.
   `AddRetargetChain`, rename retarget root, override goal
   transform, mutate per-solver bone settings via
   `SetBoneSettings`).
-- `ik_retarget` (small read-only variant ships in this fork) —
-  inspect a UIKRetargeter asset. Walks the asset's public surface
-  (source / target IK Rig paths, current source / target retarget
-  pose names, retarget op stack with per-op `name` /
-  `parent_name` / `struct_type` / `enabled` / `initialized` flags
-  and any per-op chain mapping pairs, plus aggregate counts).
-  Open follow-ons: the edit side (rebind source / target IK Rig
-  through `UIKRetargeterController`, append op / remove op,
-  set chain mapping pair, override retarget pose, profile
-  management), per-pose bone-rotation-offset dump, retargeter
-  evaluation against a sample pose, and the IK Rig side for the
-  same shape (chain definitions, goals, solvers, retarget chain
-  configuration).
+- `ik_retarget` (small read + edit slice ships in this fork) —
+  inspect or mutate a UIKRetargeter asset. Walks the asset's
+  public surface (source / target IK Rig paths, current source /
+  target retarget pose names, retarget op stack with per-op
+  `name` / `parent_name` / `struct_type` / `enabled` /
+  `initialized` flags and any per-op chain mapping pairs, plus
+  aggregate counts). Edit ops route through the editor-only
+  `UIKRetargeterController::GetController(Retargeter)` accessor:
+  `set_source_ik_rig` and `set_target_ik_rig` rebind the source /
+  target IK Rig through `UIKRetargeterController::SetIKRig`;
+  `set_retarget_pose` switches the active retarget pose for either
+  side through `SetCurrentRetargetPose(PoseName, Side)`. Open
+  follow-ons: append op / remove op (the polymorphic
+  FInstancedStruct array on the asset), set chain mapping pair on
+  a chosen op, per-pose bone-rotation-offset dump and override,
+  retargeter evaluation against a sample pose, and profile
+  management through `UIKRetargeter::GetProfileByName`.
 
 ## UMG / Widgets (medium)
 
@@ -1849,11 +1919,18 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`landscape_edit` small variant retry,
-`pcg_graph_edit` read-only, `niagara_script_edit` read-only,
-`animation_graph_edit` read-only) the persistent four-skip on
-`landscape_edit` / `pcg_graph_edit` / `niagara_script_edit` /
-`animation_graph_edit` is closed. The next set should pick up:
+The latest pass shipped the `ik_retarget` edit slice
+(`set_source_ik_rig` / `set_target_ik_rig` / `set_retarget_pose`
+through `UIKRetargeterController`) plus the BehaviorTree
+Blackboard key edits (`set_blackboard` / `add_blackboard_key` /
+`remove_blackboard_key`), and re-synced the bundled
+`FlopperamUnrealMCP/Plugins/UnrealMCP/Source/` tree with the
+canonical `UnrealMCP/Source/` tree. The `animation_graph_edit`
+edit slice was on the list for that pass but stayed skipped because
+the AnimGraph editor module surface (UAnimStateNode +
+UAnimStateTransitionNode + the per-state UEdGraph subgraph
+authoring) is wider than our small-variant cut. The next set should
+pick up:
 
 1. `landscape_edit` edit slice — per-edit-layer write
    (`SetHeightDataForLayer`), the paint-layer-by-stroke surface
@@ -1895,11 +1972,13 @@ After the latest pass (`landscape_edit` small variant retry,
    per-emitter spawn / update script source, and a
    `request_compile` op that drives `RequestCompile` after the
    writes.
-8. `ik_retarget` edit slice — rebind source / target IK Rig
-   through `UIKRetargeterController`, append op / remove op (the
+8. `ik_retarget` follow-on edit ops — append op / remove op (the
    polymorphic `FInstancedStruct` array on the asset), set chain
-   mapping pair on a chosen op, override retarget pose, and
-   profile management through `UIKRetargeter::GetProfileByName`.
+   mapping pair on a chosen op, per-pose bone-rotation-offset
+   override, and profile management through
+   `UIKRetargeter::GetProfileByName`. The source / target IK Rig
+   rebind plus the active-retarget-pose switch shipped in the most
+   recent pass.
 9. `sound_asset_edit` heavier ops — composite-node insertion
    (random / sequence / mixer / modulator / delay / loop / branch /
    concatenator), attenuation-node insertion with FAttenuationSettings
@@ -1918,11 +1997,12 @@ After the latest pass (`landscape_edit` small variant retry,
    slice (cue-tag set + level range + magnitude attribute). The
    modifier add / remove / attribute-default override ops shipped
    in the most recent pass.
-12. `behavior_tree` heavier edit ops — Blackboard key edit surface
-   (add / remove / rename / type change / sync flag toggle) and
-   tree-level RootDecorator authoring. The append-child-task,
-   add-decorator, and add-service ops shipped in the most recent
-   pass.
+12. `behavior_tree` heavier edit ops — Blackboard key rename /
+   type-change ops, parent-Blackboard re-bind, and tree-level
+   RootDecorator authoring. The Blackboard re-bind plus key
+   add / remove ops shipped in the most recent pass; the
+   append-child-task, add-decorator, and add-service ops shipped
+   in the pass before that.
 13. `sequencer_edit` remaining edit ops — section move, spawnable
    creation, and per-row edits. The track-add and section-add ops
    shipped in the most recent pass.
