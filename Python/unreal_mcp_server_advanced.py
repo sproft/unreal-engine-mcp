@@ -6819,6 +6819,194 @@ def chaos_edit(
         return {"success": False, "message": str(e)}
 
 
+# ---------------------------------------------------------------------------
+# Sproft fork addition: skills (workflow-doc lookup)
+#
+# A curated index of short on-demand workflow documents shipped with this
+# fork. The tool reads markdown files from `Python/skills/` at request time
+# so adding a new entry is a file-add, not a code change. Every skill doc
+# follows a four-section shape (when to use, the canonical UE5 path, our
+# wrappers in this fork, gotchas) and is sized at 200 to 400 words.
+#
+# Pre-baked entries: replication, enhanced-input, gameplay-tags,
+# crafting-data-tables.
+#
+# Three ops (`get` returns the body of one skill, `list` returns the
+# available topic list, `search` returns topics whose title or first
+# section matches a substring).
+# ---------------------------------------------------------------------------
+
+import os as _os
+import re as _re
+
+_SKILLS_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "skills")
+
+
+def _skill_topic_to_filename(topic: str) -> str:
+    """Resolve a topic name to a filename inside the skills directory.
+
+    Accepts both `replication` and `replication.md`. Underscores and
+    spaces are normalised to hyphens so callers can ask for
+    `enhanced_input` or `Enhanced Input` and get the same answer.
+    """
+    cleaned = topic.strip().lower()
+    cleaned = cleaned.replace(" ", "-").replace("_", "-")
+    if not cleaned.endswith(".md"):
+        cleaned = cleaned + ".md"
+    return cleaned
+
+
+def _list_skill_files() -> List[str]:
+    """List every `.md` file in the skills directory, sorted."""
+    if not _os.path.isdir(_SKILLS_DIR):
+        return []
+    out = []
+    for name in sorted(_os.listdir(_SKILLS_DIR)):
+        if name.lower().endswith(".md"):
+            out.append(name)
+    return out
+
+
+def _read_skill_first_heading(path: str) -> str:
+    """Return the first markdown H1 in a skill file."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("# "):
+                    return line[2:].strip()
+                if line:
+                    return line
+    except OSError:
+        return ""
+    return ""
+
+
+@mcp.tool()
+def skills(
+    topic: Optional[str] = None,
+    op: Optional[str] = None,
+    pattern: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Fetch on-demand workflow docs shipped with this fork.
+
+    Workflow docs are short markdown files (~200 to 400 words) under
+    ``Python/skills/`` covering one UE5 sub-area each. Every doc has
+    four sections: when to use, the canonical UE5 path, our wrappers
+    in this fork, and gotchas. Pre-baked entries:
+
+      - ``replication`` — multiplayer state sync, RPCs, lifetime props.
+      - ``enhanced-input`` — Enhanced Input action / context / mapping.
+      - ``gameplay-tags`` — Gameplay Tag registry and runtime queries.
+      - ``crafting-data-tables`` — DataTable + row struct patterns.
+
+    Three ops keyed by ``op``:
+
+      - ``get`` (default): return the markdown body of one skill.
+        ``topic`` is required (e.g. ``replication``, ``enhanced-input``).
+        Underscores and spaces are normalised to hyphens, and the
+        ``.md`` extension is added when missing.
+      - ``list``: return the available topic list (each entry's topic
+        slug + first heading).
+      - ``search``: case-insensitive substring search across the
+        topic slug and the first H1 of every skill file. ``pattern``
+        is the search term.
+
+    Args:
+        topic: Required for the ``get`` op. Topic slug (e.g.
+            ``replication``).
+        op: ``get`` (default), ``list``, or ``search``.
+        pattern: Required for the ``search`` op.
+
+    Returns:
+        For ``get``: ``{topic, filename, body, byte_size}``.
+        For ``list``: ``{topics, count}`` where each topic carries
+        ``topic`` + ``filename`` + ``title``.
+        For ``search``: ``{topics, count, pattern, matched_total}``.
+    """
+    op_lower = (op or "get").lower()
+    if op_lower == "list":
+        topics: List[Dict[str, str]] = []
+        for fname in _list_skill_files():
+            full = _os.path.join(_SKILLS_DIR, fname)
+            slug = fname[:-3] if fname.lower().endswith(".md") else fname
+            topics.append(
+                {
+                    "topic": slug,
+                    "filename": fname,
+                    "title": _read_skill_first_heading(full),
+                }
+            )
+        return {"success": True, "topics": topics, "count": len(topics)}
+
+    if op_lower == "search":
+        if not pattern:
+            return {
+                "success": False,
+                "message": "skills: 'pattern' required for the 'search' op",
+            }
+        pat = pattern.strip().lower()
+        topics = []
+        for fname in _list_skill_files():
+            full = _os.path.join(_SKILLS_DIR, fname)
+            slug = fname[:-3] if fname.lower().endswith(".md") else fname
+            title = _read_skill_first_heading(full)
+            haystack = (slug + " " + title).lower()
+            if pat in haystack:
+                topics.append(
+                    {"topic": slug, "filename": fname, "title": title}
+                )
+        return {
+            "success": True,
+            "topics": topics,
+            "count": len(topics),
+            "pattern": pattern,
+            "matched_total": len(topics),
+        }
+
+    if op_lower != "get":
+        return {
+            "success": False,
+            "message": (
+                "skills: unsupported op '%s'. Supported: get, list, search"
+                % op_lower
+            ),
+        }
+
+    if not topic:
+        return {"success": False, "message": "skills: 'topic' required"}
+
+    fname = _skill_topic_to_filename(topic)
+    full = _os.path.join(_SKILLS_DIR, fname)
+    if not _os.path.isfile(full):
+        available = [n[:-3] for n in _list_skill_files()]
+        return {
+            "success": False,
+            "message": (
+                "skills: topic '%s' not found. Available: %s"
+                % (topic, ", ".join(available))
+            ),
+        }
+
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            body = f.read()
+    except OSError as exc:
+        return {
+            "success": False,
+            "message": "skills: failed to read '%s': %s" % (fname, exc),
+        }
+
+    return {
+        "success": True,
+        "topic": fname[:-3],
+        "filename": fname,
+        "body": body,
+        "byte_size": len(body.encode("utf-8")),
+    }
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
