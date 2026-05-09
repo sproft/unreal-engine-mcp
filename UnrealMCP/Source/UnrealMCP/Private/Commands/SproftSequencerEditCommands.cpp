@@ -15,6 +15,7 @@
 #include "MovieSceneSequence.h"
 #include "MovieSceneSpawnable.h"
 #include "MovieSceneTrack.h"
+#include "UObject/Class.h"
 #include "UObject/Package.h"
 
 namespace
@@ -187,6 +188,170 @@ namespace
         }
         return nullptr;
     }
+
+    /** Resolve a UMovieSceneTrack subclass by short name or full path.
+     *  Short tokens cover the canonical track set the agent reaches for
+     *  in 90% of cases. */
+    UClass* ResolveTrackClass(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        const FString Lower = Token.ToLower();
+        // Short-name lookups go through LoadClass to keep the includes
+        // narrow; the engine resolves the canonical /Script/MovieSceneTracks
+        // path for the well-known UMovieScene...Track types.
+        struct FShortTokenMap
+        {
+            const TCHAR* Token;
+            const TCHAR* Path;
+        };
+        static const FShortTokenMap Map[] = {
+            { TEXT("transform"),          TEXT("/Script/MovieSceneTracks.MovieScene3DTransformTrack") },
+            { TEXT("3d_transform"),       TEXT("/Script/MovieSceneTracks.MovieScene3DTransformTrack") },
+            { TEXT("camera_cut"),         TEXT("/Script/MovieSceneTracks.MovieSceneCameraCutTrack") },
+            { TEXT("cameracut"),          TEXT("/Script/MovieSceneTracks.MovieSceneCameraCutTrack") },
+            { TEXT("skeletal_animation"), TEXT("/Script/MovieSceneTracks.MovieSceneSkeletalAnimationTrack") },
+            { TEXT("skeletalanimation"),  TEXT("/Script/MovieSceneTracks.MovieSceneSkeletalAnimationTrack") },
+            { TEXT("audio"),              TEXT("/Script/MovieSceneTracks.MovieSceneAudioTrack") },
+            { TEXT("event"),              TEXT("/Script/MovieSceneTracks.MovieSceneEventTrack") },
+            { TEXT("float"),              TEXT("/Script/MovieSceneTracks.MovieSceneFloatTrack") },
+            { TEXT("subscene"),           TEXT("/Script/MovieSceneTracks.MovieSceneSubTrack") },
+            { TEXT("bool"),               TEXT("/Script/MovieSceneTracks.MovieSceneBoolTrack") },
+            { TEXT("byte"),               TEXT("/Script/MovieSceneTracks.MovieSceneByteTrack") },
+        };
+        for (const FShortTokenMap& Entry : Map)
+        {
+            if (Lower == Entry.Token)
+            {
+                if (UClass* Loaded = LoadClass<UMovieSceneTrack>(nullptr, Entry.Path))
+                {
+                    return Loaded;
+                }
+            }
+        }
+
+        if (Token.StartsWith(TEXT("/Script/")))
+        {
+            if (UClass* Loaded = LoadClass<UMovieSceneTrack>(nullptr, *Token))
+            {
+                return Loaded;
+            }
+        }
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            if (Found->IsChildOf(UMovieSceneTrack::StaticClass()))
+            {
+                return Found;
+            }
+        }
+        const FString TracksPath = FString::Printf(TEXT("/Script/MovieSceneTracks.%s"), *Token);
+        if (UClass* Loaded = LoadClass<UMovieSceneTrack>(nullptr, *TracksPath))
+        {
+            return Loaded;
+        }
+        return nullptr;
+    }
+
+    /** Find a binding GUID by short name. Walks possessables first
+     *  (the common case for actor-bound tracks) and falls through to
+     *  spawnables. Empty Target returns FGuid() to signal "no binding". */
+    FGuid FindBindingByName(UMovieScene* MovieScene, const FString& Target)
+    {
+        if (!MovieScene || Target.IsEmpty())
+        {
+            return FGuid();
+        }
+        const int32 PossCount = MovieScene->GetPossessableCount();
+        for (int32 I = 0; I < PossCount; ++I)
+        {
+            const FMovieScenePossessable& Poss = MovieScene->GetPossessable(I);
+            if (Poss.GetName() == Target || Poss.GetName().Contains(Target))
+            {
+                return Poss.GetGuid();
+            }
+        }
+        const int32 SpawnCount = MovieScene->GetSpawnableCount();
+        for (int32 I = 0; I < SpawnCount; ++I)
+        {
+            FMovieSceneSpawnable& Spawn = MovieScene->GetSpawnable(I);
+            if (Spawn.GetName() == Target || Spawn.GetName().Contains(Target))
+            {
+                return Spawn.GetGuid();
+            }
+        }
+        return FGuid();
+    }
+
+    /** Find a track on a movie scene by FName / display name substring.
+     *  When BindingGuid is set, we search the per-binding track list.
+     *  Otherwise we walk the master track list. */
+    UMovieSceneTrack* FindTrackByName(UMovieScene* MovieScene, const FString& Target, const FGuid& BindingGuid)
+    {
+        if (!MovieScene || Target.IsEmpty())
+        {
+            return nullptr;
+        }
+        auto Match = [&Target](UMovieSceneTrack* Track) -> bool
+        {
+            if (!Track)
+            {
+                return false;
+            }
+            if (Track->GetFName().ToString().Contains(Target))
+            {
+                return true;
+            }
+#if WITH_EDITORONLY_DATA
+            if (Track->GetDisplayName().ToString().Contains(Target))
+            {
+                return true;
+            }
+#endif
+            if (Track->GetClass()->GetName().Contains(Target))
+            {
+                return true;
+            }
+            return false;
+        };
+
+        if (BindingGuid.IsValid())
+        {
+            // Per-binding tracks live on the FMovieSceneBinding entry.
+            for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
+            {
+                if (Binding.GetObjectGuid() != BindingGuid)
+                {
+                    continue;
+                }
+                for (UMovieSceneTrack* Track : Binding.GetTracks())
+                {
+                    if (Match(Track))
+                    {
+                        return Track;
+                    }
+                }
+            }
+            return nullptr;
+        }
+        for (UMovieSceneTrack* Track : MovieScene->GetTracks())
+        {
+            if (Match(Track))
+            {
+                return Track;
+            }
+        }
+        // Camera cut track is special-cased on UMovieScene.
+        if (UMovieSceneTrack* CameraCut = MovieScene->GetCameraCutTrack())
+        {
+            if (Match(CameraCut))
+            {
+                return CameraCut;
+            }
+        }
+        return nullptr;
+    }
 }
 
 FSproftSequencerEditCommands::FSproftSequencerEditCommands()
@@ -217,6 +382,14 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCommand(const FStrin
     if (Op == TEXT("add_possessable"))
     {
         return HandleAddPossessable(Params);
+    }
+    if (Op == TEXT("add_track"))
+    {
+        return HandleAddTrack(Params);
+    }
+    if (Op == TEXT("add_section"))
+    {
+        return HandleAddSection(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("sequencer_edit: unsupported op '%s'"), *Op));
@@ -538,6 +711,252 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddPossessable(const
     Result->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
     Result->SetStringField(TEXT("actor_class"), Actor->GetClass()->GetName());
     Result->SetStringField(TEXT("actor_class_path"), Actor->GetClass()->GetPathName());
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddTrack(const TSharedPtr<FJsonObject>& Params)
+{
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    UMovieSceneSequence* Sequence = Cast<UMovieSceneSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMovieSceneSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    FString TrackClassToken;
+    if (!Params->TryGetStringField(TEXT("track_class"), TrackClassToken)
+        && !Params->TryGetStringField(TEXT("class"), TrackClassToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'track_class' parameter"));
+    }
+    UClass* TrackClass = ResolveTrackClass(TrackClassToken);
+    if (!TrackClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UMovieSceneTrack class '%s'"), *TrackClassToken));
+    }
+    if (TrackClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is abstract"), *TrackClass->GetPathName()));
+    }
+
+    // Resolve optional binding GUID through the named lookup so callers
+    // do not need to round-trip through `inspect` for the GUID.
+    FGuid BindingGuid;
+    FString BindingGuidString;
+    if (Params->TryGetStringField(TEXT("binding"), BindingGuidString)
+        || Params->TryGetStringField(TEXT("binding_guid"), BindingGuidString))
+    {
+        if (!FGuid::Parse(BindingGuidString, BindingGuid))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Invalid binding GUID '%s'"), *BindingGuidString));
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        FString PossessableName;
+        if (Params->TryGetStringField(TEXT("possessable"), PossessableName)
+            || Params->TryGetStringField(TEXT("actor"), PossessableName))
+        {
+            BindingGuid = FindBindingByName(MovieScene, PossessableName);
+            if (!BindingGuid.IsValid())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("No binding matching '%s' on sequence '%s'"),
+                        *PossessableName, *Sequence->GetName()));
+            }
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    UMovieSceneTrack* NewTrack = nullptr;
+    if (BindingGuid.IsValid())
+    {
+        NewTrack = MovieScene->AddTrack(TrackClass, BindingGuid);
+    }
+    else
+    {
+        // Camera cut tracks live on UMovieScene's dedicated CameraCutTrack
+        // slot. Other master tracks attach via the no-binding AddTrack
+        // overload (5.4+ unified the "Master" / "non-binding" surfaces).
+        if (TrackClass->GetName().Contains(TEXT("CameraCut")))
+        {
+            if (UMovieSceneTrack* Existing = MovieScene->GetCameraCutTrack())
+            {
+                NewTrack = Existing;
+            }
+            else
+            {
+                // The camera cut track lives on a single dedicated slot
+                // on UMovieScene. NewObject's the track, then registers
+                // it through SetCameraCutTrack so Sequencer's runtime
+                // picks it up the same way the editor's "Add Camera Cut
+                // Track" button does.
+                NewTrack = NewObject<UMovieSceneTrack>(MovieScene, TrackClass, NAME_None, RF_Transactional);
+                if (NewTrack)
+                {
+                    MovieScene->SetCameraCutTrack(NewTrack);
+                }
+            }
+        }
+        else
+        {
+            NewTrack = MovieScene->AddTrack(TrackClass);
+        }
+    }
+    if (!NewTrack)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to add track of class '%s'"), *TrackClass->GetPathName()));
+    }
+
+    Sequence->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_track"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("track_name"), NewTrack->GetFName().ToString());
+#if WITH_EDITORONLY_DATA
+    Result->SetStringField(TEXT("display_name"), NewTrack->GetDisplayName().ToString());
+#endif
+    Result->SetStringField(TEXT("class"), TrackClass->GetName());
+    Result->SetStringField(TEXT("class_path"), TrackClass->GetPathName());
+    if (BindingGuid.IsValid())
+    {
+        Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddSection(const TSharedPtr<FJsonObject>& Params)
+{
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    UMovieSceneSequence* Sequence = Cast<UMovieSceneSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMovieSceneSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    FString TrackName;
+    if (!Params->TryGetStringField(TEXT("track"), TrackName)
+        && !Params->TryGetStringField(TEXT("track_name"), TrackName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'track' parameter (FName / display name / class substring)"));
+    }
+
+    FGuid BindingGuid;
+    FString BindingGuidString;
+    if (Params->TryGetStringField(TEXT("binding"), BindingGuidString)
+        || Params->TryGetStringField(TEXT("binding_guid"), BindingGuidString))
+    {
+        if (!FGuid::Parse(BindingGuidString, BindingGuid))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Invalid binding GUID '%s'"), *BindingGuidString));
+        }
+    }
+
+    UMovieSceneTrack* Track = FindTrackByName(MovieScene, TrackName, BindingGuid);
+    if (!Track)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No track matching '%s' on sequence '%s'%s"),
+                *TrackName, *Sequence->GetName(),
+                BindingGuid.IsValid() ? *FString::Printf(TEXT(" (binding %s)"), *BindingGuid.ToString())
+                                       : TEXT("")));
+    }
+
+    int32 StartFrame = 0;
+    int32 DurationFrames = 0;
+    if (!Params->TryGetNumberField(TEXT("start_frame"), StartFrame))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'start_frame' (integer, tick-resolution frame)"));
+    }
+    if (!Params->TryGetNumberField(TEXT("duration_frames"), DurationFrames))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'duration_frames' (integer, tick-resolution frames)"));
+    }
+    if (DurationFrames <= 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("'duration_frames' must be positive"));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    UMovieSceneSection* NewSection = Track->CreateNewSection();
+    if (!NewSection)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Track '%s' (%s) returned null from CreateNewSection"),
+                *TrackName, *Track->GetClass()->GetName()));
+    }
+    const TRange<FFrameNumber> Range = TRange<FFrameNumber>(
+        TRangeBound<FFrameNumber>::Inclusive(FFrameNumber(StartFrame)),
+        TRangeBound<FFrameNumber>::Exclusive(FFrameNumber(StartFrame + DurationFrames)));
+    NewSection->SetRange(Range);
+    Track->AddSection(*NewSection);
+
+    Sequence->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_section"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("track_name"), Track->GetFName().ToString());
+    Result->SetStringField(TEXT("track_class"), Track->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class"), NewSection->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class_path"), NewSection->GetClass()->GetPathName());
+    Result->SetNumberField(TEXT("start_frame"), StartFrame);
+    Result->SetNumberField(TEXT("end_frame_exclusive"), StartFrame + DurationFrames);
+    Result->SetNumberField(TEXT("duration_frames"), DurationFrames);
+    if (BindingGuid.IsValid())
+    {
+        Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());
+    }
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }

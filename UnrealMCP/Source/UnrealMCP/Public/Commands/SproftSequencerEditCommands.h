@@ -4,7 +4,7 @@
 #include "Json.h"
 
 /**
- * Sproft fork addition: sequencer_edit (read + small edit slice)
+ * Sproft fork addition: sequencer_edit (read + edit slice)
  *
  * Multi-op tool keyed by `op`:
  *   - `inspect` (default): read-only structured dump of a
@@ -15,12 +15,15 @@
  *     `/Game/...` package path with default tick / display rates and
  *     an empty MovieScene through ULevelSequence::Initialize.
  *   - `add_possessable`: bind a named editor-world actor to an
- *     existing ULevelSequence. Wraps UMovieScene::AddPossessable +
- *     UMovieSceneSequence::BindPossessableObject so the Sequencer UI
- *     picks the binding up the next time the asset opens.
- *
- * Edit-slice future work (track add, section add, section move,
- * spawnable creation, camera-cut creation) stays on BACKLOG.md.
+ *     existing ULevelSequence.
+ *   - `add_track`: add a UMovieSceneTrack of a chosen subclass. Master
+ *     tracks (e.g. UMovieSceneCameraCutTrack) attach via
+ *     `UMovieScene::AddMasterTrack`; binding-scoped tracks (e.g.
+ *     UMovieScene3DTransformTrack) require a target binding GUID or
+ *     possessable name and attach via `UMovieScene::AddTrack`.
+ *   - `add_section`: append a section to a chosen track at an explicit
+ *     start frame + duration. Uses `UMovieSceneTrack::CreateNewSection` +
+ *     `AddSection` so the track decides its native section subclass.
  *
  * Inputs (inspect):
  *   - sequence: short asset name or full `/Game/...` Level Sequence
@@ -45,6 +48,33 @@
  *   - binding_name: friendly name for the FMovieScenePossessable.
  *     Optional; falls back to the actor's GetActorLabel() when
  *     omitted.
+ *   - save: save the asset after the edit. Default True.
+ *
+ * Inputs (add_track):
+ *   - sequence: BT asset path / short name. Required.
+ *   - track_class: UMovieSceneTrack subclass. Accepts a short token
+ *     (`transform`, `camera_cut`, `skeletal_animation`, `audio`,
+ *     `event`, `float`, `subscene`, `bool`, `byte`), a full
+ *     `/Script/Module.ClassName` path, or `MovieScene...Track` style
+ *     class name. Required.
+ *   - binding: optional binding GUID (string) for a binding-scoped
+ *     track. Mutually exclusive with `actor` / `possessable`.
+ *   - actor: optional actor name; the call resolves the actor's
+ *     binding by `FMovieScenePossessable::GetName()` first, then
+ *     binding-name match.
+ *   - possessable: optional possessable name (matched against
+ *     `FMovieScenePossessable::GetName()`).
+ *   - save: save the asset after the edit. Default True.
+ *
+ * Inputs (add_section):
+ *   - sequence: required.
+ *   - track: track FName / display name (case-insensitive substring
+ *     match). Required. The first match wins; pass a more specific
+ *     name when ambiguous.
+ *   - binding: optional binding GUID to disambiguate when a track of
+ *     the same class lives under a possessable.
+ *   - start_frame: integer tick-resolution start frame. Required.
+ *   - duration_frames: integer tick-resolution duration. Required.
  *   - save: save the asset after the edit. Default True.
  *
  * Read-only `inspect` does not mutate the asset; the two edit ops
@@ -82,4 +112,6 @@ private:
     TSharedPtr<FJsonObject> HandleSequencerInspect(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleCreateLevelSequence(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddPossessable(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddTrack(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddSection(const TSharedPtr<FJsonObject>& Params);
 };
