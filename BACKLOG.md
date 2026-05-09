@@ -9,6 +9,66 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass deepened edit-side coverage on four
+already-shipped multi-op tools: `behavior_tree` adds three edit
+ops (`add_child_task` appends a UBTNode child slot under a target
+composite via `UBTCompositeNode::Children.AddDefaulted_GetRef()` +
+`ChildComposite` / `ChildTask` assignment with `InitializeFromAsset`
+wiring; `add_decorator` appends a UBTDecorator to a child slot's
+`Decorators` array; `add_service` appends a UBTService to a
+composite's `Services` array). The new short-name resolver covers
+the stock task / decorator / service set (`wait` / `move_to` /
+`blackboard` / `cooldown` / `loop` / `time_limit` / `default_focus`
+etc.) plus `/Script/Module.ClassName` and `/Game/...` BP class
+paths. `sequencer_edit` adds two edit ops: `add_track` resolves a
+UMovieSceneTrack subclass by short token (`transform` /
+`camera_cut` / `skeletal_animation` / `audio` / `event` / `float` /
+`subscene` / `bool` / `byte`) plus full paths and routes
+binding-scoped tracks through `UMovieScene::AddTrack(Class, Guid)`,
+camera cut tracks through `UMovieScene::SetCameraCutTrack` with
+`NewObject<UMovieSceneTrack>`, and master tracks through the
+no-binding `UMovieScene::AddTrack(Class)` overload (5.4+ unified
+the master / no-binding path); `add_section` calls
+`UMovieSceneTrack::CreateNewSection` (so the track decides its
+native section subclass), wraps `start_frame` + `duration_frames`
+into a `TRange<FFrameNumber>` (inclusive start, exclusive end), and
+attaches via `AddSection`. `gas_edit` adds three modifier ops:
+`add_modifier` appends an `FGameplayModifierInfo` with attribute /
+modifier op / scalable-float magnitude (modifier op covers
+`Add` / `Multiply` / `Override` / `Division` plus the canonical
+UE 5.x names case-insensitive); `remove_modifier_at` removes by
+index; `set_attribute_default` writes a UAttributeSet's base value,
+branching between legacy float storage and the
+`FGameplayAttributeData` struct path. `metasound_edit` adds the
+graph-authoring slice: `add_node` parses a
+`Namespace.Name[.Variant]` token through
+`FMetasoundFrontendClassName::Parse` and routes through
+`UMetaSoundBuilderBase::AddNodeByClassName(ClassName, Result, MajorVersion=1)`;
+`connect_nodes` parses two FGuid strings (from add_node return
+values) and routes through the public
+`ConnectNodes(SourceNode, OutputName, DestinationNode, InputName)`
+overload. The builder is obtained per-asset through
+`UMetaSoundBuilderSubsystem::AttachBuilderToAssetChecked`. Each
+mutating op runs `MarkPackageDirty` and saves to disk by default;
+recompile + save on the GAS side route through the owning
+Blueprint when the asset is a UBlueprint.
+
+This pass also lays down a small portability cleanup. UE 5.7's
+stricter `FString::Printf` format-string check (the new
+`TCheckedFormatStringPrivate` wrapper on argument 1) rejects passing
+a runtime `FString` as the format. The four shipped Sproft commands
+that used `'/Script/Module.%s'` through Printf for namespace
+fallback lookups (animation_edit, bp_component, scene_compose,
+scene_query) now concatenate the namespace prefix + class name
+directly. Two doxygen comment blocks on
+`SproftFoliageEditCommands.h` and `SproftNiagaraEditCommands.h` had
+nested `/* ... */` fragments that parse cleanly under previous UE
+versions but trip the 5.7 pre-processor; both un-nest. The
+uplugin manifest also gains the `GameplayAbilities`,
+`GameplayTagsEditor`, and `GeometryCollectionPlugin` entries so the
+dependency warnings UBT raised about the modules pulled in by
+gas_edit / chaos_edit go away.
+
+The pass before that deepened edit-side coverage on four
 read-only tools shipped earlier: `pcg_graph_edit` adds an edit
 slice (`add_node` through `UPCGGraph::AddNodeOfType<T>`,
 `connect_pins` through `UPCGGraph::AddEdge`, `remove_node`
@@ -514,17 +574,33 @@ ability" alongside `tag_registry_edit`.
   composites also report their FinishMode (immediate / delayed).
   The recursive walk caps at `max_depth` (default 32) and flips
   `children_truncated` on the offending composite.
-  The new edit ops are `create_behavior_tree` (NewObject's a
+  The earlier edit ops are `create_behavior_tree` (NewObject's a
   UBehaviorTree at a `/Game/...` path with an optional linked
-  UBlackboardData and the standard `overwrite` escape hatch for
-  an existing asset) and `add_root_composite` (NewObject's a
+  UBlackboardData) and `add_root_composite` (NewObject's a
   Selector / Sequence / SimpleParallel composite under the tree
-  and assigns it as `RootNode`; `replace=true` overrides the
-  existing-RootNode guard). Both edit ops save by default. Pairs
-  with `niagara_inspect` for AI assets. Heavier edit ops (append
-  child task / composite, insert decorator, append service,
-  blackboard key edits) remain on the backlog. Adds AIModule to
-  PublicDependencyModuleNames.
+  and assigns it as `RootNode`). The newer edit ops are
+  `add_child_task` (appends a UBTNode child slot under a target
+  composite via `UBTCompositeNode::Children.AddDefaulted_GetRef()`
+  + `ChildComposite` / `ChildTask` assignment with
+  `InitializeFromAsset` wiring; resolves the parent composite by
+  `GetNodeName()` substring or the `root` sentinel; the new node
+  outers under the tree asset so it travels with the package on
+  save), `add_decorator` (appends a UBTDecorator to a child slot's
+  Decorators array; targets the child by `GetNodeName()`
+  substring), and `add_service` (appends a UBTService to a
+  composite's Services array). Each new node accepts an optional
+  flat property dict applied through
+  `FProperty::ImportText_InContainer`; failed entries surface under
+  `skipped`. Short-name resolver covers the stock task / decorator
+  / service set (`wait` / `move_to` / `blackboard` / `cooldown` /
+  `loop` / `time_limit` / `default_focus` etc.) plus full
+  `/Script/Module.ClassName` paths and `/Game/...` BP class paths.
+  All edit ops save by default. The runtime exec / memory indices
+  stay null on append; the BT graph editor's RebuildExecutionOrder
+  populates them when the asset is re-opened or re-compiled. Adds
+  AIModule to PublicDependencyModuleNames. Open follow-on:
+  Blackboard key edit surface (add / remove / rename / type change
+  / sync flag toggle).
 - `widget_edit` slot-property surface — a third op `set_slot_property`
   on the existing `widget_edit` tool. Takes a target widget FName plus
   a flat property dict and applies the dict to the widget's UPanelSlot
@@ -802,9 +878,28 @@ ability" alongside `tag_registry_edit`.
   runtime can map the binding GUID back to the actor;
   `binding_name` defaults to the actor's `GetActorLabel()`). Both
   edit ops save by default. Adds `MovieScene` and `LevelSequence`
-  to PublicDependencyModuleNames. Heavier edit ops (track add,
-  section move, spawnable creation, camera-cut creation, per-row
-  edits) remain on the backlog.
+  to PublicDependencyModuleNames.
+  The newer edit ops are `add_track` and `add_section`. `add_track`
+  resolves a UMovieSceneTrack subclass by short token (`transform`
+  / `camera_cut` / `skeletal_animation` / `audio` / `event` /
+  `float` / `subscene` / `bool` / `byte`) plus
+  `/Script/MovieSceneTracks.X` paths and `/Script/Module.Class`
+  shapes; binding-scoped tracks attach via
+  `UMovieScene::AddTrack(TrackClass, BindingGuid)` when a binding
+  GUID or possessable name resolves, master tracks attach via the
+  no-binding `UMovieScene::AddTrack(TrackClass)` overload (5.4+
+  unified the master / no-binding path), and camera cut tracks land
+  on `UMovieScene::SetCameraCutTrack` after a NewObject of the
+  track class. `add_section` calls
+  `UMovieSceneTrack::CreateNewSection` (so the track decides its
+  native section subclass), wraps the requested `start_frame` +
+  `duration_frames` into a `TRange<FFrameNumber>` with an inclusive
+  start and exclusive end bound, and attaches via `AddSection`. The
+  track lookup matches a track by FName / display name / class name
+  substring, scoped to a binding when a binding GUID is supplied so
+  a sequence with multiple bindings of the same track type stays
+  addressable. Heavier edit ops (section move, spawnable creation,
+  per-row edits) remain on the backlog.
 - `gas_edit` (small read + edit slice) — Gameplay Ability System
   multi-op tool keyed by `op`. The default op `inspect` covers the
   three asset shapes:
@@ -851,9 +946,30 @@ ability" alongside `tag_registry_edit`.
   `UBlockAbilityTagsGameplayEffectComponent` and call each component's
   `SetAndApplyAssetTagChanges` / `SetAndApplyTargetTagChanges` /
   `SetAndApplyBlockedAbilityTagChanges` mutator so the cached
-  tag-container snapshot on the GE refreshes. Heavier ops (modifier
-  add / remove, cost / cooldown rebind, attribute default override,
-  GameplayCue authoring) remain on the backlog.
+  tag-container snapshot on the GE refreshes.
+  The newer modifier ops are `add_modifier` (appends an
+  `FGameplayModifierInfo` with attribute / modifier op /
+  scalable-float magnitude; `attribute` accepts
+  `<set_path>:<attr_name>` colon shape, separate `attribute_set` +
+  `attribute_name` params, or a bare attribute name that sweeps
+  every loaded UAttributeSet subclass for the first matching
+  FProperty filtered through
+  `FGameplayAttribute::IsSupportedProperty`; `modifier_op` covers
+  `Add` / `Multiply` / `Override` / `Division` plus the canonical
+  UE 5.x names (`add_base` / `multiply_additive` / `divide_additive`
+  / `multiply_compound` / `add_final`) case-insensitive; `magnitude`
+  wraps a literal float into `FScalableFloat` and the
+  modifier-magnitude variant constructor),
+  `remove_modifier_at` (bounds-checked `Modifiers.RemoveAt`), and
+  `set_attribute_default` (writes a UAttributeSet's base value plus
+  the matching current value for `FGameplayAttributeData` storage,
+  branching between the legacy float path and the
+  `FGameplayAttributeData` struct path through
+  `CastField<FStructProperty>::Struct->IsChildOf`). Each mutating op
+  recompiles + saves on success unless overridden; recompile + save
+  run through the owning Blueprint when the asset is a UBlueprint.
+  Heavier ops (cost / cooldown rebind, GameplayCue authoring) remain
+  on the backlog.
 - `performance_audit` (small, read-only) — frame-time / thread-time
   snapshot for the active editor viewport. Reads the live
   `FStatUnitData` ring (the 200-sample circular buffer that `stat
@@ -897,11 +1013,28 @@ ability" alongside `tag_registry_edit`.
   `UMetaSoundEditorSubsystem::GetChecked()`'s public `InitAsset` +
   `RegisterGraphWithFrontend` so the new asset has a fresh document
   plus an editor graph that opens cleanly in the MetaSound editor.
-  The graph-authoring surface (add nodes, connect pins, set member
-  defaults) stays on the backlog. Adds MetasoundEngine to
-  PublicDependencyModuleNames, MetasoundEditor to the editor-only
-  PrivateDependencyModuleNames, and Metasound to the uplugin's
-  plugin list so consumer projects auto-enable it.
+  Adds MetasoundEngine to PublicDependencyModuleNames,
+  MetasoundEditor to the editor-only PrivateDependencyModuleNames,
+  and Metasound to the uplugin's plugin list so consumer projects
+  auto-enable it.
+  The newer graph-authoring ops are `add_node` and `connect_nodes`.
+  The builder is obtained per-asset through
+  `UMetaSoundBuilderSubsystem::AttachBuilderToAssetChecked(Asset)`
+  on the asset's `IMetaSoundDocumentInterface`; the subsystem
+  attaches a `UMetaSoundBuilderBase` to the document so subsequent
+  graph edits land on the asset and the editor graph picks them up
+  the next time it opens. `add_node` parses a
+  `Namespace.Name[.Variant]` token through
+  `FMetasoundFrontendClassName::Parse` (with a bare-name fallback
+  for empty namespace) and routes through
+  `AddNodeByClassName(ClassName, Result, MajorVersion=1)`; returns
+  the new node handle's GUID so a follow-up `connect_nodes` can
+  address it without a round-trip through inspect. `connect_nodes`
+  parses two FGuid strings and routes through
+  `ConnectNodes(SourceNode, OutputName, DestinationNode, InputName,
+  Result)`. Saves on success unless save=false. Member-default
+  writes and the read-only `metasound_inspect` counterpart stay on
+  the backlog.
 - `unreal_api` (small, read-only) — reflection-driven query of the
   live UE5 type database. Where the hosted Flop tool is documented as
   a "15 K+ API lookup", this clean-room variant trades the offline
@@ -1780,25 +1913,24 @@ After the latest pass (`landscape_edit` small variant retry,
    functions across one root class plus all its descendants, and a
    `class_diff` op that compares two related UClasses (parent vs
    child, or two cousins) and emits the property / function delta.
-11. `gas_edit` heavier ops — append a modifier to a UGameplayEffect
-   with attribute target + ModifierOp + scalable-float magnitude,
-   rebind cost / cooldown classes on a UGameplayAbility through the
-   CDO, an attribute-default override path that writes through the
-   CDO and recompiles the Blueprint, and a GameplayCue authoring
-   slice (cue-tag set + level range + magnitude attribute).
-12. `behavior_tree` heavier edit ops — append a child task /
-   composite to a chosen parent, insert a decorator on a chosen
-   child slot, append a service on a composite, and the full
-   Blackboard key edit surface. Reuses the AIModule dep already
-   pulled in.
-13. `sequencer_edit` heavier edit ops — track add (a chosen
-   UMovieSceneTrack subclass), section add (with an explicit frame
-   range), section move, spawnable creation, and camera-cut track
-   creation. Reuses the MovieScene + LevelSequence deps.
-14. `metasound_edit` graph-authoring slice — add nodes / connect
-    pins through the `UMetaSoundBuilder` API, member-default writes,
-    and a `metasound_inspect` read-only counterpart that walks the
-    asset's document and emits the node graph as a JSON edge list.
+11. `gas_edit` remaining ops — rebind cost / cooldown classes on a
+   UGameplayAbility through the CDO, and a GameplayCue authoring
+   slice (cue-tag set + level range + magnitude attribute). The
+   modifier add / remove / attribute-default override ops shipped
+   in the most recent pass.
+12. `behavior_tree` heavier edit ops — Blackboard key edit surface
+   (add / remove / rename / type change / sync flag toggle) and
+   tree-level RootDecorator authoring. The append-child-task,
+   add-decorator, and add-service ops shipped in the most recent
+   pass.
+13. `sequencer_edit` remaining edit ops — section move, spawnable
+   creation, and per-row edits. The track-add and section-add ops
+   shipped in the most recent pass.
+14. `metasound_edit` follow-ons — member-default writes through the
+    builder, and a `metasound_inspect` read-only counterpart that
+    walks the asset's document and emits the node graph as a JSON
+    edge list. The `add_node` / `connect_nodes` graph-authoring
+    ops shipped in the most recent pass.
 15. `pie_test_bp` heavier kinds — `function_returns` (invoke a
     Blueprint function in PIE and assert on its return value),
     `event_fired` (custom-event broadcast assertion in PIE), and
