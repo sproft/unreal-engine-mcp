@@ -57,7 +57,9 @@ public class UnrealMCP : ModuleRules
 				"Foliage",            // For AInstancedFoliageActor / UFoliageType (Sproft foliage_inspect)
 				"MovieScene",         // For UMovieScene / UMovieSceneTrack / UMovieSceneSection (Sproft sequencer_edit)
 				"LevelSequence",      // For ULevelSequence (Sproft sequencer_edit)
-				"EngineSettings"      // For UGameMapsSettings (Sproft project_context); Projects is already in PrivateDependencyModuleNames below
+				"EngineSettings",     // For UGameMapsSettings (Sproft project_context); Projects is already in PrivateDependencyModuleNames below
+				"RenderCore",         // For GGameThreadTime / GRenderThreadTime / GRHIThreadTime (Sproft performance_audit)
+				"RHI"                 // For GGPUFrameTime (Sproft performance_audit)
 			}
 		);
 

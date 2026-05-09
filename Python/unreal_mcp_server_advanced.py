@@ -6199,6 +6199,69 @@ def foliage_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def performance_audit(
+    frames: Optional[int] = None,
+    metrics: Optional[List[str]] = None,
+    include_samples: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only performance snapshot for the active editor viewport.
+
+    Reads the live ``FStatUnitData`` ring on the editor's active
+    viewport (a 200-sample circular buffer that ``stat unit`` already
+    populates) plus the ``GAverageMS`` / ``GAverageFPS`` /
+    ``GGameThreadTime`` / ``GRenderThreadTime`` / ``GRHIThreadTime``
+    cycle-counter globals, and returns a per-metric ``avg_ms`` /
+    ``peak_ms`` / ``last_ms`` triple over the last ``frames`` samples
+    plus a live ``globals`` block.
+
+    Skips the deep-dive captures (``stat startfile`` / ``stat
+    stopfile``, Insights traces, FPSChart). Those stay on the backlog.
+
+    Args:
+        frames: Window size for the running averages. Default 60,
+            capped at the engine's 200-sample ring in non-shipping
+            builds.
+        metrics: Optional list of metric tokens to filter the report
+            to a subset. Allowed tokens: ``frame`` (total frame time),
+            ``game`` (game-thread), ``render`` (render-thread),
+            ``rhi`` (RHI thread), ``gpu`` (GPU frame), ``globals``
+            (live cycle-counter snapshot), ``samples`` (the raw
+            per-frame ring dump). When omitted, every metric ships.
+        include_samples: Opt-in raw per-frame array dump for each
+            kept metric. Default False; the summary triples are
+            usually enough.
+
+    Returns:
+        Dict with ``requested_frames``, ``max_samples``,
+        ``sample_count``, optional per-metric ``frame`` / ``game`` /
+        ``render`` / ``rhi`` / ``gpu`` blocks (each with ``avg_ms`` +
+        ``peak_ms`` + ``last_ms`` + ``counted_samples``), an optional
+        ``samples`` block (when ``include_samples=true``), the live
+        ``globals`` block, and a ``viewport`` echo (or ``null`` when
+        no viewport client is reachable).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {}
+    if frames is not None:
+        params["frames"] = frames
+    if metrics is not None:
+        params["metrics"] = metrics
+    if include_samples is not None:
+        params["include_samples"] = include_samples
+
+    try:
+        response = unreal.send_command("performance_audit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"performance_audit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")

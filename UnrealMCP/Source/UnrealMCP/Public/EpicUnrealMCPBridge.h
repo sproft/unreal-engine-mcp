@@ -53,6 +53,7 @@
 #include "Commands/SproftPieTestSceneCommands.h"
 #include "Commands/SproftAnimationEditCommands.h"
 #include "Commands/SproftFoliageEditCommands.h"
+#include "Commands/SproftPerformanceAuditCommands.h"
 #include "EpicUnrealMCPBridge.generated.h"
 
 class FMCPServerRunnable;
@@ -142,4 +143,5 @@ private:
 	TSharedPtr<FSproftPieTestSceneCommands> SproftPieTestScene;
 	TSharedPtr<FSproftAnimationEditCommands> SproftAnimationEdit;
 	TSharedPtr<FSproftFoliageEditCommands> SproftFoliageEdit;
+	TSharedPtr<FSproftPerformanceAuditCommands> SproftPerformanceAudit;
 };
