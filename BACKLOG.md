@@ -8,7 +8,29 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped three small wide-domain read-only
+The most recent pass shipped one minimum-cut runtime tool plus two
+small edit slices on existing read-only inspectors: `pie_test_scene`
+(scene-state assertion harness with two assertion kinds answered
+statically against the editor world without driving Play in
+Editor: `actor_exists` for actor-name presence and
+`actor_at_location` for distance-bounded location matches),
+`behavior_tree` edit slice (`create_behavior_tree` for a new
+UBehaviorTree at a `/Game/...` path with an optional linked
+Blackboard plus `add_root_composite` to assign a Selector /
+Sequence / SimpleParallel as the tree's RootNode in two
+declarative calls), and `sequencer_edit` edit slice
+(`create_level_sequence` for a new ULevelSequence with the default
+tick / display rates through `ULevelSequence::Initialize` plus
+`add_possessable` to bind a named editor-world actor through
+`UMovieScene::AddPossessable` + `BindPossessableObject`). Edit-
+side ops requiring a running PIE world (`var_equals`,
+`actor_overlapping_tag` for overlap-driven gameplay assertions)
+plus the heavier branches on each edit slice (BT child append /
+decorator insertion / blackboard key edits, Sequencer track add /
+section move / spawnable creation / camera-cut creation) stay on
+this list.
+
+The pass before that shipped three small wide-domain read-only
 tools that round out the orientation surface the agent reaches
 for at the start of a session: `project_context` (one-shot
 project summary covering identity, engine version, enabled
@@ -309,19 +331,28 @@ ability" alongside `tag_registry_edit`.
   `bp_brief` / `bp_inspect` / `bp_graph` triad and is the primary
   diff-able payload for verifying that an MCP-driven authoring
   session left a Blueprint in the expected state.
-- `behavior_tree` (small, read-only) — structured dump of a
-  UBehaviorTree asset. Returns the full tree (composite root +
-  recursive children + per-child decorator chain + per-composite
-  service chain), the tree-level RootDecorators, plus the linked
-  Blackboard (path, parent path, key list with name + type token +
-  inner BaseClass / EnumType / Struct path for typed Object / Class
-  / Enum / Struct keys, instance-sync flag, parent-inherited flag).
-  SimpleParallel composites also report their FinishMode (immediate
-  / delayed). The recursive walk caps at `max_depth` (default 32) and
-  flips `children_truncated` on the offending composite. Pairs with
-  `niagara_inspect` for AI assets. Edit-side ops (re-rooting,
-  decorator insertion, blackboard key edits) remain on the backlog.
-  Adds AIModule to PublicDependencyModuleNames.
+- `behavior_tree` (small) — multi-op tool keyed by `op`. The
+  `inspect` op (default) is the read-only structured dump shipped
+  earlier: full tree (composite root + recursive children +
+  per-child decorator chain + per-composite service chain), the
+  tree-level RootDecorators, plus the linked Blackboard (path,
+  parent path, key list with name + type token + inner BaseClass /
+  EnumType / Struct path for typed Object / Class / Enum / Struct
+  keys, instance-sync flag, parent-inherited flag). SimpleParallel
+  composites also report their FinishMode (immediate / delayed).
+  The recursive walk caps at `max_depth` (default 32) and flips
+  `children_truncated` on the offending composite.
+  The new edit ops are `create_behavior_tree` (NewObject's a
+  UBehaviorTree at a `/Game/...` path with an optional linked
+  UBlackboardData and the standard `overwrite` escape hatch for
+  an existing asset) and `add_root_composite` (NewObject's a
+  Selector / Sequence / SimpleParallel composite under the tree
+  and assigns it as `RootNode`; `replace=true` overrides the
+  existing-RootNode guard). Both edit ops save by default. Pairs
+  with `niagara_inspect` for AI assets. Heavier edit ops (append
+  child task / composite, insert decorator, append service,
+  blackboard key edits) remain on the backlog. Adds AIModule to
+  PublicDependencyModuleNames.
 - `widget_edit` slot-property surface — a third op `set_slot_property`
   on the existing `widget_edit` tool. Takes a target widget FName plus
   a flat property dict and applies the dict to the widget's UPanelSlot
@@ -385,6 +416,69 @@ ability" alongside `tag_registry_edit`.
   look like" question. The `module` + `module_dir` metadata
   through `FindClassModuleName` + `FindModulePath` lets a caller
   jump straight to the .Build.cs without a second tool call.
+- `pie_test_scene` (small, minimum cut) — scene-state assertion
+  harness. Runs against the editor world without driving Play in
+  Editor. Two assertion kinds in this slice:
+  - `actor_exists`: `target` is an actor name (matched against
+    `GetName()` first and Outliner label second). Pass = an
+    actor with that name or label is present in the current
+    editor world.
+  - `actor_at_location`: `target` is an actor name, `expected`
+    is a `[x, y, z]` world-space location, and `tolerance`
+    (default 1.0 cm) is the pass radius. Pass = the resolved
+    actor's `GetActorLocation` is within `tolerance` of
+    `expected`.
+  Per-assertion the response carries `index`, `kind`, `target`,
+  `passed` flag, optional `actual` / `expected` / `delta` /
+  `tolerance` for distance-based kinds, and a human-readable
+  `message`. Aggregate counts (`total`, `passed`, `failed`,
+  `unsupported`, `all_passed`) sit at the top of the response.
+  Open follow-ons: PIE-driven kinds (`var_equals` against a
+  Blueprint instance variable, `actor_overlapping_tag` for
+  overlap-driven gameplay assertions), per-assertion timeout for
+  PIE-driven kinds, and an over-PIE harness option for callers
+  who want the same surface but inside a running PIE world.
+- `behavior_tree` edit slice (small) — adds two edit ops to the
+  existing read-only inspector through a new `op` discriminator
+  (default stays `inspect`):
+  - `create_behavior_tree`: NewObject's a UBehaviorTree at a
+    `/Game/...` package path with an optional `/Game/...`
+    UBlackboardData linked through `BlackboardAsset`.
+    `overwrite=true` is the standard escape hatch for an existing
+    asset at the path.
+  - `add_root_composite`: NewObject's a Selector / Sequence /
+    SimpleParallel composite (case-insensitive token, with a
+    UClass-path escape hatch for any UBTCompositeNode subclass)
+    under the tree as outer and assigns it to `RootNode`. We
+    refuse to overwrite an existing RootNode unless `replace=true`.
+  Both ops save by default. Together the two ops produce a usable
+  empty tree in two declarative calls. Open follow-ons: append
+  child task / composite to a chosen parent, insert a decorator
+  on a chosen child slot, append a service on a composite, and
+  the full Blackboard key edit surface (add / remove / rename /
+  type change / sync flag toggle).
+- `sequencer_edit` edit slice (small) — adds two edit ops to the
+  existing read-only inspector through the same `op` discriminator
+  (default stays `inspect`):
+  - `create_level_sequence`: NewObject's a ULevelSequence at a
+    `/Game/...` package path and runs `ULevelSequence::Initialize`
+    so the new asset has a fresh UMovieScene with the project's
+    default tick / display rates and clock source. Without
+    Initialize the sequence opens but every Sequencer panel call
+    hits a null MovieScene path, so we run it unconditionally
+    before AssetCreated and the optional save.
+  - `add_possessable`: resolves a target sequence by short name or
+    `/Game/...` path and a target actor by `GetName()` (first) /
+    Outliner label (second), then runs
+    `UMovieScene::AddPossessable` + `UMovieSceneSequence::BindPossessableObject`
+    so Sequencer's runtime can map the binding GUID back to the
+    editor-world actor. `binding_name` defaults to the actor's
+    `GetActorLabel()` so the Sequencer Outliner shows a
+    designer-readable row name.
+  Both ops save by default. Open follow-ons: track add (a chosen
+  UMovieSceneTrack subclass), section add (with an explicit frame
+  range), section move, spawnable creation, and camera-cut track
+  creation.
 - `animation_inspect` (small, read-only) — structured dump for
   animation assets. Resolves the asset by short name or
   `/Game/...` path and branches by class:
@@ -441,28 +535,38 @@ ability" alongside `tag_registry_edit`.
   Pairs with `scene_brief` for the orientation pass: one tells
   the agent what project it is in, the other tells it what level
   it is in. Adds EngineSettings to PublicDependencyModuleNames.
-- `sequencer_edit` (small, read-only first slice) — `inspect` op
-  on a `sequencer_edit` umbrella that resolves a target
-  `ULevelSequence` (or any UMovieSceneSequence subclass) and
-  returns asset name + path + class plus the linked UMovieScene's
-  tick / display frame rates (each as
-  `{numerator, denominator, approx_fps}`), the playback range as a
-  start / end / duration triple with `playback_has_start` /
-  `playback_has_end` flags, the master tracks array (each track
-  with name + editor-only display_name + class + class_path +
-  section_count and an optional sections array reporting
-  `class` + `class_path` + `inclusive_start_frame` /
-  `exclusive_end_frame` / `duration_frames` plus the
-  `has_start_frame` / `has_end_frame` bound flags), the optional
-  camera-cut track stub when present, the possessables array
-  (binding GUID + name + possessed-class + parent_guid), and the
-  spawnables array (binding GUID + name + spawn-template class).
-  Per-track section emission caps at `max_sections_per_track`
-  (default 64), with `sections_truncated` set on the offending
-  track when the cap fires. Adds `MovieScene` and `LevelSequence`
-  to PublicDependencyModuleNames. The edit-side ops (track add,
-  section move, possessable / spawnable swap, camera-cut
-  creation) remain on the backlog.
+- `sequencer_edit` (small) — multi-op tool keyed by `op`. The
+  `inspect` op (default) is the read-only structured dump shipped
+  earlier: resolves a target `ULevelSequence` (or any
+  UMovieSceneSequence subclass) and returns asset name + path +
+  class plus the linked UMovieScene's tick / display frame rates
+  (each as `{numerator, denominator, approx_fps}`), the playback
+  range as a start / end / duration triple with
+  `playback_has_start` / `playback_has_end` flags, the master
+  tracks array (each track with name + editor-only display_name +
+  class + class_path + section_count and an optional sections
+  array reporting `class` + `class_path` +
+  `inclusive_start_frame` / `exclusive_end_frame` /
+  `duration_frames` plus the `has_start_frame` / `has_end_frame`
+  bound flags), the optional camera-cut track stub when present,
+  the possessables array (binding GUID + name + possessed-class +
+  parent_guid), and the spawnables array (binding GUID + name +
+  spawn-template class). Per-track section emission caps at
+  `max_sections_per_track` (default 64), with `sections_truncated`
+  set on the offending track when the cap fires.
+  The new edit ops are `create_level_sequence` (NewObject's a
+  ULevelSequence at a `/Game/...` path and runs
+  `ULevelSequence::Initialize` so the asset has a fresh UMovieScene
+  with the project's default tick / display rates and clock
+  source) and `add_possessable` (resolves a target sequence and a
+  named editor-world actor, runs `UMovieScene::AddPossessable` +
+  `UMovieSceneSequence::BindPossessableObject` so Sequencer's
+  runtime can map the binding GUID back to the actor;
+  `binding_name` defaults to the actor's `GetActorLabel()`). Both
+  edit ops save by default. Adds `MovieScene` and `LevelSequence`
+  to PublicDependencyModuleNames. Heavier edit ops (track add,
+  section move, spawnable creation, camera-cut creation, per-row
+  edits) remain on the backlog.
 - `gas_edit` (small, read-only) — Gameplay Ability System dump for
   three asset shapes:
   - UGameplayAbility (or a Blueprint with a UGameplayAbility CDO):
@@ -676,12 +780,14 @@ helpers.
 
 ## AI & abilities (large each)
 
-- `behavior_tree` (small read-only variant ships in this fork) —
-  structured dump of a UBehaviorTree (composite root + decorators +
-  services) plus the linked Blackboard (key list + types).
-  Open follow-ons: edit-side ops (re-root, insert decorator,
-  insert service, append child to a chosen composite), Blackboard
-  key edits (add / remove / type change / sync flag toggle), and an
+- `behavior_tree` (small read + edit slice ships in this fork) —
+  read-only `inspect` plus the two edit ops `create_behavior_tree`
+  (asset creation with optional linked Blackboard) and
+  `add_root_composite` (Selector / Sequence / SimpleParallel root
+  assignment). Open follow-ons: append child task / composite to
+  a chosen parent, insert a decorator on a chosen child slot,
+  append a service on a composite, full Blackboard key edits
+  (add / remove / rename / type change / sync flag toggle), and an
   AI Controller / EQS slice with the same read-only structure for
   the Run Behavior Tree -> Make Decision flow. AIModule is already
   pulled in.
@@ -725,18 +831,19 @@ helpers.
 
 ## Cinematics & audio (large each)
 
-- `sequencer_edit` (small read-only first slice ships in this fork) —
-  master tracks list, camera-cut track stub, per-section
-  start / end / duration, possessables, spawnables, plus tick /
-  display frame rates and playback range for any
-  UMovieSceneSequence asset. Open follow-ons: per-track row dump
-  for multi-row tracks (UMovieSceneNameableTrack subclasses),
-  per-channel key dump for the standard transform / float /
-  bool / enum tracks through `UMovieSceneSection::GetChannelProxy`,
-  asset-bound resolution for possessables (which actor in the
-  current editor world is bound to a possessable GUID), and the
-  edit slice (track add, section move, possessable / spawnable
-  swap, camera-cut creation).
+- `sequencer_edit` (small read + edit slice ships in this fork) —
+  read-only `inspect` plus the two edit ops `create_level_sequence`
+  (NewObject + `ULevelSequence::Initialize` for a fresh empty
+  asset) and `add_possessable` (`UMovieScene::AddPossessable` +
+  `BindPossessableObject` for actor-world binding). Open follow-
+  ons: per-track row dump for multi-row tracks
+  (UMovieSceneNameableTrack subclasses), per-channel key dump for
+  the standard transform / float / bool / enum tracks through
+  `UMovieSceneSection::GetChannelProxy`, asset-bound resolution
+  for possessables (which actor in the current editor world is
+  bound to a possessable GUID), and the heavier edit ops (track
+  add, section add with explicit frame range, section move,
+  spawnable creation, camera-cut creation).
 - `metasound_edit` — MetaSound graphs.
 - `sound_asset_edit` — SoundCue graphs.
 
@@ -775,7 +882,16 @@ helpers.
 ## Runtime verification (large each)
 
 - `pie_test_bp` — Blueprint test harness with assertions during PIE.
-- `pie_test_scene` — scene-state assertion harness during PIE.
+- `pie_test_scene` (small minimum cut ships in this fork) — scene-
+  state assertion harness with the two assertion kinds we can
+  answer statically against the editor world: `actor_exists` for
+  actor-name presence and `actor_at_location` for distance-bounded
+  location matches. Open follow-ons: PIE-driven kinds
+  (`var_equals` against a Blueprint instance variable,
+  `actor_overlapping_tag` for overlap-driven gameplay assertions),
+  per-assertion timeout for PIE-driven kinds, and an over-PIE
+  harness option for callers who want the same surface but inside
+  a running PIE world.
 
 ## Execution (large each)
 
@@ -788,29 +904,36 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-After the latest pass (`project_context`, `animation_inspect`,
-`cpp_source`), the next set should pick up:
+After the latest pass (`pie_test_scene` minimum cut, `behavior_tree`
+edit slice, `sequencer_edit` edit slice), the next set should pick
+up:
 
-1. `behavior_tree` edit slice — append a child task / composite to
-   a chosen parent, insert a decorator on a chosen child slot, and
-   add a Blackboard key. Pairs with the read-only slice already
-   shipped.
-2. `gas_edit` edit slice — append a modifier to a UGameplayEffect,
+1. `pie_test_scene` PIE-driven kinds — `var_equals` against a
+   Blueprint instance variable in a running PIE world, and
+   `actor_overlapping_tag` for overlap-driven gameplay assertions.
+   Adds the live-PIE harness path that the minimum cut deferred so
+   we could ship the static-world half of the tool first.
+2. `behavior_tree` heavier edit ops — append a child task / composite
+   to a chosen parent, insert a decorator on a chosen child slot,
+   append a service on a composite, and the full Blackboard key
+   edit surface. Reuses the AIModule dep already pulled in.
+3. `sequencer_edit` heavier edit ops — track add (a chosen
+   UMovieSceneTrack subclass), section add (with an explicit frame
+   range), section move, spawnable creation, and camera-cut track
+   creation. Reuses the MovieScene + LevelSequence deps.
+4. `niagara_edit` (small variant) — `create_niagara_system` for an
+   empty UNiagaraSystem asset (the implicit `PostInitProperties` flow
+   sets up SystemSpawnScript / SystemUpdateScript so no per-call
+   scripting is needed), then `add_emitter` once the parent emitter
+   surface is scoped clean-room. Pairs with `niagara_inspect`.
+5. `gas_edit` edit slice — append a modifier to a UGameplayEffect,
    set DurationPolicy / DurationMagnitude through CDO writes +
    recompile, rebind cost / cooldown classes on a UGameplayAbility.
    Reuses the existing GameplayAbilities dep.
-3. `niagara_edit` (small variant) — toggle emitter enabled flag,
-   set system / emitter user-exposed parameters through the
-   existing FNiagaraParameterStore surface, and append a renderer
-   to an emitter. Pairs with `niagara_inspect`.
-4. `sequencer_edit` edit slice — add a track of a chosen class to
-   a movie scene, add a section with an explicit frame range, and
-   add a possessable bound to a named actor in the editor world.
-   Reuses the MovieScene + LevelSequence deps already pulled in.
-5. `animation_edit` (small variant) — set montage section
-   timings, add notify entries on a UAnimSequence / UAnimMontage
-   through the public Notifies array, and toggle additive flags
-   through the CDO. Pairs with `animation_inspect`.
+6. `animation_edit` (small variant) — set montage section timings,
+   add notify entries on a UAnimSequence / UAnimMontage through the
+   public Notifies array, and toggle additive flags through the
+   CDO. Pairs with `animation_inspect`.
 
 `python_execution` still covers any operation we have not wrapped
 natively; prefer wrapping the high-frequency calls as dedicated tools
