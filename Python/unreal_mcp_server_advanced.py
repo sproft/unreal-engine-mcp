@@ -6664,6 +6664,84 @@ def ik_retarget(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def ik_rig_edit(
+    rig: str,
+    op: Optional[str] = None,
+    include_solver_settings: Optional[bool] = None,
+    include_bone_settings: Optional[bool] = None,
+    max_chains: Optional[int] = None,
+    max_goals: Optional[int] = None,
+    max_solvers: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Inspect a UIKRigDefinition asset (read-only first slice).
+
+    Pairs with ``ik_retarget`` for the rig side of the retargeting
+    pipeline. Walks the asset's public surface plus the polymorphic
+    solver stack (5.6 ``FInstancedStruct`` of ``FIKRigSolverBase``
+    derivatives) and reports retarget root, retarget chains, IK
+    goals, solver-stack rows with reflection-driven settings, and
+    per-solver per-bone setting rows.
+
+    One op (``inspect``, default).
+
+    Args:
+        rig: Path or short name of a UIKRigDefinition asset.
+            Required.
+        op: Operation discriminator. Only ``inspect`` (default) is
+            supported.
+        include_solver_settings: When True (default), each solver
+            row carries a ``settings`` dict reflected off
+            ``GetSolverSettings()`` plus the settings struct type.
+        include_bone_settings: When True (default), each solver
+            row also carries a ``bone_settings`` array with one
+            row per bone the solver has settings on.
+        max_chains: Cap on the retarget-chain walk. Default 256.
+        max_goals: Cap on the goal-list walk. Default 256.
+        max_solvers: Cap on the solver-stack walk. Default 64.
+
+    Returns:
+        Dict with asset metadata (``name`` / ``path`` / ``class``),
+        ``preview_skeletal_mesh_path``, ``retarget_root_bone``, the
+        ``chains`` array (each with ``chain_name`` / ``start_bone``
+        / ``end_bone`` / ``ik_goal_name``), the ``goals`` array
+        (each with ``goal_name`` / ``bone_name`` / ``position_alpha``
+        / ``rotation_alpha`` / ``current_transform`` /
+        ``initial_transform``), and the ``solvers`` array (each with
+        ``index`` / ``struct_type`` / ``struct_path`` / ``enabled`` /
+        optional ``start_bone`` / ``end_bone`` / ``settings`` /
+        ``bone_settings``). Aggregate counts (``chain_count`` /
+        ``goal_count`` / ``solver_count`` / ``bone_setting_count``)
+        plus per-list ``*_count_total`` and ``*_truncated`` flags
+        sit alongside the arrays.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"rig": rig}
+    if op is not None:
+        params["op"] = op
+    if include_solver_settings is not None:
+        params["include_solver_settings"] = include_solver_settings
+    if include_bone_settings is not None:
+        params["include_bone_settings"] = include_bone_settings
+    if max_chains is not None:
+        params["max_chains"] = max_chains
+    if max_goals is not None:
+        params["max_goals"] = max_goals
+    if max_solvers is not None:
+        params["max_solvers"] = max_solvers
+
+    try:
+        response = unreal.send_command("ik_rig_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"ik_rig_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # Run the server
 if __name__ == "__main__":
     logger.info("Starting Advanced MCP server with stdio transport")
