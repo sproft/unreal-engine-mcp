@@ -1094,16 +1094,17 @@ ability" alongside `tag_registry_edit`.
   bridge runs editor-only so they always emit. Edit-side ops
   (build a new module from a typed input list, mutate per-script
   settings) stay on this list.
-- `pcg_graph_edit` (small, read-only first slice) — inspect a
-  `UPCGGraph` asset. Walks `UPCGGraph::GetNodes()`, the per-node
-  input / output pins, the graph's exposed input / output pin
-  surface (`GetInputNode` / `GetOutputNode`), and a flat edge
-  list stitched from each pin's `Edges` array. Edges are
-  surfaced as `from` (upstream) / `to` (downstream) so callers
-  do not have to remember PCG's reversed pin label convention
-  (UPCGEdge::InputPin is the upstream side, UPCGEdge::OutputPin
-  is the downstream side). Per-node fields cover `index`, `name`,
-  `title` through `UPCGNode::GetNodeTitle(EPCGNodeTitleType::ListView)`,
+- `pcg_graph_edit` (small, read + edit slice) — inspect or
+  mutate a `UPCGGraph` asset. Default op `inspect` walks
+  `UPCGGraph::GetNodes()`, the per-node input / output pins,
+  the graph's exposed input / output pin surface (`GetInputNode`
+  / `GetOutputNode`), and a flat edge list stitched from each
+  pin's `Edges` array. Edges are surfaced as `from` (upstream) /
+  `to` (downstream) so callers do not have to remember PCG's
+  reversed pin label convention (UPCGEdge::InputPin is the
+  upstream side, UPCGEdge::OutputPin is the downstream side).
+  Per-node fields cover `index`, `name`, `title` through
+  `UPCGNode::GetNodeTitle(EPCGNodeTitleType::ListView)`,
   settings class + path through `UPCGNode::GetSettings()`, 2D
   editor `position` through `GetNodePosition`, and a pin
   descriptor list (`label`, `type` through
@@ -1115,10 +1116,21 @@ ability" alongside `tag_registry_edit`.
   `GetOutputNode`) so a downstream consumer can branch cleanly.
   Filters: `include_pins` (default true), `include_edges`
   (default true), `max_nodes` (default 1024), `max_edges`
-  (default 4096). Adds `PCG` to PublicDependencyModuleNames and
-  the PCG plugin to the uplugin manifest. Edit-side ops (add /
-  remove node, add / remove edge, rename pin, mutate per-node
-  settings) stay on this list.
+  (default 4096). Edit ops: `add_node` (resolves a `UPCGSettings`
+  subclass by short name or `/Script/Module.ClassName` path
+  through `UPCGGraph::AddNodeOfType<T>` with optional `node_name`
+  rename and 2D `position` write), `connect_pins` (creates an
+  edge between two named nodes / pin labels through
+  `UPCGGraph::AddEdge`; `from_node` / `to_node` accept a node
+  FName, a node title substring, or the sentinel tokens `input`
+  / `output` for the graph IO nodes; `from_pin` / `to_pin`
+  default to the first matching output / input pin), and
+  `remove_node` (`UPCGGraph::RemoveNode` plus cascading edge
+  cleanup). Each mutating op runs `MarkPackageDirty` and saves
+  the asset by default unless `save=false`. Adds `PCG` to
+  PublicDependencyModuleNames and the PCG plugin to the uplugin
+  manifest. The pin-rename and per-node settings-property
+  mutate ops stay on this list.
 - `landscape_edit` (small variant retry) — multi-op tool for
   ALandscape authoring, keyed by `op`. Two ops:
   - `set_landscape_material`: writes the proxy's master

@@ -4,62 +4,57 @@
 #include "Json.h"
 
 /**
- * Sproft fork addition: pcg_graph_edit (read-only first slice)
+ * Sproft fork addition: pcg_graph_edit (read + edit slice)
  *
- * Inspect a `UPCGGraph` asset. Pairs with `niagara_inspect` for the
- * procedural-side asset surface. Walks the graph's public node list,
- * the graph's input / output exposed pins, and emits a flat edge list
- * stitched from each pin's `Edges` array.
+ * Inspect or mutate a `UPCGGraph` asset. Pairs with `niagara_inspect`
+ * for the procedural-side asset surface. Walks the graph's public node
+ * list, the graph's input / output exposed pins, and emits a flat edge
+ * list stitched from each pin's `Edges` array.
  *
- * Operation: single op (`inspect`, default). Edit-side ops (add /
- * remove node, add / remove edge, rename pin) stay on the BACKLOG.
+ * Operations:
+ *   - `inspect` (default): the read-only walk shipped on the earlier
+ *     pass.
+ *   - `add_node`: NewObject's a UPCGNode under the graph for a chosen
+ *     UPCGSettings subclass, optionally renames it, optionally writes
+ *     a 2D editor position. Routes through
+ *     `UPCGGraph::AddNodeOfType<T>`.
+ *   - `connect_pins`: creates an edge between two named nodes / named
+ *     pins through `UPCGGraph::AddEdge`. Source-name / target-name
+ *     resolution falls back to substring on the node FName + node
+ *     title before failing.
+ *   - `remove_node`: removes one named node from the graph through
+ *     `UPCGGraph::RemoveNode`. Cascades any hanging edges.
+ *
+ * Each mutating op runs `MarkPackageDirty` and (when the optional
+ * `save` flag stays at its default true) writes the asset to disk
+ * through `UEditorAssetLibrary::SaveAsset`.
  *
  * Required input:
  *   - `graph`: short asset name or `/Game/...` UPCGGraph path.
  *
- * Optional inputs:
- *   - `include_pins`:  default true. When false the per-node `inputs`
- *                      / `outputs` arrays are omitted and only the
- *                      pin counts ride along.
- *   - `include_edges`: default true. When false the top-level `edges`
- *                      array is omitted.
- *   - `max_nodes`:     cap on the node walk. Default 1024.
- *   - `max_edges`:     cap on the edge walk. Default 4096.
+ * Op-specific inputs:
+ *   - add_node: `settings_class` (short name or
+ *     `/Script/Module.ClassName` path) + optional `node_name` /
+ *     `position` (`{x, y}`).
+ *   - connect_pins: `from_node` + `to_node` (FName / substring), plus
+ *     optional `from_pin` / `to_pin` (FName, defaults to the node's
+ *     first matching pin).
+ *   - remove_node: `node` (FName / substring).
  *
- * Returns a structured payload:
- *   - `name`, `path`, `class`.
- *   - `node_count`, `edge_count`, `node_count_total`,
- *     `edge_count_total`, `nodes_truncated`, `edges_truncated`.
- *   - `nodes`: per-node dict with `index`, `name`, `title`,
- *     `settings_class`, `settings_class_path`, `position` (`{x, y}`),
- *     `input_pin_count`, `output_pin_count`, plus the `inputs` /
- *     `outputs` arrays (each with `index`, `label`, `type`,
- *     `usage`, `status`, `multiple_data`, `multiple_connections`,
- *     `edge_count`).
- *   - `graph_inputs` / `graph_outputs`: pin descriptors for the
- *     graph's exposed input / output node, same shape as a node's
- *     pin record.
- *   - `edges`: flat array, each row `{from_node, from_pin, to_node,
- *     to_pin}`. Edge direction is upstream -> downstream
- *     (UPCGEdge::InputPin is the upstream side, UPCGEdge::OutputPin
- *     is the downstream side; we surface this as `from` /
- *     `to` so a downstream consumer does not have to remember PCG's
- *     reversed pin labels).
+ * Optional inputs (mutating ops):
+ *   - `save`: default true.
  *
- * Read-only. We do not mutate the asset and we do not save anything.
+ * Read-only inspect inputs:
+ *   - `include_pins` / `include_edges` / `max_nodes` / `max_edges` as
+ *     before.
  *
  * Clean-room implementation derived from the public UE5 PCG API:
- *   - `UPCGGraph::GetNodes` for the per-node walk.
- *   - `UPCGGraph::GetInputNode` / `GetOutputNode` for the exposed
- *     pin surface.
- *   - `UPCGNode::GetInputPins` / `GetOutputPins` /
- *     `GetNodeTitle(EPCGNodeTitleType::ListView)` /
- *     `GetSettings()` / `GetNodePosition` for per-node fields.
- *   - `UPCGPin::Edges` plus `UPCGEdge::InputPin` / `OutputPin` for
- *     the edge walk.
- *   - `FPCGPinProperties::Label` / `AllowedTypes` /
- *     `bAllowMultipleData` / `bAllowMultipleConnections` /
- *     `PinStatus` / `Usage` for the pin descriptors.
+ *   - `UPCGGraph::AddNodeOfType` /
+ *     `UPCGGraph::AddEdge` / `UPCGGraph::RemoveNode`.
+ *   - `UPCGNode::SetNodePosition`.
+ *   - `UPCGSettings` subclass resolution through `FindObject<UClass>`
+ *     + `FindObject<UClass>` substring fallback over the loaded
+ *     class set.
  *
  * No code from the proprietary FlopAI plugin is used.
  */
@@ -72,4 +67,7 @@ public:
 
 private:
     TSharedPtr<FJsonObject> HandlePcgGraphInspect(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddNode(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleConnectPins(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveNode(const TSharedPtr<FJsonObject>& Params);
 };

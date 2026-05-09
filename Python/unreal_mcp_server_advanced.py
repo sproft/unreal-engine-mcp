@@ -6958,9 +6958,18 @@ def pcg_graph_edit(
     include_edges: Optional[bool] = None,
     max_nodes: Optional[int] = None,
     max_edges: Optional[int] = None,
+    settings_class: Optional[str] = None,
+    node_name: Optional[str] = None,
+    position: Optional[Dict[str, Any]] = None,
+    from_node: Optional[str] = None,
+    from_pin: Optional[str] = None,
+    to_node: Optional[str] = None,
+    to_pin: Optional[str] = None,
+    node: Optional[str] = None,
+    save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Inspect a UPCGGraph asset (read-only first slice).
+    Inspect or mutate a UPCGGraph asset (read + edit slice).
 
     Walks the graph's public node list, the per-node input / output
     pins, the graph's exposed input / output pins, and a flat edge
@@ -6970,36 +6979,65 @@ def pcg_graph_edit(
     convention (UPCGEdge::InputPin is the upstream side and
     UPCGEdge::OutputPin is the downstream side).
 
-    One op (``inspect``, default). Edit-side ops (add / remove
-    node, add / remove edge, rename pin) stay in BACKLOG.
+    Operations:
+        - ``inspect`` (default): the read-only walk.
+        - ``add_node``: NewObject's a UPCGNode under the graph for
+          a chosen ``UPCGSettings`` subclass through
+          ``UPCGGraph::AddNodeOfType``.
+        - ``connect_pins``: creates an edge between two named nodes
+          / named pins through ``UPCGGraph::AddEdge``. Source-name
+          / target-name resolution accepts a node FName, a node
+          title, or the sentinel tokens ``input`` / ``output`` for
+          the graph IO nodes.
+        - ``remove_node``: removes one named node through
+          ``UPCGGraph::RemoveNode``. Cascades any hanging edges.
+
+    Each mutating op writes ``MarkPackageDirty`` and (when ``save``
+    stays True, the default) saves the asset to disk.
 
     Args:
         graph: Short asset name or ``/Game/...`` UPCGGraph path.
             Required.
-        op: Operation discriminator. Only ``inspect`` (default) is
-            supported.
-        include_pins: When True (default), per-node ``inputs`` /
-            ``outputs`` arrays carry full pin descriptors. False
-            keeps only the pin counts.
-        include_edges: When True (default), the response carries a
-            top-level ``edges`` array.
-        max_nodes: Cap on the per-node walk. Default 1024.
-        max_edges: Cap on the edge walk. Default 4096.
+        op: Operation discriminator. ``inspect`` / ``add_node`` /
+            ``connect_pins`` / ``remove_node``. Default ``inspect``.
+        include_pins: Inspect-only. When True (default), per-node
+            ``inputs`` / ``outputs`` arrays carry full pin
+            descriptors. False keeps only the pin counts.
+        include_edges: Inspect-only. When True (default), the
+            response carries a top-level ``edges`` array.
+        max_nodes: Inspect-only cap. Default 1024.
+        max_edges: Inspect-only cap. Default 4096.
+        settings_class: add_node only. Short name of a UPCGSettings
+            subclass (e.g. ``CreatePoints`` / ``Density``) or a full
+            ``/Script/Module.ClassName`` path.
+        node_name: add_node optional. Designer-readable FName alias
+            applied to the new node.
+        position: add_node optional. ``{"x": 0, "y": 0}`` 2D editor
+            position. Default 0,0.
+        from_node: connect_pins. FName / title / substring of the
+            upstream node, or the sentinel ``input`` for the
+            graph's input node.
+        from_pin: connect_pins optional. FName of the upstream
+            pin label. Defaults to the upstream node's first
+            output pin.
+        to_node: connect_pins. FName / title / substring of the
+            downstream node, or the sentinel ``output`` for the
+            graph's output node.
+        to_pin: connect_pins optional. FName of the downstream
+            pin label. Defaults to the downstream node's first
+            input pin.
+        node: remove_node. FName / title / substring of the node
+            to remove.
+        save: Mutating ops only. Default True. False keeps the
+            edit transient until the next manual save.
 
     Returns:
-        Dict with ``operation``, ``name``, ``path``, ``class``, the
-        ``nodes`` array (each with ``index``, ``name``, ``title``,
-        ``settings_class`` / ``settings_class_path``, ``position``
-        (``{x, y}``), ``input_pin_count`` / ``output_pin_count``,
-        plus optional ``inputs`` / ``outputs`` arrays), the
-        ``graph_inputs`` / ``graph_outputs`` blocks for the graph's
-        exposed pin surface, and the ``edges`` array (each row
-        ``{from_node, from_pin, to_node, to_pin}`` where
-        ``from_node`` / ``to_node`` are integer indices into
-        ``nodes`` (-1 for the graph input node, -2 for the graph
-        output node)). Aggregate counts (``node_count`` /
-        ``node_count_total`` / ``nodes_truncated`` plus the
-        ``edge_*`` parallel triple) sit alongside the arrays.
+        For ``inspect``: dict with ``operation``, ``name``, ``path``,
+        ``class``, the ``nodes`` array, the ``graph_inputs`` /
+        ``graph_outputs`` blocks, and the ``edges`` array.
+        For mutating ops: dict with ``operation``, ``graph``, op-
+        specific fields (``node_name`` / ``settings_class`` etc.),
+        and a ``saved`` flag.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -7016,6 +7054,24 @@ def pcg_graph_edit(
         params["max_nodes"] = max_nodes
     if max_edges is not None:
         params["max_edges"] = max_edges
+    if settings_class is not None:
+        params["settings_class"] = settings_class
+    if node_name is not None:
+        params["node_name"] = node_name
+    if position is not None:
+        params["position"] = position
+    if from_node is not None:
+        params["from_node"] = from_node
+    if from_pin is not None:
+        params["from_pin"] = from_pin
+    if to_node is not None:
+        params["to_node"] = to_node
+    if to_pin is not None:
+        params["to_pin"] = to_pin
+    if node is not None:
+        params["node"] = node
+    if save is not None:
+        params["save"] = save
 
     try:
         response = unreal.send_command("pcg_graph_edit", params)
