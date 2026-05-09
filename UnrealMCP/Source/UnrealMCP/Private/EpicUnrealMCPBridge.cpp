@@ -76,6 +76,7 @@
 #include "Commands/SproftBpInspectCommands.h"
 #include "Commands/SproftBpNodesCommands.h"
 #include "Commands/SproftBpWireCommands.h"
+#include "Commands/SproftBpCommitCommands.h"
 #include "Commands/SproftMaterialInspectCommands.h"
 #include "Commands/SproftSearchAssetsCommands.h"
 #include "Commands/SproftAssetReferencesCommands.h"
@@ -113,6 +114,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftBpGraph = MakeShared<FSproftBpGraphCommands>();
     SproftBpNodes = MakeShared<FSproftBpNodesCommands>();
     SproftBpWire = MakeShared<FSproftBpWireCommands>();
+    SproftBpCommit = MakeShared<FSproftBpCommitCommands>();
     SproftMaterialInspect = MakeShared<FSproftMaterialInspectCommands>();
     SproftSearchAssets = MakeShared<FSproftSearchAssetsCommands>();
     SproftAssetReferences = MakeShared<FSproftAssetReferencesCommands>();
@@ -147,6 +149,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftBpGraph.Reset();
     SproftBpNodes.Reset();
     SproftBpWire.Reset();
+    SproftBpCommit.Reset();
     SproftMaterialInspect.Reset();
     SproftSearchAssets.Reset();
     SproftAssetReferences.Reset();
@@ -436,6 +439,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("bp_wire"))
             {
                 ResultJson = SproftBpWire->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("bp_commit"))
+            {
+                ResultJson = SproftBpCommit->HandleCommand(CommandType, Params);
             }
             else if (CommandType == TEXT("material_inspect"))
             {

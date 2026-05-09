@@ -4659,6 +4659,67 @@ def bp_wire(
 
 
 @mcp.tool()
+def bp_commit(
+    blueprint: str,
+    mark_structurally: Optional[bool] = None,
+    compile: Optional[bool] = None,
+    save: Optional[bool] = None,
+    force_save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Commit pending edits on a Blueprint: mark structurally modified,
+    compile, and save in one call.
+
+    Convenience wrapper for the standard "I am done editing this
+    Blueprint" cycle. Most ``bp_*`` mutating tools already compile and
+    save individually, but a designer chaining
+    ``bp_nodes`` -> ``bp_wire`` -> ``bp_commit`` (with ``compile=False``
+    and ``save=False`` on the intermediate calls) gets one consolidated
+    outcome with the compiler's error and warning lists separated for
+    downstream consumption.
+
+    Args:
+        blueprint: Short asset name or full ``/Game/...`` Blueprint path.
+        mark_structurally: If True (default), call
+            ``MarkBlueprintAsStructurallyModified`` so SCS / function
+            signature changes propagate. If False, run the lighter
+            ``MarkBlueprintAsModified`` instead.
+        compile: Run the Kismet compiler. Defaults True.
+        save: Save the asset to disk after compile. Defaults True.
+            Skipped automatically when compile reports errors so we do
+            not pin a broken Blueprint to disk.
+        force_save: Override the no-save-on-error guard. Defaults False.
+
+    Returns:
+        Dict with ``compiled``, ``compile_success``, ``saved``,
+        ``error_count``, ``warning_count``, plus ``errors`` /
+        ``warnings`` / ``infos`` string arrays carrying the compiler's
+        own messages. ``success`` is True iff compile succeeded (or
+        compile was skipped).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"blueprint": blueprint}
+    if mark_structurally is not None:
+        params["mark_structurally"] = mark_structurally
+    if compile is not None:
+        params["compile"] = compile
+    if save is not None:
+        params["save"] = save
+    if force_save is not None:
+        params["force_save"] = force_save
+
+    try:
+        response = unreal.send_command("bp_commit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"bp_commit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@mcp.tool()
 def material_inspect(material: str) -> Dict[str, Any]:
     """
     Read-only counterpart to ``material_edit``.

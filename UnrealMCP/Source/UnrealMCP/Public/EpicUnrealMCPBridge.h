@@ -35,6 +35,7 @@
 #include "Commands/SproftBpGraphCommands.h"
 #include "Commands/SproftBpNodesCommands.h"
 #include "Commands/SproftBpWireCommands.h"
+#include "Commands/SproftBpCommitCommands.h"
 #include "Commands/SproftMaterialInspectCommands.h"
 #include "Commands/SproftSearchAssetsCommands.h"
 #include "Commands/SproftAssetReferencesCommands.h"
@@ -109,6 +110,7 @@ private:
 	TSharedPtr<FSproftBpGraphCommands> SproftBpGraph;
 	TSharedPtr<FSproftBpNodesCommands> SproftBpNodes;
 	TSharedPtr<FSproftBpWireCommands> SproftBpWire;
+	TSharedPtr<FSproftBpCommitCommands> SproftBpCommit;
 	TSharedPtr<FSproftMaterialInspectCommands> SproftMaterialInspect;
 	TSharedPtr<FSproftSearchAssetsCommands> SproftSearchAssets;
 	TSharedPtr<FSproftAssetReferencesCommands> SproftAssetReferences;
