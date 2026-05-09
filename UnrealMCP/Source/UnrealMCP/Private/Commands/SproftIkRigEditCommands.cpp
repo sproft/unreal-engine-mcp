@@ -6,6 +6,7 @@
 #include "Engine/SkeletalMesh.h"
 #include "Rig/IKRigDefinition.h"
 #include "Rig/Solvers/IKRigSolverBase.h"
+#include "RigEditor/IKRigController.h"
 #include "StructUtils/InstancedStruct.h"
 #include "UObject/UnrealType.h"
 
@@ -118,8 +119,20 @@ TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleCommand(const FString& C
     {
         return HandleInspect(Params);
     }
+    if (Op.Equals(TEXT("set_retarget_root"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetRetargetRoot(Params);
+    }
+    if (Op.Equals(TEXT("add_retarget_chain"), ESearchCase::IgnoreCase))
+    {
+        return HandleAddRetargetChain(Params);
+    }
+    if (Op.Equals(TEXT("add_ik_goal"), ESearchCase::IgnoreCase))
+    {
+        return HandleAddIkGoal(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("ik_rig_edit: unsupported op '%s'. Supported: inspect"), *Op));
+        FString::Printf(TEXT("ik_rig_edit: unsupported op '%s'. Supported: inspect, set_retarget_root, add_retarget_chain, add_ik_goal"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleInspect(const TSharedPtr<FJsonObject>& Params)
@@ -300,5 +313,190 @@ TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleInspect(const TSharedPtr
     Out->SetBoolField(TEXT("solvers_truncated"), SolverArr.Num() < Solvers.Num());
     Out->SetNumberField(TEXT("bone_setting_count"), BoneSettingCount);
 
+    return Out;
+}
+
+namespace
+{
+    /** Resolve the editor controller for a UIKRigDefinition. The
+     *  controller is the documented mutate path; bypassing it leaves
+     *  the asset in a half-constructed state. */
+    UIKRigController* GetRigController(UIKRigDefinition* Rig)
+    {
+        return Rig ? UIKRigController::GetController(Rig) : nullptr;
+    }
+
+    void SaveRigIfRequested(UIKRigDefinition* Rig, bool bSave)
+    {
+        if (!Rig) return;
+        Rig->MarkPackageDirty();
+        if (bSave)
+        {
+            UEditorAssetLibrary::SaveAsset(Rig->GetPathName(), /*bOnlyIfIsDirty=*/false);
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleSetRetargetRoot(const TSharedPtr<FJsonObject>& Params)
+{
+    UIKRigDefinition* Rig = ResolveRig(Params);
+    if (!Rig)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UIKRigDefinition (provide 'rig' or 'path' as /Game/... or short name)"));
+    }
+    UIKRigController* Controller = GetRigController(Rig);
+    if (!Controller)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UIKRigController for '%s'"), *Rig->GetPathName()));
+    }
+
+    FString BoneToken;
+    if (!Params->TryGetStringField(TEXT("bone"), BoneToken)
+        && !Params->TryGetStringField(TEXT("bone_name"), BoneToken)
+        && !Params->TryGetStringField(TEXT("retarget_root"), BoneToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'bone' parameter"));
+    }
+    const FName BoneName(*BoneToken);
+    const bool bSetOk = Controller->SetRetargetRoot(BoneName);
+    if (!bSetOk)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UIKRigController::SetRetargetRoot refused bone '%s' on rig '%s'"),
+                *BoneToken, *Rig->GetPathName()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveRigIfRequested(Rig, bSave);
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_retarget_root"));
+    Out->SetStringField(TEXT("rig"), Rig->GetPathName());
+    Out->SetStringField(TEXT("retarget_root_bone"), BoneName.ToString());
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleAddRetargetChain(const TSharedPtr<FJsonObject>& Params)
+{
+    UIKRigDefinition* Rig = ResolveRig(Params);
+    if (!Rig)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UIKRigDefinition (provide 'rig' or 'path' as /Game/... or short name)"));
+    }
+    UIKRigController* Controller = GetRigController(Rig);
+    if (!Controller)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UIKRigController for '%s'"), *Rig->GetPathName()));
+    }
+
+    FString ChainNameStr;
+    Params->TryGetStringField(TEXT("chain_name"), ChainNameStr);
+    if (ChainNameStr.IsEmpty()) Params->TryGetStringField(TEXT("name"), ChainNameStr);
+    if (ChainNameStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'chain_name' parameter"));
+    }
+
+    FString StartBoneStr;
+    FString EndBoneStr;
+    Params->TryGetStringField(TEXT("start_bone"), StartBoneStr);
+    Params->TryGetStringField(TEXT("end_bone"), EndBoneStr);
+    if (StartBoneStr.IsEmpty() || EndBoneStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Both 'start_bone' and 'end_bone' are required"));
+    }
+    FString GoalNameStr;
+    Params->TryGetStringField(TEXT("ik_goal_name"), GoalNameStr);
+    if (GoalNameStr.IsEmpty()) Params->TryGetStringField(TEXT("goal_name"), GoalNameStr);
+
+    const FName ChainName(*ChainNameStr);
+    const FName StartBone(*StartBoneStr);
+    const FName EndBone(*EndBoneStr);
+    const FName GoalName = GoalNameStr.IsEmpty() ? NAME_None : FName(*GoalNameStr);
+
+    const FName ResolvedChainName = Controller->AddRetargetChain(ChainName, StartBone, EndBone, GoalName);
+    if (ResolvedChainName.IsNone())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UIKRigController::AddRetargetChain rejected chain '%s' (start=%s end=%s) on rig '%s'"),
+                *ChainNameStr, *StartBoneStr, *EndBoneStr, *Rig->GetPathName()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveRigIfRequested(Rig, bSave);
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("add_retarget_chain"));
+    Out->SetStringField(TEXT("rig"), Rig->GetPathName());
+    Out->SetStringField(TEXT("chain_name"), ResolvedChainName.ToString());
+    Out->SetStringField(TEXT("start_bone"), StartBoneStr);
+    Out->SetStringField(TEXT("end_bone"), EndBoneStr);
+    if (!GoalName.IsNone())
+    {
+        Out->SetStringField(TEXT("ik_goal_name"), GoalName.ToString());
+    }
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleAddIkGoal(const TSharedPtr<FJsonObject>& Params)
+{
+    UIKRigDefinition* Rig = ResolveRig(Params);
+    if (!Rig)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UIKRigDefinition (provide 'rig' or 'path' as /Game/... or short name)"));
+    }
+    UIKRigController* Controller = GetRigController(Rig);
+    if (!Controller)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UIKRigController for '%s'"), *Rig->GetPathName()));
+    }
+
+    FString GoalNameStr;
+    Params->TryGetStringField(TEXT("goal_name"), GoalNameStr);
+    if (GoalNameStr.IsEmpty()) Params->TryGetStringField(TEXT("name"), GoalNameStr);
+    if (GoalNameStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'goal_name' parameter"));
+    }
+
+    FString BoneStr;
+    Params->TryGetStringField(TEXT("bone"), BoneStr);
+    if (BoneStr.IsEmpty()) Params->TryGetStringField(TEXT("bone_name"), BoneStr);
+    if (BoneStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'bone' parameter"));
+    }
+
+    const FName GoalName(*GoalNameStr);
+    const FName BoneName(*BoneStr);
+    const FName ResolvedGoalName = Controller->AddNewGoal(GoalName, BoneName);
+    if (ResolvedGoalName.IsNone())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UIKRigController::AddNewGoal rejected goal '%s' (bone=%s) on rig '%s'"),
+                *GoalNameStr, *BoneStr, *Rig->GetPathName()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveRigIfRequested(Rig, bSave);
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("add_ik_goal"));
+    Out->SetStringField(TEXT("rig"), Rig->GetPathName());
+    Out->SetStringField(TEXT("goal_name"), ResolvedGoalName.ToString());
+    Out->SetStringField(TEXT("bone_name"), BoneStr);
+    Out->SetBoolField(TEXT("saved"), bSave);
     return Out;
 }

@@ -946,30 +946,38 @@ ability" alongside `tag_registry_edit`.
   manifest. Edit-side ops (rebind source / target IK Rig, append op
   / remove op, set chain mapping pair, override retarget pose,
   profile management) remain on the backlog.
-- `ik_rig_edit` (small, read-only first slice) — inspect a
-  `UIKRigDefinition` asset. Pairs with `ik_retarget` for the rig
-  side of the retargeting pipeline. The 5.6 IK Rig refactor moved
-  the solver list onto a polymorphic op stack (`FInstancedStruct`
-  of `FIKRigSolverBase`-derived structs); the read-only slice walks
-  the asset's public surface plus the solver stack and reports
-  asset path / class, preview skeletal mesh path (when set),
-  retarget root bone (`Pelvis`), retarget chain list (each chain
-  `chain_name` / `start_bone` / `end_bone` / `ik_goal_name`),
-  IK goal list (each goal `goal_name` / `bone_name` / position
-  alpha / rotation alpha / current + initial transforms), the
-  solver stack (per-solver `index` / `struct_type` / `struct_path` /
-  `enabled` plus optional `start_bone` / `end_bone` for solvers
-  that use them, plus a reflection-driven `settings` dict reflected
-  off `GetSolverSettings()` and a `bone_settings` array for solvers
+- `ik_rig_edit` (small, read + edit slice) — inspect or mutate
+  a `UIKRigDefinition` asset. Pairs with `ik_retarget` for the
+  rig side of the retargeting pipeline. The 5.6 IK Rig refactor
+  moved the solver list onto a polymorphic op stack
+  (`FInstancedStruct` of `FIKRigSolverBase`-derived structs); the
+  read-only inspect slice walks the asset's public surface plus
+  the solver stack and reports asset path / class, preview
+  skeletal mesh path (when set), retarget root bone (`Pelvis`),
+  retarget chain list (each chain `chain_name` / `start_bone` /
+  `end_bone` / `ik_goal_name`), IK goal list (each goal
+  `goal_name` / `bone_name` / position alpha / rotation alpha /
+  current + initial transforms), the solver stack (per-solver
+  `index` / `struct_type` / `struct_path` / `enabled` plus
+  optional `start_bone` / `end_bone` for solvers that use them,
+  plus a reflection-driven `settings` dict reflected off
+  `GetSolverSettings()` and a `bone_settings` array for solvers
   that use custom bone settings), and aggregate counts
-  (`chain_count`, `goal_count`, `solver_count`, `bone_setting_count`).
-  Filters: `include_solver_settings` (default true),
-  `include_bone_settings` (default true), `max_chains` /
-  `max_goals` / `max_solvers`. Reuses the IKRig dep already pulled
-  in for `ik_retarget`. Edit-side ops (rebind preview mesh, append /
-  remove solver, append / remove chain, rename retarget root,
-  override goal transform, mutate bone settings) remain on the
-  backlog.
+  (`chain_count`, `goal_count`, `solver_count`,
+  `bone_setting_count`). Filters: `include_solver_settings`
+  (default true), `include_bone_settings` (default true),
+  `max_chains` / `max_goals` / `max_solvers`. Edit ops route
+  through the editor-only `UIKRigController::GetController(Rig)`
+  accessor: `set_retarget_root` (`SetRetargetRoot(BoneName)`),
+  `add_retarget_chain` (`AddRetargetChain(ChainName, StartBone,
+  EndBone, OptionalGoalName)`; the duplicate-name guard returns
+  `NAME_None` and surfaces as a clear error), and `add_ik_goal`
+  (`AddNewGoal(GoalName, BoneName)`; same guard). Each mutating
+  op runs `MarkPackageDirty` and saves the asset by default
+  unless `save=false`. Adds `IKRigEditor` to the editor-only
+  `PrivateDependencyModuleNames`. The remove-side ops
+  (chain remove, goal remove, solver mutation, bone-settings
+  writes) stay on this list.
 - `chaos_edit` (small, read-only first slice) — inspect a
   `UGeometryCollection` asset. Walks both the asset's public
   surface and the underlying `FGeometryCollection` managed-array

@@ -95,7 +95,8 @@ public class UnrealMCP : ModuleRules
 					"GameplayTagsEditor",  // For IGameplayTagsEditorModule (Sproft tag_registry_edit)
 					"AnimationBlueprintLibrary", // For UAnimationBlueprintLibrary (Sproft animation_edit)
 					"MetasoundEditor",     // For UMetaSoundEditorSubsystem (Sproft metasound_edit)
-					"NiagaraEditor"        // For UNiagaraSystemFactoryNew::InitializeSystem (Sproft niagara_edit)
+					"NiagaraEditor",       // For UNiagaraSystemFactoryNew::InitializeSystem (Sproft niagara_edit)
+					"IKRigEditor"          // For UIKRigController::SetRetargetRoot / AddRetargetChain / AddNewGoal (Sproft ik_rig_edit)
 				}
 			);
 		}

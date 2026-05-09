@@ -6673,48 +6673,66 @@ def ik_rig_edit(
     max_chains: Optional[int] = None,
     max_goals: Optional[int] = None,
     max_solvers: Optional[int] = None,
+    bone: Optional[str] = None,
+    chain_name: Optional[str] = None,
+    start_bone: Optional[str] = None,
+    end_bone: Optional[str] = None,
+    ik_goal_name: Optional[str] = None,
+    goal_name: Optional[str] = None,
+    save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Inspect a UIKRigDefinition asset (read-only first slice).
+    Inspect or mutate a UIKRigDefinition asset (read + edit slice).
 
     Pairs with ``ik_retarget`` for the rig side of the retargeting
-    pipeline. Walks the asset's public surface plus the polymorphic
-    solver stack (5.6 ``FInstancedStruct`` of ``FIKRigSolverBase``
-    derivatives) and reports retarget root, retarget chains, IK
-    goals, solver-stack rows with reflection-driven settings, and
-    per-solver per-bone setting rows.
+    pipeline. Default op walks the asset's public surface plus the
+    polymorphic solver stack (5.6 ``FInstancedStruct`` of
+    ``FIKRigSolverBase`` derivatives) and reports retarget root,
+    retarget chains, IK goals, solver-stack rows with reflection-
+    driven settings, and per-solver per-bone setting rows.
 
-    One op (``inspect``, default).
+    Operations:
+        - ``inspect`` (default): the read-only walk.
+        - ``set_retarget_root``: writes the retarget root bone
+          through ``UIKRigController::SetRetargetRoot``.
+        - ``add_retarget_chain``: appends a new retarget chain
+          through ``UIKRigController::AddRetargetChain``.
+        - ``add_ik_goal``: appends a new IK goal through
+          ``UIKRigController::AddNewGoal``.
+
+    Each mutating op runs ``MarkPackageDirty`` and (when ``save``
+    stays True, the default) saves the asset to disk.
 
     Args:
         rig: Path or short name of a UIKRigDefinition asset.
             Required.
-        op: Operation discriminator. Only ``inspect`` (default) is
-            supported.
-        include_solver_settings: When True (default), each solver
-            row carries a ``settings`` dict reflected off
-            ``GetSolverSettings()`` plus the settings struct type.
-        include_bone_settings: When True (default), each solver
-            row also carries a ``bone_settings`` array with one
-            row per bone the solver has settings on.
-        max_chains: Cap on the retarget-chain walk. Default 256.
-        max_goals: Cap on the goal-list walk. Default 256.
-        max_solvers: Cap on the solver-stack walk. Default 64.
+        op: Operation discriminator. ``inspect`` /
+            ``set_retarget_root`` / ``add_retarget_chain`` /
+            ``add_ik_goal``. Default ``inspect``.
+        include_solver_settings: Inspect-only. Default True.
+        include_bone_settings: Inspect-only. Default True.
+        max_chains: Inspect-only cap. Default 256.
+        max_goals: Inspect-only cap. Default 256.
+        max_solvers: Inspect-only cap. Default 64.
+        bone: set_retarget_root + add_ik_goal. FName of a bone in
+            the rig's preview skeleton.
+        chain_name: add_retarget_chain. FName of the new chain.
+        start_bone: add_retarget_chain. FName of the chain's start
+            bone.
+        end_bone: add_retarget_chain. FName of the chain's end
+            bone.
+        ik_goal_name: add_retarget_chain optional. FName of an
+            existing IK goal to associate with the chain.
+        goal_name: add_ik_goal. FName of the new goal.
+        save: Mutating ops only. Default True.
 
     Returns:
-        Dict with asset metadata (``name`` / ``path`` / ``class``),
-        ``preview_skeletal_mesh_path``, ``retarget_root_bone``, the
-        ``chains`` array (each with ``chain_name`` / ``start_bone``
-        / ``end_bone`` / ``ik_goal_name``), the ``goals`` array
-        (each with ``goal_name`` / ``bone_name`` / ``position_alpha``
-        / ``rotation_alpha`` / ``current_transform`` /
-        ``initial_transform``), and the ``solvers`` array (each with
-        ``index`` / ``struct_type`` / ``struct_path`` / ``enabled`` /
-        optional ``start_bone`` / ``end_bone`` / ``settings`` /
-        ``bone_settings``). Aggregate counts (``chain_count`` /
-        ``goal_count`` / ``solver_count`` / ``bone_setting_count``)
-        plus per-list ``*_count_total`` and ``*_truncated`` flags
-        sit alongside the arrays.
+        For ``inspect``: dict with asset metadata, retarget root,
+        chains array, goals array, solvers array, plus aggregate
+        counts.
+        For mutating ops: dict with ``operation``, ``rig``, op-
+        specific fields (``retarget_root_bone`` / ``chain_name`` /
+        ``goal_name`` etc.), and a ``saved`` flag.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -6733,6 +6751,20 @@ def ik_rig_edit(
         params["max_goals"] = max_goals
     if max_solvers is not None:
         params["max_solvers"] = max_solvers
+    if bone is not None:
+        params["bone"] = bone
+    if chain_name is not None:
+        params["chain_name"] = chain_name
+    if start_bone is not None:
+        params["start_bone"] = start_bone
+    if end_bone is not None:
+        params["end_bone"] = end_bone
+    if ik_goal_name is not None:
+        params["ik_goal_name"] = ik_goal_name
+    if goal_name is not None:
+        params["goal_name"] = goal_name
+    if save is not None:
+        params["save"] = save
 
     try:
         response = unreal.send_command("ik_rig_edit", params)
