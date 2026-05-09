@@ -102,6 +102,7 @@
 #include "Commands/SproftIkRetargetCommands.h"
 #include "Commands/SproftIkRigEditCommands.h"
 #include "Commands/SproftChaosEditCommands.h"
+#include "Commands/SproftNiagaraEditCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -162,6 +163,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     SproftIkRetarget = MakeShared<FSproftIkRetargetCommands>();
     SproftIkRigEdit = MakeShared<FSproftIkRigEditCommands>();
     SproftChaosEdit = MakeShared<FSproftChaosEditCommands>();
+    SproftNiagaraEdit = MakeShared<FSproftNiagaraEditCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -219,6 +221,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     SproftIkRetarget.Reset();
     SproftIkRigEdit.Reset();
     SproftChaosEdit.Reset();
+    SproftNiagaraEdit.Reset();
 }
 
 // Initialize subsystem
@@ -609,6 +612,10 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
             else if (CommandType == TEXT("chaos_edit"))
             {
                 ResultJson = SproftChaosEdit->HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("niagara_edit"))
+            {
+                ResultJson = SproftNiagaraEdit->HandleCommand(CommandType, Params);
             }
             else
             {

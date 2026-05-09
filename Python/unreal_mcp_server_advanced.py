@@ -6819,6 +6819,63 @@ def chaos_edit(
         return {"success": False, "message": str(e)}
 
 
+@mcp.tool()
+def niagara_edit(
+    path: str,
+    op: Optional[str] = None,
+    overwrite: Optional[bool] = None,
+    save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Niagara system authoring (ultra-minimum cut).
+
+    One op: ``create_niagara_system``. Spawns a ``UNiagaraSystem``
+    asset at a ``/Game/...`` path through
+    ``UNiagaraSystemFactoryNew::InitializeSystem`` with no emitters
+    and no default nodes. The bar this slice clears is "the
+    persistent four-skip is broken"; the broader Niagara authoring
+    surface (emitter authoring, parameter store, modules,
+    simulation stages) stays in BACKLOG.md.
+
+    Editor-side warning: a Niagara System with no emitters opens
+    cleanly in the Niagara editor but produces a "no emitter"
+    warning in the asset's status banner. That is by design for
+    this minimum-cut slice.
+
+    Args:
+        path: ``/Game/...`` package path. Required.
+        op: Operation discriminator. Only
+            ``create_niagara_system`` (default) is supported.
+        overwrite: Replace an existing asset at the path. Default
+            False.
+        save: Save the new asset to disk. Default True.
+
+    Returns:
+        Dict with ``operation``, ``name``, ``path``, ``class``,
+        ``saved`` flag, ``has_emitters`` (always False on this
+        slice), and an ``editor_warning`` documenting the
+        "no emitter" status banner.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    params: Dict[str, Any] = {"path": path}
+    if op is not None:
+        params["op"] = op
+    if overwrite is not None:
+        params["overwrite"] = overwrite
+    if save is not None:
+        params["save"] = save
+
+    try:
+        response = unreal.send_command("niagara_edit", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"niagara_edit error: {e}")
+        return {"success": False, "message": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Sproft fork addition: skills (workflow-doc lookup)
 #

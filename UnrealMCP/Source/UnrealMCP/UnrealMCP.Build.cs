@@ -92,7 +92,8 @@ public class UnrealMCP : ModuleRules
 					"MaterialEditor",      // For UMaterialEditingLibrary (Sproft material_edit)
 					"GameplayTagsEditor",  // For IGameplayTagsEditorModule (Sproft tag_registry_edit)
 					"AnimationBlueprintLibrary", // For UAnimationBlueprintLibrary (Sproft animation_edit)
-					"MetasoundEditor"      // For UMetaSoundEditorSubsystem (Sproft metasound_edit)
+					"MetasoundEditor",     // For UMetaSoundEditorSubsystem (Sproft metasound_edit)
+					"NiagaraEditor"        // For UNiagaraSystemFactoryNew::InitializeSystem (Sproft niagara_edit)
 				}
 			);
 		}
