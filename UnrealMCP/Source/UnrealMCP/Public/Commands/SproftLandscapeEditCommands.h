@@ -25,18 +25,35 @@
  *     PNGs are rejected; larger PNGs centre-crop is a follow-on. 8-bit
  *     PNGs land widened to the 16-bit landscape range; floating-point
  *     PNGs are rejected.
+ *   - `set_height_box`: writes a uniform height value across an
+ *     axis-aligned bounded region of the landscape's component grid.
+ *     The region is clamped to the registered landscape extent
+ *     (`ULandscapeInfo::GetLandscapeExtent`); a value outside the
+ *     extent on either axis returns an error. The height value lands
+ *     either as a normalised float in `[0, 1]` (mapped to the uint16
+ *     `[0, 65535]` heightmap range) or as a raw uint16 sample
+ *     (`height_uint16`). The op walks every component touched by the
+ *     region through `FLandscapeEditDataInterface::GetComponentsInRegion`
+ *     and writes through `SetHeightData` with a single-value tightly-
+ *     packed buffer sized to the rect. The proxy is dirtied for save.
  *
  * The wider sculpt-by-brush / paint-layer-by-stroke surface stays in
  * BACKLOG.
  *
  * Inputs (op-dependent):
  *   - `actor`: `ALandscape` actor name (matched by `GetName()` first
- *     and Outliner label second). Required for both ops.
+ *     and Outliner label second). Required for every op.
  *   - `material`: `/Game/...` path to a UMaterialInterface, or short
  *     name resolved through the asset registry. `set_landscape_material`
  *     only.
  *   - `path`: absolute path to a 16-bit grayscale PNG on disk.
  *     `import_heightmap_png` only.
+ *   - `min` / `max`: `[x, y]` integer pairs in landscape quad
+ *     coordinates. `set_height_box` only.
+ *   - `height` / `height_uint16`: the uniform height value.
+ *     `set_height_box` only. `height` is a normalised float in
+ *     `[0, 1]`; `height_uint16` is the raw sample in `[0, 65535]`.
+ *     Pass exactly one of the two.
  *   - `save`: when true (default) saves the persistent level after
  *     the edit so the heightmap textures land on disk.
  *
@@ -47,6 +64,10 @@
  *   - `import_heightmap_png`: `width` / `height` of the decoded PNG,
  *     the inclusive landscape extent (`min_x` / `min_y` / `max_x` /
  *     `max_y`), the bit depth, and `samples_written`.
+ *   - `set_height_box`: the resolved rect (`min_x` / `min_y` /
+ *     `max_x` / `max_y`), `width` / `height` of the rect, the
+ *     applied `height_uint16`, the touched-component count, and
+ *     `samples_written`.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - `ALandscapeProxy::LandscapeMaterial` UPROPERTY on
@@ -72,4 +93,5 @@ public:
 private:
     TSharedPtr<FJsonObject> HandleSetLandscapeMaterial(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleImportHeightmapPng(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetHeightBox(const TSharedPtr<FJsonObject>& Params);
 };

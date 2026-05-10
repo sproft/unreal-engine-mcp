@@ -12,6 +12,7 @@
 #include "IImageWrapperModule.h"
 #include "ImageCore.h"
 #include "Landscape.h"
+#include "LandscapeComponent.h"
 #include "LandscapeEdit.h"
 #include "LandscapeInfo.h"
 #include "LandscapeProxy.h"
@@ -138,8 +139,13 @@ TSharedPtr<FJsonObject> FSproftLandscapeEditCommands::HandleCommand(const FStrin
     {
         return HandleImportHeightmapPng(Params);
     }
+    if (Op.Equals(TEXT("set_height_box"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_height_rect"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetHeightBox(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("landscape_edit: unsupported op '%s'. Supported: set_landscape_material, import_heightmap_png"), *Op));
+        FString::Printf(TEXT("landscape_edit: unsupported op '%s'. Supported: set_landscape_material, import_heightmap_png, set_height_box"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftLandscapeEditCommands::HandleSetLandscapeMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -398,6 +404,189 @@ TSharedPtr<FJsonObject> FSproftLandscapeEditCommands::HandleImportHeightmapPng(c
     Result->SetNumberField(TEXT("max_x"), MaxX);
     Result->SetNumberField(TEXT("max_y"), MaxY);
     Result->SetNumberField(TEXT("samples_written"), ExpectedRawCount);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    if (!SavedLevelPath.IsEmpty())
+    {
+        Result->SetStringField(TEXT("saved_level_path"), SavedLevelPath);
+    }
+    return Result;
+}
+
+namespace
+{
+    /** Read a `[x, y]` integer pair off a Json object. Returns false
+     *  when the field is missing or shorter than two entries. */
+    bool LandscapeEdit_ReadInt2(const TSharedPtr<FJsonObject>& Params, const TCHAR* Field,
+                                int32& OutX, int32& OutY)
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+        if (!Params->TryGetArrayField(Field, Arr) || !Arr || Arr->Num() < 2)
+        {
+            return false;
+        }
+        OutX = static_cast<int32>(FMath::FloorToDouble((*Arr)[0]->AsNumber()));
+        OutY = static_cast<int32>(FMath::FloorToDouble((*Arr)[1]->AsNumber()));
+        return true;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftLandscapeEditCommands::HandleSetHeightBox(const TSharedPtr<FJsonObject>& Params)
+{
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!World)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
+    }
+
+    FString ActorName;
+    if (!Params->TryGetStringField(TEXT("actor"), ActorName)
+        && !Params->TryGetStringField(TEXT("landscape"), ActorName)
+        && !Params->TryGetStringField(TEXT("name"), ActorName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'actor' parameter"));
+    }
+
+    FString LevelName;
+    ALandscape* Landscape = ResolveLandscape(World, ActorName, LevelName);
+    if (!Landscape)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve ALandscape '%s'"), *ActorName));
+    }
+
+    ULandscapeInfo* LandscapeInfo = Landscape->GetLandscapeInfo();
+    if (!LandscapeInfo)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Landscape has no registered ULandscapeInfo (open the level in the editor first)"));
+    }
+
+    int32 MinX = MAX_int32;
+    int32 MinY = MAX_int32;
+    int32 MaxX = MIN_int32;
+    int32 MaxY = MIN_int32;
+    if (!LandscapeInfo->GetLandscapeExtent(MinX, MinY, MaxX, MaxY))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Landscape extent is empty (no components registered)"));
+    }
+
+    int32 BoxMinX = 0;
+    int32 BoxMinY = 0;
+    int32 BoxMaxX = 0;
+    int32 BoxMaxY = 0;
+    if (!LandscapeEdit_ReadInt2(Params, TEXT("min"), BoxMinX, BoxMinY))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'min' parameter (integer [x, y])"));
+    }
+    if (!LandscapeEdit_ReadInt2(Params, TEXT("max"), BoxMaxX, BoxMaxY))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'max' parameter (integer [x, y])"));
+    }
+    if (BoxMaxX < BoxMinX || BoxMaxY < BoxMinY)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Box max ([%d, %d]) must be >= box min ([%d, %d])"),
+                BoxMaxX, BoxMaxY, BoxMinX, BoxMinY));
+    }
+    if (BoxMinX < MinX || BoxMinY < MinY || BoxMaxX > MaxX || BoxMaxY > MaxY)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Box [%d, %d] -> [%d, %d] is outside landscape extent [%d, %d] -> [%d, %d]"),
+                BoxMinX, BoxMinY, BoxMaxX, BoxMaxY,
+                MinX, MinY, MaxX, MaxY));
+    }
+
+    // The height value lands as a uint16; the friendly path is a
+    // normalised float in [0, 1] mapped to [0, 65535]. Callers who need
+    // exact 16-bit control pass `height_uint16` directly.
+    uint16 HeightValue = 0;
+    bool bHasHeight = false;
+    if (Params->HasField(TEXT("height_uint16")))
+    {
+        const double Raw = Params->GetNumberField(TEXT("height_uint16"));
+        if (Raw < 0.0 || Raw > 65535.0)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("'height_uint16' value %f is outside [0, 65535]"), Raw));
+        }
+        HeightValue = static_cast<uint16>(FMath::Clamp(FMath::RoundToDouble(Raw), 0.0, 65535.0));
+        bHasHeight = true;
+    }
+    else if (Params->HasField(TEXT("height")))
+    {
+        const double Norm = Params->GetNumberField(TEXT("height"));
+        if (Norm < 0.0 || Norm > 1.0)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("'height' value %f is outside [0, 1]"), Norm));
+        }
+        HeightValue = static_cast<uint16>(FMath::Clamp(FMath::RoundToDouble(Norm * 65535.0), 0.0, 65535.0));
+        bHasHeight = true;
+    }
+    if (!bHasHeight)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'height' (float [0, 1]) or 'height_uint16' (uint16 [0, 65535]) parameter"));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    const int32 RectWidth  = (BoxMaxX - BoxMinX) + 1;
+    const int32 RectHeight = (BoxMaxY - BoxMinY) + 1;
+    const int64 SampleCount64 = static_cast<int64>(RectWidth) * static_cast<int64>(RectHeight);
+    if (SampleCount64 > static_cast<int64>(MAX_int32))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Box exceeds 2^31 samples; tile-based writes are a follow-on"));
+    }
+    const int32 SampleCount = static_cast<int32>(SampleCount64);
+
+    TArray<uint16> Heights;
+    Heights.Init(HeightValue, SampleCount);
+
+    int32 ComponentCount = 0;
+    Landscape->Modify();
+    {
+        FLandscapeEditDataInterface EditInterface(LandscapeInfo);
+        TSet<ULandscapeComponent*> Components;
+        if (EditInterface.GetComponentsInRegion(BoxMinX, BoxMinY, BoxMaxX, BoxMaxY, &Components))
+        {
+            ComponentCount = Components.Num();
+        }
+        // SetHeightData with stride=0 means tightly packed rows.
+        EditInterface.SetHeightData(BoxMinX, BoxMinY, BoxMaxX, BoxMaxY,
+            Heights.GetData(),
+            /*InStride=*/0,
+            /*InCalcNormals=*/false);
+        EditInterface.Flush();
+    }
+
+    Landscape->MarkPackageDirty();
+
+    FString SavedLevelPath;
+    if (bSave)
+    {
+        SavedLevelPath = SavePersistentLevel(World);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("set_height_box"));
+    Result->SetStringField(TEXT("actor_name"), Landscape->GetName());
+    Result->SetStringField(TEXT("actor_label"), Landscape->GetActorLabel());
+    Result->SetStringField(TEXT("level"), LevelName);
+    Result->SetNumberField(TEXT("min_x"), BoxMinX);
+    Result->SetNumberField(TEXT("min_y"), BoxMinY);
+    Result->SetNumberField(TEXT("max_x"), BoxMaxX);
+    Result->SetNumberField(TEXT("max_y"), BoxMaxY);
+    Result->SetNumberField(TEXT("width"), RectWidth);
+    Result->SetNumberField(TEXT("height"), RectHeight);
+    Result->SetNumberField(TEXT("height_uint16"), HeightValue);
+    Result->SetNumberField(TEXT("samples_written"), SampleCount);
+    Result->SetNumberField(TEXT("components_touched"), ComponentCount);
     Result->SetBoolField(TEXT("saved"), bSave);
     if (!SavedLevelPath.IsEmpty())
     {

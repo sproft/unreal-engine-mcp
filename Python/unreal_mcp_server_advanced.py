@@ -7215,12 +7215,16 @@ def landscape_edit(
     op: Optional[str] = None,
     material: Optional[str] = None,
     path: Optional[str] = None,
+    min: Optional[List[int]] = None,
+    max: Optional[List[int]] = None,
+    height: Optional[float] = None,
+    height_uint16: Optional[int] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Landscape authoring (small variant retry).
 
-    Two ops on an ``ALandscape`` actor in the active editor world,
+    Three ops on an ``ALandscape`` actor in the active editor world,
     keyed by ``op``:
 
     - ``set_landscape_material``: writes the proxy's master
@@ -7236,6 +7240,16 @@ def landscape_edit(
       ``FLandscapeEditDataInterface::SetHeightData`` so every
       component, heightmap texture, and collision mip lands in one
       pass. PNG dimensions must match the landscape's extent.
+    - ``set_height_box``: writes a uniform height value across an
+      axis-aligned bounded region of the landscape's component grid.
+      The region is clamped to the registered landscape extent. The
+      height value lands either as a normalised float in ``[0, 1]``
+      (mapped to the uint16 ``[0, 65535]`` heightmap range) or as a
+      raw uint16 sample (``height_uint16``). The op walks every
+      component touched by the region through
+      ``FLandscapeEditDataInterface::GetComponentsInRegion`` and
+      writes through ``SetHeightData`` with a single-value tightly-
+      packed buffer sized to the rect.
 
     The wider sculpt-by-brush / paint-layer-by-stroke surface stays
     in BACKLOG.md.
@@ -7243,13 +7257,22 @@ def landscape_edit(
     Args:
         actor: ``ALandscape`` actor name (matched by ``GetName()``
             first and Outliner label second). Required.
-        op: Operation discriminator. ``set_landscape_material`` or
-            ``import_heightmap_png``.
+        op: Operation discriminator. ``set_landscape_material`` /
+            ``import_heightmap_png`` / ``set_height_box``.
         material: ``/Game/...`` path to a UMaterialInterface, or
             short name resolved through the asset registry. Required
             for ``set_landscape_material``.
         path: Absolute path to a 16-bit grayscale PNG on disk.
             Required for ``import_heightmap_png``.
+        min: ``[x, y]`` integer pair in landscape quad coordinates.
+            Required for ``set_height_box``.
+        max: ``[x, y]`` integer pair in landscape quad coordinates.
+            Required for ``set_height_box``.
+        height: Normalised float in ``[0, 1]``. Mapped to the uint16
+            ``[0, 65535]`` heightmap range. Pass exactly one of
+            ``height`` or ``height_uint16`` for ``set_height_box``.
+        height_uint16: Raw uint16 sample in ``[0, 65535]``.
+            ``set_height_box`` only.
         save: Save the persistent level after the edit. Default
             True.
 
@@ -7259,7 +7282,10 @@ def landscape_edit(
         ``previous_material_path`` for set_landscape_material;
         ``width`` / ``height`` / ``bit_depth`` / ``min_x`` /
         ``min_y`` / ``max_x`` / ``max_y`` / ``samples_written`` for
-        import_heightmap_png), and a ``saved`` flag.
+        import_heightmap_png; ``min_x`` / ``min_y`` / ``max_x`` /
+        ``max_y`` / ``width`` / ``height`` / ``height_uint16`` /
+        ``samples_written`` / ``components_touched`` for
+        set_height_box), and a ``saved`` flag.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -7272,6 +7298,14 @@ def landscape_edit(
         params["material"] = material
     if path is not None:
         params["path"] = path
+    if min is not None:
+        params["min"] = min
+    if max is not None:
+        params["max"] = max
+    if height is not None:
+        params["height"] = height
+    if height_uint16 is not None:
+        params["height_uint16"] = height_uint16
     if save is not None:
         params["save"] = save
 
