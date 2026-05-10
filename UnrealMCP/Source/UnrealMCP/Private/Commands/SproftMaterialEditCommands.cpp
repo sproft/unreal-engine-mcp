@@ -28,7 +28,9 @@
 #include "Materials/MaterialExpressionIf.h"
 #include "Materials/MaterialExpressionLinearInterpolate.h"
 #include "Materials/MaterialExpressionMakeMaterialAttributes.h"
+#include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialExpressionMultiply.h"
+#include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialExpressionOneMinus.h"
 #include "Materials/MaterialExpressionPanner.h"
 #include "Materials/MaterialExpressionPower.h"
@@ -467,9 +469,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return CreateMaterialFunction(Params);
     }
+    if (Operation == TEXT("add_function_call") || Operation == TEXT("add_material_function_call")
+        || Operation == TEXT("add_function"))
+    {
+        return AddFunctionCall(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -1976,5 +1983,148 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterialFunction(cons
     ResultObj->SetNumberField(TEXT("expression_failures"), ExpressionFailures);
     ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterCreate);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddFunctionCall(const TSharedPtr<FJsonObject>& Params)
+{
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+    UObject* MaterialAsset = UEditorAssetLibrary::LoadAsset(MaterialPath);
+    UMaterial* Material = Cast<UMaterial>(MaterialAsset);
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial"), *MaterialPath));
+    }
+
+    FString FunctionToken;
+    if (!Params->TryGetStringField(TEXT("function"), FunctionToken)
+        && !Params->TryGetStringField(TEXT("function_path"), FunctionToken)
+        && !Params->TryGetStringField(TEXT("material_function"), FunctionToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'function' parameter (path to a UMaterialFunctionInterface)"));
+    }
+    UObject* FunctionAsset = UEditorAssetLibrary::LoadAsset(FunctionToken);
+    UMaterialFunctionInterface* Function = Cast<UMaterialFunctionInterface>(FunctionAsset);
+    if (!Function)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterialFunctionInterface"), *FunctionToken));
+    }
+
+    // Position: explicit `position` field as [x, y] or {x, y}; default
+    // cascades through the same helper add_expression uses.
+    int32 PosX = 0;
+    int32 PosY = 0;
+    bool bExplicitPos = false;
+    if (Params->HasField(TEXT("position")))
+    {
+        const TSharedPtr<FJsonValue> PosVal = Params->TryGetField(TEXT("position"));
+        if (PosVal.IsValid() && PosVal->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = PosVal->AsArray();
+            if (Arr.Num() >= 2)
+            {
+                PosX = static_cast<int32>(Arr[0]->AsNumber());
+                PosY = static_cast<int32>(Arr[1]->AsNumber());
+                bExplicitPos = true;
+            }
+        }
+        else if (PosVal.IsValid() && PosVal->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject> PosObj = PosVal->AsObject();
+            double X = 0.0;
+            double Y = 0.0;
+            if (PosObj.IsValid()
+                && (PosObj->TryGetNumberField(TEXT("x"), X) || PosObj->TryGetNumberField(TEXT("X"), X))
+                && (PosObj->TryGetNumberField(TEXT("y"), Y) || PosObj->TryGetNumberField(TEXT("Y"), Y)))
+            {
+                PosX = static_cast<int32>(X);
+                PosY = static_cast<int32>(Y);
+                bExplicitPos = true;
+            }
+        }
+    }
+    if (!bExplicitPos)
+    {
+        DeriveDefaultPosition(Material, PosX, PosY);
+    }
+
+    // Spawn the function-call expression through the editor library so
+    // the asset's expression list, package, and editor view stay
+    // consistent. The library handles MaterialAttributes wiring,
+    // expression list tracking, and PostEditChange downstream of the
+    // create call.
+    UMaterialExpression* NewExpr = UMaterialEditingLibrary::CreateMaterialExpression(
+        Material, UMaterialExpressionMaterialFunctionCall::StaticClass(), PosX, PosY);
+    if (!NewExpr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("CreateMaterialExpression failed for UMaterialExpressionMaterialFunctionCall"));
+    }
+    UMaterialExpressionMaterialFunctionCall* CallExpr = Cast<UMaterialExpressionMaterialFunctionCall>(NewExpr);
+    if (!CallExpr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("CreateMaterialExpression returned a non-function-call expression"));
+    }
+
+    // SetMaterialFunction is the public BlueprintCallable entry point
+    // (ENGINE_API on MaterialExpressionMaterialFunctionCall.h line 157)
+    // that wires the function reference and rebuilds the
+    // FunctionInputs / FunctionOutputs arrays from the bound function's
+    // declared input / output pins. Without that step the call node
+    // renders without pins and downstream connect_expressions calls
+    // have no input names to target.
+    if (!CallExpr->SetMaterialFunction(Function))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("SetMaterialFunction failed for function '%s' on material '%s'"),
+                *Function->GetPathName(), *Material->GetPathName()));
+    }
+
+    // Optional rename so the function-call node gets a designer-readable
+    // FName the way add_expression's `name` field handles it. The
+    // editor library's CreateMaterialExpression overload does not
+    // accept a name arg, so we rename in place.
+    FString DesiredName;
+    if (Params->TryGetStringField(TEXT("name"), DesiredName) && !DesiredName.IsEmpty())
+    {
+        NewExpr->Rename(*DesiredName, nullptr, REN_DontCreateRedirectors);
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_function_call"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetStringField(TEXT("function"), Function->GetPathName());
+    ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
+    ResultObj->SetNumberField(TEXT("input_count"), CallExpr->FunctionInputs.Num());
+    ResultObj->SetNumberField(TEXT("output_count"), CallExpr->FunctionOutputs.Num());
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
     return ResultObj;
 }

@@ -72,6 +72,19 @@
  *      materials in one pass. The expected workflow is to seed the
  *      function with a `function_input` + `function_output` pair and
  *      a small expression chain in one call.
+ *   - "add_function_call": adds a UMaterialExpressionMaterialFunctionCall
+ *      to a target UMaterial's graph and binds it to a chosen
+ *      UMaterialFunctionInterface. Resolves the material function from
+ *      a `/Game/...` path (the canonical MF location). After the spawn
+ *      the op calls `SetMaterialFunction(NewFunction)` so the call
+ *      expression's `FunctionInputs` / `FunctionOutputs` arrays
+ *      regenerate from the bound function's declared input / output
+ *      pins; without that step the call node renders without pins.
+ *      Optional `position` cascades the same way as `add_expression`;
+ *      optional `name` aliases the spawned expression so a follow-up
+ *      `connect_expressions` call can address the node by FName.
+ *      Recompiles + saves on success unless `recompile=false` /
+ *      `save=false` is passed.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UMaterialFactoryNew / UMaterialInstanceConstantFactoryNew /
@@ -115,4 +128,5 @@ private:
     TSharedPtr<FJsonObject> AddCollectionParameter(const TSharedPtr<FJsonObject>& Params);
 
     TSharedPtr<FJsonObject> CreateMaterialFunction(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddFunctionCall(const TSharedPtr<FJsonObject>& Params);
 };

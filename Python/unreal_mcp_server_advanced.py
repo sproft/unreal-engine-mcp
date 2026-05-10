@@ -3621,6 +3621,8 @@ def material_edit(
     connections: Optional[List[Dict[str, Any]]] = None,
     recompile: bool = True,
     collection: Optional[str] = None,
+    function: Optional[str] = None,
+    name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -3689,6 +3691,19 @@ def material_edit(
           ``UpdateMaterialFunction`` recompiles any existing materials
           that reference the new function unless ``recompile=False``
           is passed.
+        - "add_function_call": adds a
+          UMaterialExpressionMaterialFunctionCall to a target
+          UMaterial and binds it to a chosen
+          UMaterialFunctionInterface. Routes through
+          ``UMaterialEditingLibrary::CreateMaterialExpression``
+          for the spawn, then calls ``SetMaterialFunction`` on the
+          call expression so the ``FunctionInputs`` /
+          ``FunctionOutputs`` arrays populate from the bound
+          function's declared pins. Optional ``position`` cascades
+          the same way as ``add_expression``; optional ``name``
+          aliases the spawned expression so a follow-up
+          ``connect_expressions`` call can address the node by
+          FName.
 
     Args:
         operation: One of the operation names listed above.
@@ -3792,6 +3807,10 @@ def material_edit(
         params["recompile"] = False
     if collection is not None:
         params["collection"] = collection
+    if function is not None:
+        params["function"] = function
+    if name is not None:
+        params["name"] = name
 
     try:
         response = unreal.send_command("material_edit", params)
