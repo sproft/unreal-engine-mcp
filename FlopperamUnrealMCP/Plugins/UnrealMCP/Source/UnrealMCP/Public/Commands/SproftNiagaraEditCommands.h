@@ -65,6 +65,23 @@
  *     `run_update_script_with_interpolation`) and writes through
  *     `InterpolatedSpawnMode` when the flag token is
  *     `bInterpolatedSpawning` to keep modern emitters consistent.
+ *   - `add_sim_stage`: resolves an existing system + emitter handle
+ *     and routes through `UNiagaraEmitter::AddSimulationStage(stage,
+ *     EmitterVersion)` (NIAGARA_API). The new
+ *     `UNiagaraSimulationStageBase` subobject is outered to the
+ *     UNiagaraEmitter; the default subclass is
+ *     `UNiagaraSimulationStageGeneric`, callable through the
+ *     `generic` short token plus full `/Script/Niagara.X` paths and
+ *     bare class names. An optional `stage_name` lands on
+ *     `SimulationStageName` before the add so the editor's stack
+ *     viewmodel surfaces a designer-readable label.
+ *   - `set_emitter_sim_target`: resolves an existing system +
+ *     emitter handle (same shape `set_emitter_local_parameter`
+ *     uses) and writes
+ *     `FVersionedNiagaraEmitterData::SimTarget`. Tokens: `cpu` /
+ *     `gpu` / `CPUSim` / `GPUComputeSim`. The op runs the
+ *     PostEditChangeProperty fix-up against the SimTarget UPROPERTY
+ *     so the cached renderer / GPU-script state refreshes.
  *
  * Inputs (create_niagara_system):
  *   - path: `/Game/...` package path. Required.
@@ -137,4 +154,6 @@ private:
     TSharedPtr<FJsonObject> HandleAddModuleToStage(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRequestCompile(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterFlag(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddSimStage(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetEmitterSimTarget(const TSharedPtr<FJsonObject>& Params);
 };

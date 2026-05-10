@@ -7426,6 +7426,9 @@ def niagara_edit(
     suggested_name: Optional[str] = None,
     force: Optional[bool] = None,
     flag: Optional[str] = None,
+    stage_class: Optional[str] = None,
+    stage_name: Optional[str] = None,
+    sim_target: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
@@ -7484,6 +7487,21 @@ def niagara_edit(
           slot instead and ``value`` may be a token
           (``no_interpolation`` / ``run_update_script`` /
           ``run_update_script_with_interpolation``).
+        - ``add_sim_stage``: resolves an existing system + emitter
+          handle and routes through
+          ``UNiagaraEmitter::AddSimulationStage(stage, EmitterVersion)``.
+          The default ``stage_class`` is
+          ``UNiagaraSimulationStageGeneric``; pass the ``generic``
+          short token, a bare class name, or a
+          ``/Script/Niagara.X`` path for a concrete subclass.
+          ``stage_name`` lands on ``SimulationStageName`` before the
+          add so the editor's stack viewmodel surfaces a
+          designer-readable label.
+        - ``set_emitter_sim_target``: resolves an existing system +
+          emitter handle (same shape as
+          ``set_emitter_local_parameter``) and writes
+          ``FVersionedNiagaraEmitterData::SimTarget``. Tokens:
+          ``cpu`` / ``gpu`` / ``CPUSim`` / ``GPUComputeSim``.
 
     The broader authoring surface (parameter store extensions
     beyond emitter rapid-iteration writes, simulation stages,
@@ -7579,6 +7597,12 @@ def niagara_edit(
         params["force"] = force
     if flag is not None:
         params["flag"] = flag
+    if stage_class is not None:
+        params["stage_class"] = stage_class
+    if stage_name is not None:
+        params["stage_name"] = stage_name
+    if sim_target is not None:
+        params["sim_target"] = sim_target
 
     try:
         response = unreal.send_command("niagara_edit", params)

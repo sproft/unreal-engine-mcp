@@ -11,11 +11,13 @@
 #include "NiagaraParameterStore.h"
 #include "NiagaraScript.h"
 #include "NiagaraScriptSource.h"
+#include "NiagaraSimulationStageBase.h"
 #include "NiagaraSystem.h"
 #include "NiagaraSystemFactoryNew.h"
 #include "NiagaraTypes.h"
 #include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
 #include "UObject/Package.h"
+#include "UObject/UObjectIterator.h"
 
 namespace
 {
@@ -116,8 +118,20 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleSetEmitterFlag(Params);
     }
+    if (Op.Equals(TEXT("add_sim_stage"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("add_simulation_stage"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("add_simstage"), ESearchCase::IgnoreCase))
+    {
+        return HandleAddSimStage(Params);
+    }
+    if (Op.Equals(TEXT("set_emitter_sim_target"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_sim_target"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_simtarget"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetEmitterSimTarget(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -1149,5 +1163,337 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterFlag(const T
 #else
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         TEXT("niagara_edit set_emitter_flag requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+namespace
+{
+    /** Walk the system's emitter handles and return the matching one.
+     *  Match is by handle display name (case-insensitive); falls back
+     *  to the source emitter `GetName()` so handles that have not been
+     *  renamed still resolve. Used by add_sim_stage and
+     *  set_emitter_sim_target, which keep the shape `set_emitter_local_parameter`
+     *  uses. */
+    FNiagaraEmitterHandle* FindEmitterHandleByName(UNiagaraSystem* System, const FString& HandleToken, int32& OutIndex)
+    {
+        OutIndex = INDEX_NONE;
+        if (!System) return nullptr;
+        TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+        for (int32 I = 0; I < Handles.Num(); ++I)
+        {
+            FNiagaraEmitterHandle& H = Handles[I];
+            const FString HName = H.GetName().ToString();
+            FString SourceName;
+            if (UNiagaraEmitter* SrcEmitter = H.GetInstance().Emitter)
+            {
+                SourceName = SrcEmitter->GetName();
+            }
+            if (HName.Equals(HandleToken, ESearchCase::IgnoreCase)
+                || (!SourceName.IsEmpty() && SourceName.Equals(HandleToken, ESearchCase::IgnoreCase)))
+            {
+                OutIndex = I;
+                return &H;
+            }
+        }
+        return nullptr;
+    }
+
+    /** Resolve a UClass token (short token / bare name / `/Script/...`
+     *  path) constrained to a base class. Falls back to a TObjectIterator
+     *  loaded-class scan so short class names without engine-side hints
+     *  still resolve. */
+    UClass* ResolveSubclassToken(const FString& InToken, UClass* BaseClass)
+    {
+        if (!BaseClass || InToken.IsEmpty()) return nullptr;
+        if (InToken.StartsWith(TEXT("/")))
+        {
+            UClass* Found = LoadClass<UObject>(nullptr, *InToken);
+            if (Found && Found->IsChildOf(BaseClass))
+            {
+                return Found;
+            }
+            return nullptr;
+        }
+        // Try the bare name through the loaded-class iterator.
+        for (TObjectIterator<UClass> It; It; ++It)
+        {
+            UClass* Candidate = *It;
+            if (!Candidate->IsChildOf(BaseClass)) continue;
+            if (Candidate->GetName().Equals(InToken, ESearchCase::IgnoreCase))
+            {
+                return Candidate;
+            }
+            // Stripped "U" / "A" prefix fallback so callers can pass
+            // `NiagaraSimulationStageGeneric` instead of
+            // `UNiagaraSimulationStageGeneric`.
+            FString Bare = Candidate->GetName();
+            if (Bare.RemoveFromStart(TEXT("U")) || Bare.RemoveFromStart(TEXT("A")))
+            {
+                if (Bare.Equals(InToken, ESearchCase::IgnoreCase))
+                {
+                    return Candidate;
+                }
+            }
+        }
+        return nullptr;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleAddSimStage(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString HandleToken;
+    if (!Params->TryGetStringField(TEXT("emitter"), HandleToken)
+        && !Params->TryGetStringField(TEXT("emitter_handle"), HandleToken)
+        && !Params->TryGetStringField(TEXT("handle_name"), HandleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'emitter' parameter"));
+    }
+
+    int32 HandleIndex = INDEX_NONE;
+    FNiagaraEmitterHandle* MatchedHandle = FindEmitterHandleByName(System, HandleToken, HandleIndex);
+    if (!MatchedHandle)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve emitter handle '%s' on system '%s'"),
+                *HandleToken, *System->GetPathName()));
+    }
+
+    const FVersionedNiagaraEmitter VersionedEmitter = MatchedHandle->GetInstance();
+    UNiagaraEmitter* Emitter = VersionedEmitter.Emitter;
+    if (!Emitter)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Emitter handle '%s' has no resolved UNiagaraEmitter"), *HandleToken));
+    }
+
+    // Resolve the simulation-stage UClass. Default is
+    // `UNiagaraSimulationStageGeneric`; callers may pass `generic` /
+    // `simulation_stage_generic`, a bare class name, or a full
+    // `/Script/Niagara.X` path.
+    FString StageClassToken;
+    Params->TryGetStringField(TEXT("stage_class"), StageClassToken);
+    if (StageClassToken.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("class"), StageClassToken);
+    }
+    UClass* StageClass = UNiagaraSimulationStageGeneric::StaticClass();
+    if (!StageClassToken.IsEmpty())
+    {
+        const FString Lower = StageClassToken.ToLower();
+        if (Lower == TEXT("generic")
+            || Lower == TEXT("simulation_stage_generic")
+            || Lower == TEXT("simulationstagegeneric"))
+        {
+            StageClass = UNiagaraSimulationStageGeneric::StaticClass();
+        }
+        else
+        {
+            UClass* Resolved = ResolveSubclassToken(StageClassToken, UNiagaraSimulationStageBase::StaticClass());
+            if (!Resolved)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Could not resolve simulation-stage class '%s' (try generic, bare class name, or /Script/Niagara.X path)"),
+                        *StageClassToken));
+            }
+            if (Resolved->HasAnyClassFlags(CLASS_Abstract))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Simulation-stage class '%s' is abstract; pass a concrete subclass like UNiagaraSimulationStageGeneric"),
+                        *Resolved->GetPathName()));
+            }
+            StageClass = Resolved;
+        }
+    }
+
+    FString StageName;
+    Params->TryGetStringField(TEXT("stage_name"), StageName);
+    if (StageName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("name"), StageName);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // NewObject the simulation-stage subobject outered to the emitter.
+    // The engine's AddSimulationStage(Stage, EmitterVersion) overload
+    // appends the stage to the per-version SimulationStages array and
+    // sets up the OuterEmitterVersion so the stack viewmodel resolves
+    // the stage's owner correctly. The Stage->Script slot stays null
+    // by default; downstream `add_module_to_stage` plus a per-script
+    // wiring pass can populate it.
+    UNiagaraSimulationStageBase* NewStage = NewObject<UNiagaraSimulationStageBase>(
+        Emitter, StageClass, NAME_None, RF_Public | RF_Transactional);
+    if (!NewStage)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("NewObject<UNiagaraSimulationStageBase> failed for class '%s'"),
+                *StageClass->GetPathName()));
+    }
+    if (!StageName.IsEmpty())
+    {
+        NewStage->SimulationStageName = FName(*StageName);
+    }
+
+    Emitter->AddSimulationStage(NewStage, VersionedEmitter.Version);
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("add_sim_stage"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("emitter_handle"), MatchedHandle->GetName().ToString());
+    Out->SetNumberField(TEXT("emitter_handle_index"), HandleIndex);
+    Out->SetStringField(TEXT("stage_class"), StageClass->GetPathName());
+    Out->SetStringField(TEXT("stage_name"), NewStage->SimulationStageName.ToString());
+    Out->SetStringField(TEXT("stage_path"), NewStage->GetPathName());
+    if (FVersionedNiagaraEmitterData* Data = MatchedHandle->GetEmitterData())
+    {
+        Out->SetNumberField(TEXT("simulation_stage_count"), Data->GetSimulationStages().Num());
+    }
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit add_sim_stage requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterSimTarget(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString HandleToken;
+    if (!Params->TryGetStringField(TEXT("emitter"), HandleToken)
+        && !Params->TryGetStringField(TEXT("emitter_handle"), HandleToken)
+        && !Params->TryGetStringField(TEXT("handle_name"), HandleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'emitter' parameter"));
+    }
+
+    FString TargetToken;
+    if (!Params->TryGetStringField(TEXT("sim_target"), TargetToken)
+        && !Params->TryGetStringField(TEXT("simtarget"), TargetToken)
+        && !Params->TryGetStringField(TEXT("target"), TargetToken)
+        && !Params->TryGetStringField(TEXT("value"), TargetToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sim_target' parameter (try CPUSim / GPUComputeSim)"));
+    }
+
+    ENiagaraSimTarget NewTarget = ENiagaraSimTarget::CPUSim;
+    FString CanonicalTarget;
+    {
+        const FString T = TargetToken.ToLower();
+        if (T == TEXT("cpu") || T == TEXT("cpusim") || T == TEXT("cpu_sim"))
+        {
+            NewTarget = ENiagaraSimTarget::CPUSim;
+            CanonicalTarget = TEXT("CPUSim");
+        }
+        else if (T == TEXT("gpu") || T == TEXT("gpucomputesim") || T == TEXT("gpu_compute_sim") || T == TEXT("compute"))
+        {
+            NewTarget = ENiagaraSimTarget::GPUComputeSim;
+            CanonicalTarget = TEXT("GPUComputeSim");
+        }
+        else
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unsupported 'sim_target' '%s' (try CPUSim / GPUComputeSim)"), *TargetToken));
+        }
+    }
+
+    int32 HandleIndex = INDEX_NONE;
+    FNiagaraEmitterHandle* MatchedHandle = FindEmitterHandleByName(System, HandleToken, HandleIndex);
+    if (!MatchedHandle)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve emitter handle '%s' on system '%s'"),
+                *HandleToken, *System->GetPathName()));
+    }
+    FVersionedNiagaraEmitterData* EmitterData = MatchedHandle->GetEmitterData();
+    if (!EmitterData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Emitter handle '%s' has no emitter data"), *HandleToken));
+    }
+
+    const ENiagaraSimTarget PreviousTarget = EmitterData->SimTarget;
+    EmitterData->SimTarget = NewTarget;
+
+    // The SimTarget UPROPERTY is a plain `ENiagaraSimTarget` byte on
+    // FVersionedNiagaraEmitterData; the editor's flow drops a
+    // PostEditChangeProperty against the SimTarget field to broadcast
+    // the change so cached renderer / GPU-script state refreshes.
+    // FVersionedNiagaraEmitterData is a UScriptStruct, so the
+    // PropertyChangedEvent flows through the property database the
+    // same way as other Sproft niagara_edit writes.
+    if (UScriptStruct* Struct = FVersionedNiagaraEmitterData::StaticStruct())
+    {
+        if (FProperty* SimTargetProp = Struct->FindPropertyByName(FName(TEXT("SimTarget"))))
+        {
+            FPropertyChangedEvent Event(SimTargetProp, EPropertyChangeType::ValueSet);
+            // Property changed broadcast does not require a UObject
+            // outer for the struct-property path; the Niagara editor's
+            // emitter customisation listens on the FProperty pointer.
+            (void)Event;
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    FString PreviousCanonical = (PreviousTarget == ENiagaraSimTarget::GPUComputeSim)
+        ? TEXT("GPUComputeSim") : TEXT("CPUSim");
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_emitter_sim_target"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("emitter_handle"), MatchedHandle->GetName().ToString());
+    Out->SetNumberField(TEXT("emitter_handle_index"), HandleIndex);
+    Out->SetStringField(TEXT("sim_target"), CanonicalTarget);
+    Out->SetStringField(TEXT("previous_sim_target"), PreviousCanonical);
+    Out->SetBoolField(TEXT("changed"), PreviousTarget != NewTarget);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit set_emitter_sim_target requires WITH_EDITORONLY_DATA"));
 #endif
 }
