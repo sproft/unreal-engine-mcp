@@ -3607,8 +3607,15 @@ def material_edit(
           PostEditChangeProperty so the asset's StateId regenerates
           and any UMaterial referencing the collection picks the new
           entry up on the next compile.
-
-    Material Functions remain on the backlog.
+        - "create_material_function": create a UMaterialFunction asset
+          at ``package_path`` through ``UMaterialFunctionFactoryNew``.
+          Optional ``expressions`` list mirrors ``add_expressions``
+          (each spec carries ``class`` plus optional ``name`` alias /
+          ``position`` / ``properties`` dict) and routes through
+          ``UMaterialEditingLibrary::CreateMaterialExpressionInFunction``.
+          ``UpdateMaterialFunction`` recompiles any existing materials
+          that reference the new function unless ``recompile=False``
+          is passed.
 
     Args:
         operation: One of the operation names listed above.

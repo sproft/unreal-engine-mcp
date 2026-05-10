@@ -5,10 +5,12 @@
 #include "EditorAssetLibrary.h"
 #include "Engine/Texture.h"
 #include "Factories/MaterialFactoryNew.h"
+#include "Factories/MaterialFunctionFactoryNew.h"
 #include "Factories/MaterialInstanceConstantFactoryNew.h"
 #include "Factories/MaterialParameterCollectionFactoryNew.h"
 #include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialFunction.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "Materials/MaterialExpression.h"
@@ -21,6 +23,8 @@
 #include "Materials/MaterialExpressionCosine.h"
 #include "Materials/MaterialExpressionDivide.h"
 #include "Materials/MaterialExpressionFresnel.h"
+#include "Materials/MaterialExpressionFunctionInput.h"
+#include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionIf.h"
 #include "Materials/MaterialExpressionLinearInterpolate.h"
 #include "Materials/MaterialExpressionMakeMaterialAttributes.h"
@@ -192,6 +196,10 @@ namespace
             return UMaterialExpressionIf::StaticClass();
         if (Lower == TEXT("makematerialattributes") || Lower == TEXT("matattribs"))
             return UMaterialExpressionMakeMaterialAttributes::StaticClass();
+        if (Lower == TEXT("functioninput") || Lower == TEXT("input"))
+            return UMaterialExpressionFunctionInput::StaticClass();
+        if (Lower == TEXT("functionoutput") || Lower == TEXT("output"))
+            return UMaterialExpressionFunctionOutput::StaticClass();
 
         // Path-style fallback. Try the full `/Script/Engine.UMaterialExpressionFoo` path first.
         if (Norm.StartsWith(TEXT("/Script/")))
@@ -454,9 +462,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddCollectionParameter(Params);
     }
+    if (Operation == TEXT("create_material_function") || Operation == TEXT("create_function")
+        || Operation == TEXT("create_mf"))
+    {
+        return CreateMaterialFunction(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -1744,5 +1757,224 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddCollectionParameter(cons
         }
     }
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterialFunction(const TSharedPtr<FJsonObject>& Params)
+{
+    FString PackagePath;
+    if (!Params->TryGetStringField(TEXT("package_path"), PackagePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'package_path' parameter"));
+    }
+    if (!PackagePath.StartsWith(TEXT("/")))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'package_path' must be an absolute content-browser path, got '%s'"), *PackagePath));
+    }
+
+    bool bSaveAfterCreate = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterCreate);
+
+    bool bOverwrite = false;
+    Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+
+    FString PackageDir;
+    FString AssetName;
+    MaterialEdit_SplitPackagePath(PackagePath, PackageDir, AssetName);
+    if (AssetName.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not derive asset name from '%s'"), *PackagePath));
+    }
+
+    const FString AssetObjectPath = PackageDir + AssetName;
+    if (UEditorAssetLibrary::DoesAssetExist(AssetObjectPath) && !bOverwrite)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset already exists: %s (set 'overwrite': true to replace)"), *AssetObjectPath));
+    }
+
+    UPackage* Package = CreatePackage(*AssetObjectPath);
+    if (!Package)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to create package at '%s'"), *AssetObjectPath));
+    }
+    Package->FullyLoad();
+
+    UMaterialFunctionFactoryNew* Factory = NewObject<UMaterialFunctionFactoryNew>();
+    UMaterialFunction* NewFunction = Cast<UMaterialFunction>(Factory->FactoryCreateNew(
+        UMaterialFunction::StaticClass(),
+        Package,
+        *AssetName,
+        RF_Public | RF_Standalone | RF_Transactional,
+        nullptr,
+        GWarn));
+    if (!NewFunction)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create UMaterialFunction"));
+    }
+
+    // Optional initial expression list. Same shape as `add_expressions`:
+    // each entry carries `class` plus optional `name` alias / `position`
+    // (cascades down by 200px per entry when omitted) / `properties`
+    // dict (applied through FProperty::ImportText).
+    TArray<TSharedPtr<FJsonValue>> ExpressionLog;
+    int32 ExpressionsCreated = 0;
+    int32 ExpressionFailures = 0;
+
+    const TArray<TSharedPtr<FJsonValue>>* ExpressionsArray = nullptr;
+    if (Params->TryGetArrayField(TEXT("expressions"), ExpressionsArray)
+        || Params->TryGetArrayField(TEXT("initial_expressions"), ExpressionsArray))
+    {
+        int32 CascadeIndex = 0;
+        for (const TSharedPtr<FJsonValue>& Entry : *ExpressionsArray)
+        {
+            TSharedPtr<FJsonObject> EntryRow = MakeShared<FJsonObject>();
+            if (!Entry.IsValid() || Entry->Type != EJson::Object)
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"), TEXT("entry must be an object"));
+                ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                ++ExpressionFailures;
+                continue;
+            }
+            const TSharedPtr<FJsonObject>& EntryObj = Entry->AsObject();
+
+            FString ClassToken;
+            if (!EntryObj->TryGetStringField(TEXT("class"), ClassToken)
+                && !EntryObj->TryGetStringField(TEXT("expression_class"), ClassToken))
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"), TEXT("missing 'class'"));
+                ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                ++ExpressionFailures;
+                continue;
+            }
+            EntryRow->SetStringField(TEXT("class_token"), ClassToken);
+
+            FString Alias;
+            EntryObj->TryGetStringField(TEXT("name"), Alias);
+            EntryObj->TryGetStringField(TEXT("alias"), Alias);
+
+            TSubclassOf<UMaterialExpression> ExprClass = ResolveExpressionClass(ClassToken);
+            if (!ExprClass)
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"),
+                    FString::Printf(TEXT("Could not resolve material expression class '%s'"), *ClassToken));
+                ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                ++ExpressionFailures;
+                continue;
+            }
+
+            int32 PosX = -300;
+            int32 PosY = 200 * CascadeIndex;
+            if (EntryObj->HasField(TEXT("position")))
+            {
+                const TSharedPtr<FJsonValue> PosVal = EntryObj->TryGetField(TEXT("position"));
+                if (PosVal.IsValid() && PosVal->Type == EJson::Array)
+                {
+                    const TArray<TSharedPtr<FJsonValue>>& Arr = PosVal->AsArray();
+                    if (Arr.Num() >= 2)
+                    {
+                        PosX = static_cast<int32>(Arr[0]->AsNumber());
+                        PosY = static_cast<int32>(Arr[1]->AsNumber());
+                    }
+                }
+                else if (PosVal.IsValid() && PosVal->Type == EJson::Object)
+                {
+                    const TSharedPtr<FJsonObject> PosObj = PosVal->AsObject();
+                    double X = 0.0, Y = 0.0;
+                    if (PosObj.IsValid() && (PosObj->TryGetNumberField(TEXT("x"), X) || PosObj->TryGetNumberField(TEXT("X"), X))
+                        && (PosObj->TryGetNumberField(TEXT("y"), Y) || PosObj->TryGetNumberField(TEXT("Y"), Y)))
+                    {
+                        PosX = static_cast<int32>(X);
+                        PosY = static_cast<int32>(Y);
+                    }
+                }
+            }
+
+            UMaterialExpression* NewExpr = UMaterialEditingLibrary::CreateMaterialExpressionInFunction(
+                NewFunction, ExprClass, PosX, PosY);
+            if (!NewExpr)
+            {
+                EntryRow->SetBoolField(TEXT("success"), false);
+                EntryRow->SetStringField(TEXT("error"),
+                    FString::Printf(TEXT("CreateMaterialExpressionInFunction failed for class '%s'"), *ExprClass->GetName()));
+                ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+                ++ExpressionFailures;
+                continue;
+            }
+
+            TArray<FString> PropertyErrors;
+            int32 PropertyAppliedCount = 0;
+            if (EntryObj->HasField(TEXT("properties")))
+            {
+                const TSharedPtr<FJsonValue> PropsVal = EntryObj->TryGetField(TEXT("properties"));
+                if (PropsVal.IsValid() && PropsVal->Type == EJson::Object)
+                {
+                    PropertyAppliedCount = MaterialEdit_ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
+                }
+            }
+
+            EntryRow->SetBoolField(TEXT("success"), true);
+            if (!Alias.IsEmpty())
+            {
+                EntryRow->SetStringField(TEXT("alias"), Alias);
+            }
+            EntryRow->SetStringField(TEXT("name"), NewExpr->GetName());
+            EntryRow->SetStringField(TEXT("class"), NewExpr->GetClass()->GetName());
+            EntryRow->SetNumberField(TEXT("position_x"), NewExpr->MaterialExpressionEditorX);
+            EntryRow->SetNumberField(TEXT("position_y"), NewExpr->MaterialExpressionEditorY);
+            EntryRow->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
+            if (PropertyErrors.Num() > 0)
+            {
+                TArray<TSharedPtr<FJsonValue>> Arr;
+                for (const FString& E : PropertyErrors)
+                {
+                    Arr.Add(MakeShared<FJsonValueString>(E));
+                }
+                EntryRow->SetArrayField(TEXT("property_errors"), Arr);
+            }
+            ExpressionLog.Add(MakeShared<FJsonValueObject>(EntryRow));
+            ++ExpressionsCreated;
+            ++CascadeIndex;
+        }
+    }
+
+    FAssetRegistryModule::AssetCreated(NewFunction);
+    Package->MarkPackageDirty();
+
+    // UpdateMaterialFunction recompiles every UMaterial that already
+    // references this function and refreshes the function's preview
+    // graph so the asset opens cleanly in the Material Function editor.
+    // Skip when the caller passed `recompile=false` to keep the create
+    // call cheap on a freshly-spawned function with no consumers yet.
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::UpdateMaterialFunction(NewFunction, /*PreviewMaterial=*/nullptr);
+    }
+
+    if (bSaveAfterCreate)
+    {
+        UEditorAssetLibrary::SaveAsset(AssetObjectPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("create_material_function"));
+    ResultObj->SetStringField(TEXT("name"), AssetName);
+    ResultObj->SetStringField(TEXT("path"), AssetObjectPath);
+    ResultObj->SetNumberField(TEXT("expression_count"),
+        UMaterialEditingLibrary::GetNumMaterialExpressionsInFunction(NewFunction));
+    ResultObj->SetArrayField(TEXT("expressions"), ExpressionLog);
+    ResultObj->SetNumberField(TEXT("expressions_created"), ExpressionsCreated);
+    ResultObj->SetNumberField(TEXT("expression_failures"), ExpressionFailures);
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterCreate);
     return ResultObj;
 }

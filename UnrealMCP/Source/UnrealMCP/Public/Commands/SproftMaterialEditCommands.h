@@ -62,20 +62,30 @@
  *      synthesized FPropertyChangedEvent so the asset's StateId
  *      regenerates and any UMaterial referencing the collection picks
  *      the new entry up on the next compile.
- *
- * Material Functions remain on the backlog.
+ *   - "create_material_function": create a UMaterialFunction asset at a
+ *      `/Game/...` path through `UMaterialFunctionFactoryNew`. Optional
+ *      `expressions` list mirrors the `add_expressions` shape (each
+ *      spec carries `class` plus optional `name` alias / `position` /
+ *      `properties` dict) and routes through
+ *      `UMaterialEditingLibrary::CreateMaterialExpressionInFunction`,
+ *      then `UpdateMaterialFunction` recompiles any referencing
+ *      materials in one pass. The expected workflow is to seed the
+ *      function with a `function_input` + `function_output` pair and
+ *      a small expression chain in one call.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UMaterialFactoryNew / UMaterialInstanceConstantFactoryNew /
- *     UMaterialParameterCollectionFactoryNew
+ *     UMaterialParameterCollectionFactoryNew / UMaterialFunctionFactoryNew
  *   - UMaterialEditingLibrary::CreateMaterialExpression +
+ *     CreateMaterialExpressionInFunction +
  *     ConnectMaterialExpressions + ConnectMaterialProperty +
- *     RecompileMaterial + UpdateMaterialInstance
+ *     RecompileMaterial + UpdateMaterialInstance + UpdateMaterialFunction
  *   - UMaterialExpressionConstant / Constant3Vector / Multiply /
  *     LinearInterpolate / TextureSampleParameter2D / ScalarParameter /
  *     VectorParameter / Time / Panner / TextureCoordinate / OneMinus /
  *     Saturate / Clamp / Fresnel / Power / Sine / Cosine /
- *     ComponentMask / If / MakeMaterialAttributes
+ *     ComponentMask / If / MakeMaterialAttributes /
+ *     FunctionInput / FunctionOutput
  *   - UMaterialParameterCollection::ScalarParameters /
  *     VectorParameters arrays + PostEditChangeProperty broadcast
  *   - FProperty::ImportText for the property writes
@@ -103,4 +113,6 @@ private:
 
     TSharedPtr<FJsonObject> CreateParameterCollection(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddCollectionParameter(const TSharedPtr<FJsonObject>& Params);
+
+    TSharedPtr<FJsonObject> CreateMaterialFunction(const TSharedPtr<FJsonObject>& Params);
 };
