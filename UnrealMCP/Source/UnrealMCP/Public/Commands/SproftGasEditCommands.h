@@ -58,6 +58,15 @@
  *     demoted the field from public to protected.
  *   - `set_ability_cooldown`: same shape against
  *     `CooldownGameplayEffectClass`.
+ *   - `create_cue_notify`: NewObject's a UGameplayCueNotify_Static or
+ *     AGameplayCueNotify_Actor (parent class chosen via the
+ *     `parent_class` field, default
+ *     `/Script/GameplayAbilities.GameplayCueNotify_Static`) at a
+ *     `/Game/...` path. Optional `cue_tag` writes the asset's
+ *     `GameplayCueTag` UPROPERTY through reflection so the asset
+ *     opens with a tag already wired (the engine's editor falls back
+ *     to `DeriveGameplayCueTagFromAssetName` if the field stays
+ *     empty, but the explicit write is the more predictable path).
  *
  * Inputs (op-dependent):
  *   - asset:           short asset name or full `/Game/...` path (inspect, set_gameplay_tags).
@@ -66,8 +75,14 @@
  *   - duration_policy: `instant` / `has_duration` / `infinite` (create_gameplay_effect).
  *   - duration_magnitude: literal float (create_gameplay_effect; HasDuration only).
  *   - tags:            object dict with named tag containers (set_gameplay_tags).
+ *   - cue_tag:         FGameplayTag string for create_cue_notify (e.g. `GameplayCue.Combat.Hit`).
  *
- * Heavier ops (GameplayCue authoring) remain on the backlog.
+ * The `set_ability_cue_tag` op stays on BACKLOG: UGameplayAbility has
+ * no canonical UPROPERTY storing a per-ability cue association; cue
+ * invocation runs at runtime through the `K2_AddGameplayCue` /
+ * `K2_ExecuteGameplayCue` BlueprintCallables, so the "bind a cue tag
+ * to an ability" surface needs a graph-side authoring slice instead
+ * of a CDO write.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UGameplayAbility property surface (CancelAbilitiesWithTag etc.).
@@ -94,4 +109,5 @@ private:
     TSharedPtr<FJsonObject> HandleRemoveModifierAt(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetAttributeDefault(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetAbilityCostOrCooldown(const TSharedPtr<FJsonObject>& Params, bool bIsCost);
+    TSharedPtr<FJsonObject> HandleCreateCueNotify(const TSharedPtr<FJsonObject>& Params);
 };

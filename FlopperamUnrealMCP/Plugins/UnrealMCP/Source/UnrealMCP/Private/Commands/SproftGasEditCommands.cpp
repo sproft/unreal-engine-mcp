@@ -7,6 +7,8 @@
 #include "EditorAssetLibrary.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "GameplayCueNotify_Actor.h"
+#include "GameplayCueNotify_Static.h"
 #include "GameplayEffect.h"
 #include "GameplayEffectExecutionCalculation.h"
 #include "GameplayEffectComponent.h"
@@ -770,6 +772,11 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCommand(const FString& Com
     if (Op == TEXT("set_ability_cooldown") || Op == TEXT("set_cooldown"))
     {
         return HandleSetAbilityCostOrCooldown(Params, /*bIsCost=*/false);
+    }
+    if (Op == TEXT("create_cue_notify") || Op == TEXT("create_gameplay_cue")
+        || Op == TEXT("create_cue"))
+    {
+        return HandleCreateCueNotify(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("gas_edit: unsupported op '%s'"), *Op));
@@ -1637,6 +1644,187 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleSetAbilityCostOrCooldown(c
         Result->SetStringField(OutKey, NewEffectClass->GetPathName());
     }
     Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+namespace
+{
+    /** Resolve a UGameplayCueNotify_Static / AGameplayCueNotify_Actor
+     *  parent class from a short token, full path, or bare class name.
+     *  Defaults to the static notify (the pattern designers reach for
+     *  most often: a one-off burst notify with no scene presence). */
+    UClass* GasEdit_ResolveCueNotifyParent(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return UGameplayCueNotify_Static::StaticClass();
+        }
+        const FString Lower = Token.ToLower();
+        if (Lower == TEXT("static") || Lower == TEXT("notify_static")
+            || Lower == TEXT("gameplay_cue_notify_static")
+            || Lower == TEXT("gameplaycuenotify_static"))
+        {
+            return UGameplayCueNotify_Static::StaticClass();
+        }
+        if (Lower == TEXT("actor") || Lower == TEXT("notify_actor")
+            || Lower == TEXT("gameplay_cue_notify_actor")
+            || Lower == TEXT("gameplaycuenotify_actor"))
+        {
+            return AGameplayCueNotify_Actor::StaticClass();
+        }
+        if (Token.StartsWith(TEXT("/")))
+        {
+            if (UClass* Loaded = LoadClass<UObject>(nullptr, *Token))
+            {
+                return Loaded;
+            }
+            // Caller may have passed a /Game/... BP class without the _C suffix.
+            const FString WithSuffix = Token + TEXT("_C");
+            if (UClass* LoadedSuffix = LoadClass<UObject>(nullptr, *WithSuffix))
+            {
+                return LoadedSuffix;
+            }
+            return nullptr;
+        }
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            return Found;
+        }
+        const FString GASPath = FString::Printf(TEXT("/Script/GameplayAbilities.%s"), *Token);
+        if (UClass* Loaded = LoadClass<UObject>(nullptr, *GASPath))
+        {
+            return Loaded;
+        }
+        return nullptr;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCreateCueNotify(const TSharedPtr<FJsonObject>& Params)
+{
+    FString PackagePath;
+    if (!Params->TryGetStringField(TEXT("path"), PackagePath)
+        && !Params->TryGetStringField(TEXT("asset"), PackagePath)
+        && !Params->TryGetStringField(TEXT("asset_path"), PackagePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'path' parameter"));
+    }
+
+    FString ParentInput;
+    Params->TryGetStringField(TEXT("parent_class"), ParentInput);
+    if (ParentInput.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("parent"), ParentInput);
+    }
+    UClass* ParentClass = GasEdit_ResolveCueNotifyParent(ParentInput);
+    if (!ParentClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve parent_class '%s'. Pass 'static' / 'actor' or a UGameplayCueNotify_* subclass path."), *ParentInput));
+    }
+    const bool bIsStatic = ParentClass->IsChildOf(UGameplayCueNotify_Static::StaticClass());
+    const bool bIsActor = ParentClass->IsChildOf(AGameplayCueNotify_Actor::StaticClass());
+    if (!bIsStatic && !bIsActor)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Parent class '%s' is neither UGameplayCueNotify_Static nor AGameplayCueNotify_Actor"),
+                *ParentClass->GetPathName()));
+    }
+
+    FString CueTagText;
+    Params->TryGetStringField(TEXT("cue_tag"), CueTagText);
+    if (CueTagText.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("tag"), CueTagText);
+    }
+
+    bool bOverwrite = false;
+    Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    FString Error;
+    UBlueprint* NewBP = CreateGasBlueprint(PackagePath, ParentClass, bOverwrite, Error);
+    if (!NewBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Error);
+    }
+
+    bool bAppliedTag = false;
+    if (!CueTagText.IsEmpty())
+    {
+        // The tag must already live in the project's Gameplay Tag
+        // registry. RequestGameplayTag with bErrorIfNotFound=false
+        // returns an empty tag rather than crashing if the tag is
+        // unknown, mirroring the editor's "the tag picker accepts
+        // typed text but only highlights registered ones" behaviour.
+        const FGameplayTag CueTag = UGameplayTagsManager::Get().RequestGameplayTag(
+            FName(*CueTagText), /*ErrorIfNotFound=*/false);
+        UClass* GenClass = NewBP->GeneratedClass ? NewBP->GeneratedClass.Get() : NewBP->ParentClass.Get();
+        if (GenClass)
+        {
+            UObject* CDO = GenClass->GetDefaultObject(/*bCreateIfNeeded=*/true);
+            if (CDO)
+            {
+                if (FProperty* TagProperty = FindFProperty<FProperty>(GenClass, FName(TEXT("GameplayCueTag"))))
+                {
+                    if (FStructProperty* AsStruct = CastField<FStructProperty>(TagProperty))
+                    {
+                        if (AsStruct->Struct == FGameplayTag::StaticStruct())
+                        {
+                            void* Container = AsStruct->ContainerPtrToValuePtr<void>(CDO);
+                            if (Container)
+                            {
+                                *(FGameplayTag*)Container = CueTag;
+                                bAppliedTag = CueTag.IsValid();
+                            }
+                        }
+                    }
+                }
+                // Mirror onto the searchable FName for the asset
+                // registry; the engine does this in
+                // PostEditChangeProperty when the tag changes.
+                if (FNameProperty* AsName = FindFProperty<FNameProperty>(GenClass, FName(TEXT("GameplayCueName"))))
+                {
+                    AsName->SetPropertyValue_InContainer(CDO, FName(*CueTagText));
+                }
+            }
+        }
+        FBlueprintEditorUtils::MarkBlueprintAsModified(NewBP);
+    }
+
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(NewBP);
+    }
+
+    const FString FinalPath = NewBP->GetPathName();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(FinalPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("create_cue_notify"));
+    Result->SetStringField(TEXT("name"), NewBP->GetName());
+    Result->SetStringField(TEXT("path"), FinalPath);
+    Result->SetStringField(TEXT("class"), NewBP->GetClass()->GetName());
+    Result->SetStringField(TEXT("parent_class"), ParentClass->GetPathName());
+    Result->SetStringField(TEXT("parent_class_short"), ParentClass->GetName());
+    Result->SetStringField(TEXT("notify_kind"), bIsStatic ? TEXT("static") : TEXT("actor"));
+    if (!CueTagText.IsEmpty())
+    {
+        Result->SetStringField(TEXT("cue_tag"), CueTagText);
+        Result->SetBoolField(TEXT("cue_tag_applied"), bAppliedTag);
+        if (!bAppliedTag)
+        {
+            Result->SetStringField(TEXT("cue_tag_warning"),
+                TEXT("Tag is not registered in the project's Gameplay Tag database; field stays empty until the tag is added through tag_registry_edit add_tag."));
+        }
+    }
+    Result->SetBoolField(TEXT("compiled"), bCompile);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }

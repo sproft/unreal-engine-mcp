@@ -5450,6 +5450,7 @@ def gas_edit(
     base_value: Optional[float] = None,
     effect: Optional[str] = None,
     effect_class: Optional[str] = None,
+    cue_tag: Optional[str] = None,
     clear: Optional[bool] = None,
     overwrite: Optional[bool] = None,
     compile: Optional[bool] = None,
@@ -5493,6 +5494,15 @@ def gas_edit(
           reflected ``FClassProperty`` writes so the op stays
           compatible with the 5.7 visibility tightening that demoted
           these fields from public to protected.
+        - ``create_cue_notify``: NewObject's a UGameplayCueNotify_Static
+          or AGameplayCueNotify_Actor Blueprint at a ``/Game/...``
+          path. ``parent_class`` accepts ``static`` (default) /
+          ``actor`` short tokens or a UGameplayCueNotify_* subclass
+          path. Optional ``cue_tag`` lands the asset's
+          ``GameplayCueTag`` UPROPERTY through reflection so the
+          notify opens with a tag pre-bound; the tag must already
+          live in the project's tag registry (call
+          ``tag_registry_edit add_tag`` first if it does not).
 
     Args:
         asset: Required for ``inspect`` / ``set_gameplay_tags`` /
@@ -5568,6 +5578,8 @@ def gas_edit(
         params["effect"] = effect
     if effect_class is not None:
         params["class"] = effect_class
+    if cue_tag is not None:
+        params["cue_tag"] = cue_tag
     if clear is not None:
         params["clear"] = clear
     if overwrite is not None:
