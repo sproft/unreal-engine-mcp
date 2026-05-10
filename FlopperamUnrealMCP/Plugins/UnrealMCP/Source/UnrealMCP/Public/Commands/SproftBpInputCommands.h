@@ -28,6 +28,18 @@
  *      `FProperty::ImportText_InContainer`, so callers can write `Order`
  *      on a swizzle, `Scalar` on a scalar, `LowerThreshold` on a dead
  *      zone, etc., in the same call.
+ *   - "add_action_trigger": append a UInputTrigger subobject to a
+ *      mapping row's `Triggers` array. The mapping row is found by
+ *      `(action, key)` pair (same shape as `add_action_modifier`);
+ *      the trigger class resolves through a short token (`pressed`
+ *      / `released` / `hold` / `hold_and_release` / `tap` / `pulse`
+ *      / `chord` / `chord_action` / `down` / `repeated_tap` /
+ *      `combo`) or a full UInputTrigger subclass path. An optional
+ *      flat property dict applies through
+ *      `FProperty::ImportText_InContainer`, so callers can write
+ *      `HoldTimeThreshold` on a hold trigger, `TapReleaseTimeThreshold`
+ *      on a tap trigger, `ChordAction` on a chord trigger, etc., in
+ *      the same call.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UInputAction (UDataAsset subclass, EnhancedInput plugin)
@@ -62,4 +74,5 @@ private:
     TSharedPtr<FJsonObject> AddMapping(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddActionEventNode(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddActionModifier(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddActionTrigger(const TSharedPtr<FJsonObject>& Params);
 };

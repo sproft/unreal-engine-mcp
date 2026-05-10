@@ -12,6 +12,7 @@
 #include "InputCoreTypes.h"
 #include "InputMappingContext.h"
 #include "InputModifiers.h"
+#include "InputTriggers.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_EnhancedInputAction.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -145,9 +146,14 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::HandleBpInput(const TSharedPtr<F
     {
         return AddActionModifier(Params);
     }
+    if (Operation == TEXT("add_action_trigger") || Operation == TEXT("add_trigger")
+        || Operation == TEXT("add_mapping_trigger"))
+    {
+        return AddActionTrigger(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported bp_input operation '%s'. Supported: create_input_action, create_input_mapping_context, add_mapping, add_action_event_node, add_action_modifier"), *Operation));
+        FString::Printf(TEXT("Unsupported bp_input operation '%s'. Supported: create_input_action, create_input_mapping_context, add_mapping, add_action_event_node, add_action_modifier, add_action_trigger"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftBpInputCommands::CreateInputAction(const TSharedPtr<FJsonObject>& Params)
@@ -857,6 +863,264 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::AddActionModifier(const TSharedP
     ResultObj->SetStringField(TEXT("modifier_class"), ModifierClass->GetName());
     ResultObj->SetStringField(TEXT("modifier_class_path"), ModifierClass->GetPathName());
     ResultObj->SetNumberField(TEXT("modifier_count"), Row.Modifiers.Num());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetArrayField(TEXT("skipped"), SkippedJson);
+    ResultObj->SetNumberField(TEXT("applied_count"), AppliedJson.Num());
+    ResultObj->SetNumberField(TEXT("skipped_count"), SkippedJson.Num());
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Resolve a UInputTrigger subclass by short token, full UObject path,
+     *  or a bare class name (with a `/Script/EnhancedInput.<Name>` fallback).
+     *  The supported short tokens mirror the canonical UInputTrigger subclass
+     *  set under `Plugins/EnhancedInput/Source/EnhancedInput/Public/InputTriggers.h`. */
+    UClass* BpInput_ResolveTriggerClass(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        const FString Lower = Token.ToLower();
+        struct FShortTokenMap
+        {
+            const TCHAR* Token;
+            UClass* (*Resolver)();
+        };
+        static const FShortTokenMap Map[] = {
+            { TEXT("pressed"),               []() { return UInputTriggerPressed::StaticClass(); } },
+            { TEXT("released"),              []() { return UInputTriggerReleased::StaticClass(); } },
+            { TEXT("hold"),                  []() { return UInputTriggerHold::StaticClass(); } },
+            { TEXT("hold_and_release"),      []() { return UInputTriggerHoldAndRelease::StaticClass(); } },
+            { TEXT("holdandrelease"),        []() { return UInputTriggerHoldAndRelease::StaticClass(); } },
+            { TEXT("tap"),                   []() { return UInputTriggerTap::StaticClass(); } },
+            { TEXT("pulse"),                 []() { return UInputTriggerPulse::StaticClass(); } },
+            { TEXT("chord_action"),          []() { return UInputTriggerChordAction::StaticClass(); } },
+            { TEXT("chordaction"),           []() { return UInputTriggerChordAction::StaticClass(); } },
+            { TEXT("chord"),                 []() { return UInputTriggerChordAction::StaticClass(); } },
+            { TEXT("down"),                  []() { return UInputTriggerDown::StaticClass(); } },
+            { TEXT("repeated_tap"),          []() { return UInputTriggerRepeatedTap::StaticClass(); } },
+            { TEXT("repeatedtap"),           []() { return UInputTriggerRepeatedTap::StaticClass(); } },
+            { TEXT("combo"),                 []() { return UInputTriggerCombo::StaticClass(); } },
+        };
+        for (const FShortTokenMap& Entry : Map)
+        {
+            if (Lower == Entry.Token)
+            {
+                return Entry.Resolver();
+            }
+        }
+
+        if (Token.StartsWith(TEXT("/Script/")))
+        {
+            if (UClass* Loaded = LoadClass<UInputTrigger>(nullptr, *Token))
+            {
+                return Loaded;
+            }
+        }
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            if (Found->IsChildOf(UInputTrigger::StaticClass()))
+            {
+                return Found;
+            }
+        }
+        const FString EnhancedPath = FString::Printf(TEXT("/Script/EnhancedInput.%s"), *Token);
+        if (UClass* Loaded = LoadClass<UInputTrigger>(nullptr, *EnhancedPath))
+        {
+            return Loaded;
+        }
+        return nullptr;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftBpInputCommands::AddActionTrigger(const TSharedPtr<FJsonObject>& Params)
+{
+    // The mapping-row resolution mirrors AddActionModifier byte-for-byte:
+    // the row is keyed by (action, key) and the optional `properties`
+    // dict applies through `FProperty::ImportText_InContainer` against
+    // the new UInputTrigger instance.
+    FString IMCPath;
+    if (!Params->TryGetStringField(TEXT("input_mapping_context"), IMCPath)
+        && !Params->TryGetStringField(TEXT("imc"), IMCPath)
+        && !Params->TryGetStringField(TEXT("mapping_context"), IMCPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'input_mapping_context' parameter"));
+    }
+
+    FString ActionName;
+    if (!Params->TryGetStringField(TEXT("input_action"), ActionName)
+        && !Params->TryGetStringField(TEXT("action"), ActionName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'input_action' parameter (path or short name of the UInputAction the row binds)"));
+    }
+
+    FString KeyText;
+    if (!Params->TryGetStringField(TEXT("key"), KeyText))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'key' parameter (matches the FKey on the mapping row)"));
+    }
+
+    FString TriggerToken;
+    if (!Params->TryGetStringField(TEXT("trigger_class"), TriggerToken)
+        && !Params->TryGetStringField(TEXT("trigger"), TriggerToken)
+        && !Params->TryGetStringField(TEXT("class"), TriggerToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'trigger_class' parameter (pressed / released / hold / hold_and_release / tap / pulse / chord_action / down / repeated_tap / combo, or a UInputTrigger subclass path)"));
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    UObject* IMCAsset = UEditorAssetLibrary::LoadAsset(IMCPath);
+    UInputMappingContext* IMC = Cast<UInputMappingContext>(IMCAsset);
+    if (!IMC)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UInputMappingContext: %s"), *IMCPath));
+    }
+
+    const UInputAction* TargetAction = nullptr;
+    if (ActionName.StartsWith(TEXT("/")))
+    {
+        if (UObject* AsAsset = UEditorAssetLibrary::LoadAsset(ActionName))
+        {
+            TargetAction = Cast<UInputAction>(AsAsset);
+        }
+    }
+
+    const FKey TargetKey(*KeyText);
+    if (!TargetKey.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("FKey '%s' is not a known engine key. Pass an FKey FName like 'SpaceBar', 'W', or 'Gamepad_FaceButton_Bottom'."), *KeyText));
+    }
+
+    const TArray<FEnhancedActionKeyMapping>& Mappings = IMC->GetMappings();
+    int32 MatchedIndex = INDEX_NONE;
+    for (int32 i = 0; i < Mappings.Num(); ++i)
+    {
+        const FEnhancedActionKeyMapping& Row = Mappings[i];
+        if (Row.Key != TargetKey)
+        {
+            continue;
+        }
+        if (TargetAction)
+        {
+            if (Row.Action == TargetAction)
+            {
+                MatchedIndex = i;
+                break;
+            }
+        }
+        else if (Row.Action && Row.Action->GetName().Equals(ActionName, ESearchCase::IgnoreCase))
+        {
+            MatchedIndex = i;
+            break;
+        }
+    }
+
+    if (MatchedIndex == INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find a mapping row for action '%s' + key '%s' on %s. Run bp_input add_mapping first."), *ActionName, *KeyText, *IMCPath));
+    }
+
+    UClass* TriggerClass = BpInput_ResolveTriggerClass(TriggerToken);
+    if (!TriggerClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve trigger_class '%s'. Pass one of: pressed, released, hold, hold_and_release, tap, pulse, chord_action, down, repeated_tap, combo, or a UInputTrigger subclass path."), *TriggerToken));
+    }
+    if (!TriggerClass->IsChildOf(UInputTrigger::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Resolved class '%s' is not a UInputTrigger subclass."), *TriggerClass->GetName()));
+    }
+
+    // Construct the new trigger as an instanced subobject of the IMC.
+    // The Triggers array on FEnhancedActionKeyMapping is `Instanced`,
+    // so we want one subobject per mapping; outered to the IMC keeps
+    // it serialised inside the asset (matching the editor's binding
+    // panel convention).
+    UInputTrigger* NewTrigger = NewObject<UInputTrigger>(IMC, TriggerClass, NAME_None, RF_Transactional);
+    if (!NewTrigger)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to construct UInputTrigger '%s'"), *TriggerClass->GetName()));
+    }
+
+    // Apply optional flat property dict to the new trigger through
+    // ImportText. Failed entries surface under skipped, mirroring the
+    // chaos_edit / pcg_graph_edit / widget_edit set_slot_property
+    // convention and the parallel `add_action_modifier` op.
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+    if (Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid())
+    {
+        FOutputDeviceNull NullDevice;
+        for (const auto& Pair : (*PropsObj)->Values)
+        {
+            const FString& PropName = Pair.Key;
+            const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
+
+            FProperty* Prop = FindFProperty<FProperty>(TriggerClass, *PropName);
+            if (!Prop)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), PropName);
+                Skip->SetStringField(TEXT("reason"), TEXT("not_a_uproperty"));
+                SkippedJson.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            const FString TextValue = BpInput_JsonValueToImportText(JsonVal);
+            const TCHAR* TextPtr = *TextValue;
+            const TCHAR* Result = Prop->ImportText_InContainer(TextPtr, NewTrigger, NewTrigger, PPF_None, &NullDevice);
+            if (Result == nullptr)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), PropName);
+                Skip->SetStringField(TEXT("reason"), TEXT("import_text_failed"));
+                Skip->SetStringField(TEXT("attempted_value"), TextValue);
+                SkippedJson.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+            Applied->SetStringField(TEXT("name"), PropName);
+            Applied->SetStringField(TEXT("type"), Prop->GetCPPType());
+            AppliedJson.Add(MakeShared<FJsonValueObject>(Applied));
+        }
+    }
+
+    // Append to the row's Triggers array through the non-const accessor.
+    FEnhancedActionKeyMapping& Row = IMC->GetMapping(MatchedIndex);
+    Row.Triggers.Add(NewTrigger);
+
+    if (UPackage* Package = IMC->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(IMCPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_action_trigger"));
+    ResultObj->SetStringField(TEXT("input_mapping_context"), IMC->GetPathName());
+    if (Row.Action)
+    {
+        ResultObj->SetStringField(TEXT("input_action"), Row.Action->GetPathName());
+    }
+    ResultObj->SetStringField(TEXT("key"), Row.Key.ToString());
+    ResultObj->SetNumberField(TEXT("mapping_index"), MatchedIndex);
+    ResultObj->SetStringField(TEXT("trigger_class"), TriggerClass->GetName());
+    ResultObj->SetStringField(TEXT("trigger_class_path"), TriggerClass->GetPathName());
+    ResultObj->SetNumberField(TEXT("trigger_count"), Row.Triggers.Num());
     ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
     ResultObj->SetArrayField(TEXT("skipped"), SkippedJson);
     ResultObj->SetNumberField(TEXT("applied_count"), AppliedJson.Num());

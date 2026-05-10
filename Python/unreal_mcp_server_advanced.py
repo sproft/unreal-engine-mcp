@@ -3246,6 +3246,7 @@ def bp_input(
     connect_to_function: Optional[str] = None,
     position: Optional[List[float]] = None,
     modifier_class: Optional[str] = None,
+    trigger_class: Optional[str] = None,
     properties: Optional[Dict[str, Any]] = None,
     compile: bool = True,
     save: bool = True,
@@ -3275,6 +3276,20 @@ def bp_input(
           land ``Order`` on a swizzle, ``Scalar`` on a scalar, etc., in
           the same call. Failed property entries surface under
           ``skipped`` with a reason.
+        - "add_action_trigger": append a UInputTrigger subobject to an
+          existing mapping row's ``Triggers`` array. The row is matched
+          by ``(input_action, key)`` (same shape as
+          ``add_action_modifier``); ``trigger_class`` resolves through
+          short tokens (``pressed`` / ``released`` / ``hold`` /
+          ``hold_and_release`` / ``tap`` / ``pulse`` / ``chord_action``
+          / ``down`` / ``repeated_tap`` / ``combo``) or a UInputTrigger
+          subclass path. An optional ``properties`` flat dict applies
+          through ``FProperty::ImportText_InContainer`` so callers can
+          land ``HoldTimeThreshold`` on a hold trigger,
+          ``TapReleaseTimeThreshold`` on a tap trigger,
+          ``ChordAction`` on a chord trigger, etc., in the same call.
+          Failed property entries surface under ``skipped`` with a
+          reason.
 
     Args:
         operation: "create_input_action", "create_input_mapping_context",
@@ -3340,6 +3355,8 @@ def bp_input(
         params["position"] = position
     if modifier_class is not None:
         params["modifier_class"] = modifier_class
+    if trigger_class is not None:
+        params["trigger_class"] = trigger_class
     if properties is not None:
         params["properties"] = properties
     params["compile"] = compile
