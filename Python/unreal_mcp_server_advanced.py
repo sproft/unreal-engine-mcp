@@ -7125,48 +7125,76 @@ def niagara_edit(
     emitter: Optional[str] = None,
     handle_name: Optional[str] = None,
     version_guid: Optional[str] = None,
+    parameter_name: Optional[str] = None,
+    parameter_type: Optional[str] = None,
+    value: Optional[Union[bool, int, float, List[float]]] = None,
+    script: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
 
-    Two ops keyed by ``op``:
+    Three ops keyed by ``op``:
         - ``create_niagara_system`` (default, ultra-minimum cut):
           spawns a ``UNiagaraSystem`` asset at a ``/Game/...`` path
           through ``UNiagaraSystemFactoryNew::InitializeSystem`` with
-          no emitters and no default nodes. The bar this slice
-          clears is "the persistent four-skip is broken". A system
-          with no emitters opens cleanly in the Niagara editor but
-          surfaces a "no emitter" warning in the asset's status
-          banner.
+          no emitters and no default nodes. A system with no
+          emitters opens cleanly in the Niagara editor but surfaces
+          a "no emitter" warning in the asset's status banner.
         - ``add_emitter_from_asset``: resolves an existing
           ``UNiagaraSystem`` and an existing ``UNiagaraEmitter`` and
           routes through ``UNiagaraSystem::AddEmitterHandle``.
           The emitter handle's display name defaults to the source
           emitter's ``GetName()`` and the version GUID defaults to
           the source emitter's currently exposed version.
+        - ``set_emitter_local_parameter``: resolves an existing
+          system, walks ``UNiagaraSystem::GetEmitterHandles()`` for
+          the matching emitter handle by name, resolves the
+          ``Spawn`` (default) or ``Update`` script for that emitter,
+          and writes the parameter into the script's
+          ``RapidIterationParameters`` store via the documented
+          ``FNiagaraParameterStore::SetParameterData`` byte-buffer
+          overload (the parameter is added if missing). Type
+          tokens: ``float`` / ``int`` / ``bool`` / ``vec2`` /
+          ``vec3`` / ``vec4`` / ``color`` / ``quat``. ``value`` is
+          a JSON literal (number / bool) for scalars or a JSON
+          array of numbers for vector / color / quat shapes.
 
-    The broader authoring surface (parameter store, modules,
-    simulation stages, sim-target / determinism flag writes) stays
-    in BACKLOG.md.
+    The broader authoring surface (parameter store extensions,
+    modules, simulation stages, sim-target / determinism flag
+    writes) stays in BACKLOG.md.
 
     Args:
         path: create_niagara_system: ``/Game/...`` package path.
         op: Operation discriminator. ``create_niagara_system`` /
-            ``add_emitter_from_asset``. Default
+            ``add_emitter_from_asset`` /
+            ``set_emitter_local_parameter``. Default
             ``create_niagara_system``.
         overwrite: create_niagara_system: replace an existing asset
             at the path. Default False.
         save: Save the new / mutated asset to disk. Default True.
-        system: add_emitter_from_asset: ``/Game/...`` path or short
-            name of an existing UNiagaraSystem.
+        system: add_emitter_from_asset /
+            set_emitter_local_parameter: ``/Game/...`` path or
+            short name of an existing UNiagaraSystem.
         emitter: add_emitter_from_asset: ``/Game/...`` path or
             short name of an existing UNiagaraEmitter to copy in.
+            set_emitter_local_parameter: handle name (case-
+            insensitive) of the target emitter on the system.
         handle_name: add_emitter_from_asset: optional system-side
             display name for the new emitter handle. Defaults to
             the source emitter's ``GetName()``.
         version_guid: add_emitter_from_asset: optional emitter
             version GUID. Defaults to the source emitter's
             currently exposed version.
+        parameter_name: set_emitter_local_parameter: FName of the
+            parameter to write (e.g. ``Emitter.MyFloat`` /
+            ``Module.MyValue``).
+        parameter_type: set_emitter_local_parameter: short token
+            (``float`` / ``int`` / ``bool`` / ``vec2`` / ``vec3`` /
+            ``vec4`` / ``color`` / ``quat``).
+        value: set_emitter_local_parameter: scalar literal or list
+            of floats matching the channel count of the type.
+        script: set_emitter_local_parameter: ``spawn`` (default) or
+            ``update``.
 
     Returns:
         For ``create_niagara_system``: dict with ``operation``,
@@ -7178,6 +7206,11 @@ def niagara_edit(
         (the handle's GUID string), ``version_guid``,
         ``emitter_count`` (the system's total emitter count after
         the add), and ``saved``.
+        For ``set_emitter_local_parameter``: dict with ``operation``,
+        ``system``, ``emitter_handle``, ``emitter_handle_index``,
+        ``script``, ``script_path``, ``parameter_name``,
+        ``parameter_type``, ``parameter_size``, ``wrote_data``, and
+        ``saved``.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -7200,6 +7233,14 @@ def niagara_edit(
         params["handle_name"] = handle_name
     if version_guid is not None:
         params["version_guid"] = version_guid
+    if parameter_name is not None:
+        params["parameter_name"] = parameter_name
+    if parameter_type is not None:
+        params["parameter_type"] = parameter_type
+    if value is not None:
+        params["value"] = value
+    if script is not None:
+        params["script"] = script
 
     try:
         response = unreal.send_command("niagara_edit", params)
