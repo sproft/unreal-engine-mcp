@@ -87,4 +87,5 @@ public:
 
 private:
     TSharedPtr<FJsonObject> HandleNiagaraScriptInspect(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetModuleUsage(const TSharedPtr<FJsonObject>& Params);
 };

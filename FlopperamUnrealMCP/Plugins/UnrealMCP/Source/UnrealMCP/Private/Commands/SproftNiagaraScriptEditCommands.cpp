@@ -10,6 +10,10 @@
 #include "NiagaraTypes.h"
 #include "UObject/Class.h"
 
+#if WITH_EDITOR
+#include "NiagaraScriptSourceBase.h"
+#endif
+
 namespace
 {
     UNiagaraScript* ResolveNiagaraScript(const FString& Input)
@@ -125,8 +129,13 @@ TSharedPtr<FJsonObject> FSproftNiagaraScriptEditCommands::HandleCommand(const FS
     {
         return HandleNiagaraScriptInspect(Params);
     }
+    if (Op.Equals(TEXT("set_module_usage"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_usage"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetModuleUsage(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_script_edit: unsupported op '%s'. Only 'inspect' is shipped on this slice"), *Op));
+        FString::Printf(TEXT("niagara_script_edit: unsupported op '%s'. Supported: inspect, set_module_usage"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraScriptEditCommands::HandleNiagaraScriptInspect(const TSharedPtr<FJsonObject>& Params)
@@ -329,4 +338,127 @@ TSharedPtr<FJsonObject> FSproftNiagaraScriptEditCommands::HandleNiagaraScriptIns
     }
 
     return Result;
+}
+
+namespace
+{
+    /** Map a usage token to ENiagaraScriptUsage. The set is small on
+     *  purpose; the runtime usage values gate compile shapes that
+     *  `set_module_usage` is not the right tool for (e.g.
+     *  ParticleSpawnScriptInterpolated). */
+    bool NiagaraScriptEdit_ResolveUsage(const FString& Token, ENiagaraScriptUsage& OutUsage)
+    {
+        const FString Lower = Token.ToLower();
+        if (Lower == TEXT("module"))                   { OutUsage = ENiagaraScriptUsage::Module;                  return true; }
+        if (Lower == TEXT("function"))                 { OutUsage = ENiagaraScriptUsage::Function;                return true; }
+        if (Lower == TEXT("dynamic_input") || Lower == TEXT("dynamicinput"))
+        {
+            OutUsage = ENiagaraScriptUsage::DynamicInput;
+            return true;
+        }
+        if (Lower == TEXT("emitter_spawn") || Lower == TEXT("emitterspawn"))
+        {
+            OutUsage = ENiagaraScriptUsage::EmitterSpawnScript;
+            return true;
+        }
+        if (Lower == TEXT("emitter_update") || Lower == TEXT("emitterupdate"))
+        {
+            OutUsage = ENiagaraScriptUsage::EmitterUpdateScript;
+            return true;
+        }
+        if (Lower == TEXT("particle_spawn") || Lower == TEXT("particlespawn"))
+        {
+            OutUsage = ENiagaraScriptUsage::ParticleSpawnScript;
+            return true;
+        }
+        if (Lower == TEXT("particle_update") || Lower == TEXT("particleupdate"))
+        {
+            OutUsage = ENiagaraScriptUsage::ParticleUpdateScript;
+            return true;
+        }
+        if (Lower == TEXT("system_spawn"))
+        {
+            OutUsage = ENiagaraScriptUsage::SystemSpawnScript;
+            return true;
+        }
+        if (Lower == TEXT("system_update"))
+        {
+            OutUsage = ENiagaraScriptUsage::SystemUpdateScript;
+            return true;
+        }
+        return false;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraScriptEditCommands::HandleSetModuleUsage(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ScriptParam;
+    if (!Params->TryGetStringField(TEXT("script"), ScriptParam)
+        && !Params->TryGetStringField(TEXT("path"), ScriptParam)
+        && !Params->TryGetStringField(TEXT("asset"), ScriptParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'script' parameter"));
+    }
+    UNiagaraScript* Script = ResolveNiagaraScript(ScriptParam);
+    if (!Script)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraScript '%s'"), *ScriptParam));
+    }
+
+    FString UsageToken;
+    if (!Params->TryGetStringField(TEXT("usage"), UsageToken)
+        && !Params->TryGetStringField(TEXT("module_usage"), UsageToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'usage' parameter (module / function / dynamic_input / emitter_spawn / emitter_update / particle_spawn / particle_update / system_spawn / system_update)"));
+    }
+
+    ENiagaraScriptUsage NewUsage = ENiagaraScriptUsage::Module;
+    if (!NiagaraScriptEdit_ResolveUsage(UsageToken, NewUsage))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown Niagara usage token '%s'"), *UsageToken));
+    }
+
+    // The Usage member is public on UNiagaraScript (per
+    // NiagaraScript.h: "cannot be private due to use of
+    // GET_MEMBER_NAME_CHECKED"). Direct write is the documented
+    // editor mutation path; PostEditChangeProperty broadcasts to
+    // any listening compile machinery.
+    const ENiagaraScriptUsage OldUsage = Script->GetUsage();
+    Script->Usage = NewUsage;
+
+#if WITH_EDITOR
+    // Mark the source graph not-synchronised so the next compile
+    // request reruns. The graph stays the same; only the usage
+    // gate flips. UNiagaraScriptSourceBase::MarkNotSynchronized is
+    // the public hook the editor calls.
+    if (UNiagaraScriptSourceBase* Source = Script->GetLatestSource())
+    {
+        Source->MarkNotSynchronized(TEXT("Sproft niagara_script_edit set_module_usage"));
+    }
+
+    if (FProperty* UsageProp = FindFProperty<FProperty>(UNiagaraScript::StaticClass(), TEXT("Usage")))
+    {
+        FPropertyChangedEvent ChangeEvent(UsageProp, EPropertyChangeType::ValueSet);
+        Script->PostEditChangeProperty(ChangeEvent);
+    }
+#endif
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    Script->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Script->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_module_usage"));
+    Out->SetStringField(TEXT("script"), Script->GetPathName());
+    Out->SetStringField(TEXT("usage"), NiagaraScriptEdit_UsageToString(NewUsage));
+    Out->SetStringField(TEXT("previous_usage"), NiagaraScriptEdit_UsageToString(OldUsage));
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
 }

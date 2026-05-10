@@ -7444,6 +7444,8 @@ def niagara_script_edit(
     max_outputs: Optional[int] = None,
     max_attributes: Optional[int] = None,
     max_data_interfaces: Optional[int] = None,
+    usage: Optional[str] = None,
+    save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Inspect a UNiagaraScript asset (read-only first slice).
@@ -7455,13 +7457,25 @@ def niagara_script_edit(
     parameter sets, the compile status, the cached byte-code
     length, the GPU shader parameter count, and aggregate counts.
 
-    One op (``inspect``, default). Edit-side ops stay in BACKLOG.
+    Operations:
+        - ``inspect`` (default): the read-only walk.
+        - ``set_module_usage``: writes the script's
+          ``ENiagaraScriptUsage`` (Module / Function / DynamicInput
+          / EmitterSpawn / EmitterUpdate / ParticleSpawn /
+          ParticleUpdate / SystemSpawn / SystemUpdate). The
+          underlying member is public; we route through the
+          reflection accessor so PostEditChangeProperty fires and
+          re-runs any compile-id machinery.
+
+    The graph-side parameter and module authoring ops stay in
+    BACKLOG (the source graph mutation entry points are unexported
+    in 5.7).
 
     Args:
         script: Short asset name or ``/Game/...`` UNiagaraScript
             path. Required.
-        op: Operation discriminator. Only ``inspect`` (default) is
-            supported.
+        op: Operation discriminator. ``inspect`` (default) or
+            ``set_module_usage``.
         include_inputs: Default True. Per-input parameter dump
             from the cached VM ``Parameters`` set.
         include_outputs: Default True. Per-output parameter dump
@@ -7477,6 +7491,8 @@ def niagara_script_edit(
         max_inputs / max_outputs / max_attributes /
         max_data_interfaces: Cap on each per-list walk. Default 512
             each.
+        usage: ``set_module_usage`` only. Token from the set above.
+        save: Mutating ops only. Default True.
 
     Returns:
         Dict with ``operation``, asset metadata (``name`` / ``path``
@@ -7514,6 +7530,10 @@ def niagara_script_edit(
         params["max_attributes"] = max_attributes
     if max_data_interfaces is not None:
         params["max_data_interfaces"] = max_data_interfaces
+    if usage is not None:
+        params["usage"] = usage
+    if save is not None:
+        params["save"] = save
 
     try:
         response = unreal.send_command("niagara_script_edit", params)
