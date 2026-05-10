@@ -8,7 +8,83 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped three deepening edit slices that
+The most recent pass shipped four deepening edit slices that
+fill small breadth gaps on already-shipped tools. `widget_edit`
+gains `add_animation` and `add_animation_track`: the first
+appends a `UWidgetAnimation` to the WBP's `Animations` array
+with a fresh `UMovieScene` whose playback range covers
+`[0, duration]` seconds at a 20 fps display rate (matching the
+AnimationTabSummoner default the UMG editor uses for new
+animations); the second resolves a UMovieSceneTrack subclass by
+short token (`float` / `color` / `vector` / `transform` /
+`visibility` / `event` / `material` / `audio` / `bool` / `byte`)
+or `/Script/Module.ClassName` path, walks the animation for an
+existing FWidgetAnimationBinding to the named target widget, and
+either reuses that binding GUID or spawns a fresh possessable +
+binding pair through `UMovieScene::AddPossessable` plus a manual
+FWidgetAnimationBinding row before calling
+`UMovieScene::AddTrack(TrackClass, BindingGuid)`. An optional
+`property_path` lands on either `PropertyPath` or `PropertyName`
+through reflection so the property-track surface gets a friendly
+entry without us spelling out every track subclass. Per-keyframe
+authoring stays on the BACKLOG. `material_edit` gains
+`create_parameter_collection` and `add_collection_parameter`.
+The first NewObject's a `UMaterialParameterCollection` at a
+`/Game/...` path through `UMaterialParameterCollectionFactoryNew`;
+the second resolves the target MPC, refuses duplicate names
+across both arrays, and appends a typed entry to
+`ScalarParameters` or `VectorParameters` based on a `scalar` /
+`float` / `vector` / `color` token. Default values come in as a
+JSON number for scalars or `[r, g, b, a]` array / `{r,g,b,a}`
+object for vectors. The op runs `PreEditChange` on the target
+array UPROPERTY before the mutation and a synthesised
+`FPropertyChangedEvent(EPropertyChangeType::ArrayAdd)` afterward,
+which walks the asset's PostEditChangeProperty path and
+regenerates `StateId` plus requeues every UMaterial referencing
+the collection through `FMaterialUpdateContext`, the canonical
+"this MPC changed, recompile me" broadcast. With this pair
+landing the `material_edit` BACKLOG row narrows to Material
+Functions. `gas_edit` gains `create_cue_notify`: NewObject's a
+`UBlueprint` at a `/Game/...` path with a
+`UGameplayCueNotify_Static` (default) or
+`AGameplayCueNotify_Actor` parent. The `parent_class` arg
+accepts short tokens (`static` / `actor` / `notify_static` /
+`notify_actor`) plus `UGameplayCueNotify_*` subclass paths. An
+optional `cue_tag` writes the asset's `GameplayCueTag` UPROPERTY
+through reflection: we resolve the tag through
+`UGameplayTagsManager::Get().RequestGameplayTag` with
+`bErrorIfNotFound=false` so unknown tags surface a clean
+`cue_tag_warning` rather than crash, and the mirror FName
+`GameplayCueName` field also picks up the typed tag string to
+match the engine's PostEditChangeProperty fix-up flow.
+`set_ability_cue_tag` was the fourth target on this pass but
+stays on the BACKLOG: `UGameplayAbility` exposes cue invocation
+through the BlueprintCallable `K2_AddGameplayCue` /
+`K2_ExecuteGameplayCue` pair, but there is no canonical
+UPROPERTY storing a per-ability cue tag association, so the
+"bind a cue tag to an ability" surface needs a graph-side
+authoring slice on the ability's event graph rather than a CDO
+write; the prompt called out the same risk and authorised the
+drop. `bp_input` gains `add_action_modifier`: writes a
+`UInputModifier` subobject onto an existing
+`FEnhancedActionKeyMapping` row's `Modifiers` array. The row is
+located by walking `IMC->GetMappings()` for an
+`(action, key)` match (action accepts a `/Game/...`
+UInputAction path or a short name matched against the row's
+`Action->GetName`); `modifier_class` resolves through short
+tokens (`negate` / `scalar` / `dead_zone` / `swizzle_axis`) or
+a UInputModifier subclass path. The new modifier outers under
+the IMC asset (matching the editor's `Instanced` subobject
+convention) and an optional flat `properties` dict applies
+through `FProperty::ImportText_InContainer` so callers can land
+`Order` on a swizzle, `Scalar` on a scalar, `LowerThreshold` /
+`UpperThreshold` / `Type` on a dead zone, `bX` / `bY` / `bZ` on
+a negate, etc., in the same call. Failed property entries
+surface under `skipped`, mirroring the convention shipped by
+`widget_edit set_slot_property` and
+`pcg_graph_edit set_node_settings`.
+
+The pass before that shipped three deepening edit slices that
 close one persistent skip and add two new edit op surfaces.
 `foliage_edit` gains `place_foliage_instances`: places N
 foliage instances on the IFA for a chosen level. The op
@@ -1698,6 +1774,126 @@ ability" alongside `tag_registry_edit`.
   brush surface, per-edit-layer writes, and import_layer_data
   branches stay on this list. Adds `ImageWrapper` to
   PublicDependencyModuleNames.
+- `widget_edit` animation surface (small) — adds two ops to the
+  existing widget_edit tool through the same `operation`
+  discriminator: `add_animation` and `add_animation_track`.
+  `add_animation` appends a new `UWidgetAnimation` to the WBP's
+  `Animations` array, spawns a fresh `UMovieScene` outered to the
+  animation, sets the display rate to 20 fps to match the
+  AnimationTabSummoner default, and writes the playback range to
+  `[FFrameNumber(0), end + 1]` ticks where end is
+  `duration * MovieScene->GetTickResolution()` rounded to the next
+  tick boundary. The asset's `DisplayLabel` picks up the supplied
+  `animation_name` so the Animations panel shows the designer-
+  readable label. The op refuses duplicate names against
+  `WBP->Animations` and runs `FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified`
+  + `OnVariableAdded` so the WBP variable surface picks the new
+  animation up. `add_animation_track` resolves a `UMovieSceneTrack`
+  subclass by short token (`float` / `color` / `vector` /
+  `transform` / `visibility` / `event` / `material` / `audio` /
+  `bool` / `byte`) plus `/Script/MovieSceneTracks.X` paths and
+  `/Script/Module.Class` shapes, walks the animation's
+  `AnimationBindings` array for an existing binding to the named
+  target widget, and either reuses that binding's GUID or spawns
+  a fresh possessable through `UMovieScene::AddPossessable` plus a
+  manual `FWidgetAnimationBinding` row before calling
+  `UMovieScene::AddTrack(TrackClass, BindingGuid)`. We write the
+  binding row directly rather than calling
+  `UWidgetAnimation::BindPossessableObject` because that runtime
+  helper expects a UUserWidget context that does not exist at
+  asset-author time; the runtime resolution path goes through
+  `FWidgetAnimationBinding::FindRuntimeObject` which the binding row
+  alone can satisfy. An optional `property_path` lands on either
+  the resolved track's `PropertyPath` or `PropertyName` field
+  through reflection so designers calling against
+  `MovieSceneFloatTrack` / `MovieSceneColorTrack` / similar
+  property tracks get a friendly entry without us spelling out
+  every track subclass. Per-keyframe authoring (section creation,
+  Sequencer key-frame writes, transform sub-track binding) stays
+  on the BACKLOG. Adds `MovieScene` includes; the module is
+  already in PublicDependencyModuleNames from the sequencer_edit
+  slice.
+- `material_edit` parameter-collection surface (small) — adds two
+  ops to the existing material_edit tool through the same
+  `operation` discriminator: `create_parameter_collection` and
+  `add_collection_parameter`. The first NewObject's a
+  `UMaterialParameterCollection` at a `/Game/...` path through
+  `UMaterialParameterCollectionFactoryNew::FactoryCreateNew`. The
+  factory ships the asset with empty `ScalarParameters` /
+  `VectorParameters` arrays. The second resolves the target MPC
+  by path, refuses duplicate names across both arrays (matching
+  the asset's `SanitizeParameters` rename guard but failing
+  loud rather than silent), and appends a typed entry. The
+  `parameter_type` token is `scalar` / `float` for scalar, or
+  `vector` / `color` / `linear_color` for vector. Default values
+  come in as a JSON number (scalars) or `[r, g, b, a]` array /
+  `{r,g,b,a}` object / CSV string for vectors (flows through the
+  same `TryParseLinearColor` helper material_edit's
+  `set_instance_parameter` already uses). Each entry generates a
+  fresh `FGuid::NewGuid()` so the asset's per-entry ID stays
+  stable across renames. After the array write the op runs
+  `PreEditChange` against the resolved
+  `ScalarParameters` / `VectorParameters` UPROPERTY and a
+  synthesised `FPropertyChangedEvent(EPropertyChangeType::ArrayAdd)`
+  through `PostEditChangeProperty`, which is the asset's canonical
+  "I just changed an MPC" path: regenerates `StateId`, rebuilds the
+  uniform buffer layout through `CreateBufferStruct`, and walks
+  `TObjectIterator<UMaterial>` requeueing every material that
+  references this collection through `FMaterialUpdateContext`.
+  With this pair landing the `material_edit` BACKLOG row narrows
+  to Material Functions.
+- `gas_edit` GameplayCue surface (small) — adds one op to the
+  existing gas_edit tool through the same `op` discriminator:
+  `create_cue_notify` (aliases `create_gameplay_cue` /
+  `create_cue`). NewObject's a `UBlueprint` at a `/Game/...` path
+  with a `UGameplayCueNotify_Static` (default) or
+  `AGameplayCueNotify_Actor` parent. The `parent_class` arg
+  accepts short tokens (`static` / `actor` / `notify_static` /
+  `notify_actor` / `gameplay_cue_notify_static` /
+  `gameplay_cue_notify_actor`) plus `UGameplayCueNotify_*` subclass
+  paths. An optional `cue_tag` writes the asset's `GameplayCueTag`
+  UPROPERTY through reflection: we resolve the FGameplayTag via
+  `UGameplayTagsManager::Get().RequestGameplayTag` with
+  `bErrorIfNotFound=false` so unknown tags surface a clean
+  `cue_tag_warning` rather than crash. The mirror FName
+  `GameplayCueName` field also picks up the typed tag string,
+  matching the engine's PostEditChangeProperty fix-up flow that
+  keeps the asset registry searchable. The op recompiles + saves
+  by default. The `set_ability_cue_tag` op stays on this list:
+  `UGameplayAbility` exposes cue invocation through the
+  BlueprintCallable `K2_AddGameplayCue` / `K2_ExecuteGameplayCue`
+  pair, but there is no canonical UPROPERTY storing a per-ability
+  cue tag association, so the surface needs a graph-side authoring
+  slice on the ability's event graph rather than a CDO write.
+- `bp_input` modifier surface (small) — adds one op to the
+  existing bp_input tool: `add_action_modifier` (aliases
+  `add_modifier` / `add_mapping_modifier`). Writes a
+  `UInputModifier` subobject onto an existing
+  `FEnhancedActionKeyMapping` row's `Modifiers` array. The row is
+  located by walking `IMC->GetMappings()` for a `(action, key)`
+  match: `input_action` accepts a `/Game/...` UInputAction path
+  (loaded through the asset registry) or a short name (matched
+  against the row's `Action->GetName`); the FKey check
+  short-circuits invalid input early. `modifier_class` resolves
+  through short tokens (`negate` / `scalar` / `dead_zone` /
+  `deadzone` / `swizzle_axis` / `swizzle`) or a UInputModifier
+  subclass path with `/Script/EnhancedInput.X` and bare class name
+  fallbacks. The new modifier outers under the IMC asset (matching
+  the editor's `Instanced` subobject convention; the Modifiers
+  array's `Instanced` UPROPERTY metadata wires the per-row
+  serialisation). An optional flat `properties` dict applies
+  through `FProperty::ImportText_InContainer` on the new modifier
+  so callers can land `Order` on a swizzle, `Scalar` on a scalar,
+  `LowerThreshold` / `UpperThreshold` / `Type` on a dead zone,
+  `bX` / `bY` / `bZ` on a negate, etc., in the same call. Failed
+  property entries surface under `skipped` with a reason and the
+  attempted ImportText input, mirroring the convention shipped by
+  `widget_edit set_slot_property`, `chaos_edit
+  set_simulation_settings`, and `pcg_graph_edit set_node_settings`.
+  Saves the IMC by default unless `save=false`. The
+  per-row Triggers array (next to Modifiers on
+  FEnhancedActionKeyMapping) and per-action Modifier surface on
+  the UInputAction asset stay on this list.
 
 ## Blueprint authoring (medium to large each)
 
