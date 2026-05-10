@@ -7615,10 +7615,13 @@ def niagara_script_edit(
     max_attributes: Optional[int] = None,
     max_data_interfaces: Optional[int] = None,
     usage: Optional[str] = None,
+    parameter_name: Optional[str] = None,
+    parameter_type: Optional[str] = None,
+    value: Optional[Any] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    Inspect a UNiagaraScript asset (read-only first slice).
+    Inspect or mutate a UNiagaraScript asset (read + edit slice).
 
     Pairs with ``niagara_inspect`` (system / emitter side) and
     ``material_inspect`` (renderer side). Walks the asset's public
@@ -7636,16 +7639,23 @@ def niagara_script_edit(
           underlying member is public; we route through the
           reflection accessor so PostEditChangeProperty fires and
           re-runs any compile-id machinery.
-
-    The graph-side parameter and module authoring ops stay in
-    BACKLOG (the source graph mutation entry points are unexported
-    in 5.7).
+        - ``add_input_parameter``: workaround entry point that
+          writes a typed parameter into the script's
+          ``RapidIterationParameters`` store through the
+          ``FNiagaraParameterStore::AddParameter`` (NIAGARA_API)
+          public API. The canonical authoring entry point
+          (``UNiagaraGraph::AddParameter``) is not exported by
+          NIAGARAEDITOR_API in 5.7, so a graph-driven recompile that
+          re-derives the parameter set from the source graph alone
+          will not see the addition; the parameter does show up in
+          the script's input panel and is picked up by emitter /
+          system overrides.
 
     Args:
         script: Short asset name or ``/Game/...`` UNiagaraScript
             path. Required.
-        op: Operation discriminator. ``inspect`` (default) or
-            ``set_module_usage``.
+        op: Operation discriminator. ``inspect`` (default),
+            ``set_module_usage``, or ``add_input_parameter``.
         include_inputs: Default True. Per-input parameter dump
             from the cached VM ``Parameters`` set.
         include_outputs: Default True. Per-output parameter dump
@@ -7662,6 +7672,14 @@ def niagara_script_edit(
         max_data_interfaces: Cap on each per-list walk. Default 512
             each.
         usage: ``set_module_usage`` only. Token from the set above.
+        parameter_name: ``add_input_parameter`` only. The new
+            parameter's FName.
+        parameter_type: ``add_input_parameter`` only. One of
+            ``float`` / ``int`` / ``bool`` / ``vec2`` / ``vec3`` /
+            ``vec4`` / ``color`` / ``quat``.
+        value: ``add_input_parameter`` only. Optional default value
+            (literal for scalar shapes, JSON array for vector / color /
+            quat). Missing leaves the parameter at type-zero default.
         save: Mutating ops only. Default True.
 
     Returns:
@@ -7702,6 +7720,12 @@ def niagara_script_edit(
         params["max_data_interfaces"] = max_data_interfaces
     if usage is not None:
         params["usage"] = usage
+    if parameter_name is not None:
+        params["parameter_name"] = parameter_name
+    if parameter_type is not None:
+        params["parameter_type"] = parameter_type
+    if value is not None:
+        params["value"] = value
     if save is not None:
         params["save"] = save
 
