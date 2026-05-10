@@ -23,9 +23,16 @@
  *   - "add_animation_track": append a UMovieSceneTrack subclass against an
  *      existing animation's UMovieScene, scoped to the binding for a target
  *      widget by FName so the track resolves correctly at runtime.
- *
- * Per-keyframe authoring (section authoring, Sequencer key-frame writes)
- * stays on the BACKLOG.
+ *   - "add_keyframe": write a key into a track's first section. Resolves
+ *      the target track by index into the animation's MovieScene
+ *      `GetTracks()` array. If the track has no section yet we spawn one
+ *      through `UMovieSceneTrack::CreateNewSection` + `AddSection`; if it
+ *      does, we expand the first section's range to cover the key time
+ *      via `UMovieSceneSection::ExpandToFrame` and write the key through
+ *      `FMovieSceneFloatChannel::AddCubicKey` (or
+ *      `FMovieSceneDoubleChannel::AddCubicKey` for the 5.4+ vector track
+ *      shape). Vector tracks accept an `[x, y, z, w?]` JSON array routed
+ *      to channels 0..N-1; transform tracks take the same vector shape.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - FKismetEditorUtilities::CreateBlueprint for asset creation
@@ -56,4 +63,5 @@ private:
     TSharedPtr<FJsonObject> SetSlotProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddAnimation(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddAnimationTrack(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddAnimationKeyframe(const TSharedPtr<FJsonObject>& Params);
 };

@@ -3014,6 +3014,12 @@ def widget_edit(
     display_rate: Optional[float] = None,
     track_class: Optional[str] = None,
     property_path: Optional[str] = None,
+    track_index: Optional[int] = None,
+    frame: Optional[int] = None,
+    time: Optional[float] = None,
+    value: Optional[Any] = None,
+    interpolation: Optional[str] = None,
+    channel_offset: Optional[int] = None,
     expose_as_variable: bool = True,
     save: bool = True,
     overwrite: bool = False,
@@ -3043,6 +3049,22 @@ def widget_edit(
           by FName. The first call for a given target widget spawns a fresh
           possessable + FWidgetAnimationBinding pair so the runtime can
           resolve the binding GUID back to the widget.
+        - "add_keyframe": write a key into a track's first section.
+          ``track_index`` is the global index across the animation's
+          master + binding tracks. The op finds or spawns the section
+          via ``UMovieSceneTrack::CreateNewSection`` + ``AddSection``,
+          extends the section range to cover the key time via
+          ``UMovieSceneSection::ExpandToFrame``, then writes through
+          ``FMovieSceneFloatChannel::AddCubicKey`` /
+          ``FMovieSceneDoubleChannel::AddCubicKey``. ``frame`` (int, on
+          the MovieScene's tick resolution) wins over ``time`` (float
+          seconds). ``value`` is a number for scalar tracks, an
+          ``[x, y, z, w?]`` array for vector / colour / transform tracks,
+          or an ``{x,y,z,w}`` / ``{r,g,b,a}`` object. Optional
+          ``interpolation`` is ``cubic`` (default) / ``linear`` /
+          ``constant``; optional ``channel_offset`` lets the caller
+          target a non-zero starting channel index on multi-channel
+          sections.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3129,6 +3151,18 @@ def widget_edit(
         params["track_class"] = track_class
     if property_path is not None:
         params["property_path"] = property_path
+    if track_index is not None:
+        params["track_index"] = track_index
+    if frame is not None:
+        params["frame"] = frame
+    if time is not None:
+        params["time"] = time
+    if value is not None:
+        params["value"] = value
+    if interpolation is not None:
+        params["interpolation"] = interpolation
+    if channel_offset is not None:
+        params["channel_offset"] = channel_offset
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite

@@ -26,7 +26,11 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/OutputDeviceNull.h"
+#include "Channels/MovieSceneChannelProxy.h"
+#include "Channels/MovieSceneDoubleChannel.h"
+#include "Channels/MovieSceneFloatChannel.h"
 #include "MovieScene.h"
+#include "MovieSceneSection.h"
 #include "MovieSceneTrack.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -295,9 +299,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return AddAnimationTrack(Params);
     }
+    if (Operation == TEXT("add_keyframe") || Operation == TEXT("add_animation_keyframe")
+        || Operation == TEXT("set_keyframe") || Operation == TEXT("animation_add_keyframe"))
+    {
+        return AddAnimationKeyframe(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -1080,6 +1089,353 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddAnimationTrack(const TShar
         ResultObj->SetStringField(TEXT("property_path"), PropertyPath);
         ResultObj->SetBoolField(TEXT("property_path_applied"), bAppliedPropertyPath);
     }
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Walk a UMovieScene's master + binding-scoped track arrays in a
+     *  stable order and return the entry at the global `Index`. Master
+     *  tracks come first, then binding tracks in `GetBindings()` order.
+     *  When the index resolves to a binding-scoped track we surface the
+     *  owning binding GUID so the caller can echo it. */
+    UMovieSceneTrack* WidgetEdit_ResolveTrackByIndex(UMovieScene* MovieScene, int32 Index, FGuid& OutOwningGuid)
+    {
+        if (!MovieScene || Index < 0)
+        {
+            return nullptr;
+        }
+        const TArray<UMovieSceneTrack*>& MasterTracks = MovieScene->GetTracks();
+        if (Index < MasterTracks.Num())
+        {
+            return MasterTracks[Index];
+        }
+        int32 Cursor = MasterTracks.Num();
+        for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
+        {
+            const TArray<UMovieSceneTrack*>& BindingTracks = Binding.GetTracks();
+            if (Index < Cursor + BindingTracks.Num())
+            {
+                OutOwningGuid = Binding.GetObjectGuid();
+                return BindingTracks[Index - Cursor];
+            }
+            Cursor += BindingTracks.Num();
+        }
+        return nullptr;
+    }
+
+    /** Pull `[x, y, z, w?]` channels from a JSON value. Number returns
+     *  one channel; arrays return two to four. Returns the channel
+     *  count, zero on failure. */
+    int32 WidgetEdit_ReadKeyValueChannels(const TSharedPtr<FJsonValue>& Value, double Out[4])
+    {
+        Out[0] = Out[1] = Out[2] = Out[3] = 0.0;
+        if (!Value.IsValid())
+        {
+            return 0;
+        }
+        if (Value->Type == EJson::Number)
+        {
+            Out[0] = Value->AsNumber();
+            return 1;
+        }
+        if (Value->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = Value->AsArray();
+            const int32 N = FMath::Min(Arr.Num(), 4);
+            for (int32 I = 0; I < N; ++I)
+            {
+                Out[I] = Arr[I]->AsNumber();
+            }
+            return N;
+        }
+        if (Value->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject> Obj = Value->AsObject();
+            if (!Obj.IsValid())
+            {
+                return 0;
+            }
+            int32 Read = 0;
+            auto TryAxis = [&](const TCHAR* PrimaryKey, const TCHAR* AltKey)
+            {
+                double V = 0.0;
+                if (Obj->TryGetNumberField(PrimaryKey, V) || Obj->TryGetNumberField(AltKey, V))
+                {
+                    Out[Read++] = V;
+                    return true;
+                }
+                return false;
+            };
+            if (Obj->HasField(TEXT("x")) || Obj->HasField(TEXT("X")))
+            {
+                TryAxis(TEXT("x"), TEXT("X"));
+                TryAxis(TEXT("y"), TEXT("Y"));
+                TryAxis(TEXT("z"), TEXT("Z"));
+                TryAxis(TEXT("w"), TEXT("W"));
+            }
+            else
+            {
+                TryAxis(TEXT("r"), TEXT("R"));
+                TryAxis(TEXT("g"), TEXT("G"));
+                TryAxis(TEXT("b"), TEXT("B"));
+                TryAxis(TEXT("a"), TEXT("A"));
+            }
+            return Read;
+        }
+        return 0;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddAnimationKeyframe(const TSharedPtr<FJsonObject>& Params)
+{
+    FString WidgetBlueprintPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WidgetBlueprintPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+
+    FString AnimationName;
+    if (!Params->TryGetStringField(TEXT("animation_name"), AnimationName)
+        && !Params->TryGetStringField(TEXT("animation"), AnimationName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'animation_name' parameter"));
+    }
+
+    int32 TrackIndex = -1;
+    {
+        double TrackIndexValue = -1.0;
+        if (!Params->TryGetNumberField(TEXT("track_index"), TrackIndexValue)
+            && !Params->TryGetNumberField(TEXT("track"), TrackIndexValue))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'track_index' parameter"));
+        }
+        TrackIndex = static_cast<int32>(TrackIndexValue);
+    }
+
+    // Time placement. `frame` (integer FFrameNumber on tick resolution)
+    // wins over `time` (float seconds), mirroring animation_edit
+    // add_notify and add_sync_marker. We translate seconds through the
+    // MovieScene's tick resolution since FFrameNumber storage is on the
+    // tick scale.
+    double FrameValue = 0.0;
+    bool bHasFrame = Params->TryGetNumberField(TEXT("frame"), FrameValue);
+    double TimeValue = 0.0;
+    bool bHasTime = Params->TryGetNumberField(TEXT("time"), TimeValue);
+    if (!bHasFrame && !bHasTime)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_keyframe: one of 'frame' (int, in tick resolution) or 'time' (float seconds) is required"));
+    }
+
+    if (!Params->HasField(TEXT("value")))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'value' parameter"));
+    }
+    const TSharedPtr<FJsonValue> ValueJson = Params->TryGetField(TEXT("value"));
+
+    FString InterpolationToken;
+    Params->TryGetStringField(TEXT("interpolation"), InterpolationToken);
+    InterpolationToken = InterpolationToken.ToLower();
+    enum class EKeyShape { Cubic, Linear, Constant };
+    EKeyShape KeyShape = EKeyShape::Cubic;
+    if (InterpolationToken == TEXT("linear")) { KeyShape = EKeyShape::Linear; }
+    else if (InterpolationToken == TEXT("constant") || InterpolationToken == TEXT("step")) { KeyShape = EKeyShape::Constant; }
+
+    int32 ChannelOffset = 0;
+    {
+        double ChannelOffsetValue = 0.0;
+        if (Params->TryGetNumberField(TEXT("channel_offset"), ChannelOffsetValue)
+            || Params->TryGetNumberField(TEXT("channel_index"), ChannelOffsetValue))
+        {
+            ChannelOffset = static_cast<int32>(ChannelOffsetValue);
+        }
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    UObject* Loaded = UEditorAssetLibrary::LoadAsset(WidgetBlueprintPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(Loaded);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WidgetBlueprintPath));
+    }
+
+    UWidgetAnimation* Animation = WidgetEdit_FindAnimation(WBP, AnimationName);
+    if (!Animation)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find animation '%s' on %s. Run widget_edit add_animation first."), *AnimationName, *WidgetBlueprintPath));
+    }
+    UMovieScene* MovieScene = Animation->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Animation '%s' has no UMovieScene."), *AnimationName));
+    }
+
+    FGuid OwningBindingGuid;
+    UMovieSceneTrack* Track = WidgetEdit_ResolveTrackByIndex(MovieScene, TrackIndex, OwningBindingGuid);
+    if (!Track)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("track_index %d is out of range (master + binding tracks combined)"), TrackIndex));
+    }
+
+    // Convert seconds to a FFrameNumber on the MovieScene's tick
+    // resolution. Caller-supplied `frame` is treated as an explicit
+    // FFrameNumber on the tick scale so a downstream Sequencer panel
+    // sees the key at the same tick the inspect path reports.
+    const FFrameRate TickResolution = MovieScene->GetTickResolution();
+    FFrameNumber KeyFrame;
+    if (bHasFrame)
+    {
+        KeyFrame = FFrameNumber(static_cast<int32>(FrameValue));
+    }
+    else
+    {
+        KeyFrame = (TimeValue * TickResolution).RoundToFrame();
+    }
+
+    // Find or spawn a section. The tracks UMG drops on a widget
+    // animation declare their native section type through
+    // `CreateNewSection`; we use the first existing section if there
+    // is one, otherwise spawn + add a fresh one and stretch its range
+    // to cover the key time on creation.
+    UMovieSceneSection* Section = nullptr;
+    bool bSectionCreated = false;
+    const TArray<UMovieSceneSection*>& Sections = Track->GetAllSections();
+    if (Sections.Num() > 0)
+    {
+        Section = Sections[0];
+    }
+    else
+    {
+        Section = Track->CreateNewSection();
+        if (!Section)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("UMovieSceneTrack::CreateNewSection returned null for track '%s'"), *Track->GetName()));
+        }
+        Track->AddSection(*Section);
+        Section->SetRange(TRange<FFrameNumber>::Inclusive(KeyFrame, KeyFrame));
+        bSectionCreated = true;
+    }
+    Section->ExpandToFrame(KeyFrame);
+
+    double Channels[4] = { 0.0, 0.0, 0.0, 0.0 };
+    const int32 ChannelCount = WidgetEdit_ReadKeyValueChannels(ValueJson, Channels);
+    if (ChannelCount <= 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not parse 'value' (expected number, [x, y, z, w?] array, or {x,y,z,w} object)"));
+    }
+
+    FMovieSceneChannelProxy& Proxy = Section->GetChannelProxy();
+    int32 KeysWritten = 0;
+    int32 KeyFailures = 0;
+    TArray<FString> ChannelKindLog;
+
+    for (int32 I = 0; I < ChannelCount; ++I)
+    {
+        const int32 ChannelIndex = ChannelOffset + I;
+        // Try float channel first (the common UMG case), then double
+        // channel (transform / vector tracks switched to FDoubleChannel
+        // in 5.4). We surface the channel kind in the response so the
+        // caller can confirm the section's native channel type.
+        if (FMovieSceneFloatChannel* FloatChannel = Proxy.GetChannel<FMovieSceneFloatChannel>(ChannelIndex))
+        {
+            const float V = static_cast<float>(Channels[I]);
+            if (KeyShape == EKeyShape::Cubic)
+            {
+                FloatChannel->AddCubicKey(KeyFrame, V);
+            }
+            else if (KeyShape == EKeyShape::Linear)
+            {
+                FloatChannel->AddLinearKey(KeyFrame, V);
+            }
+            else
+            {
+                FloatChannel->AddConstantKey(KeyFrame, V);
+            }
+            ++KeysWritten;
+            ChannelKindLog.Add(TEXT("float"));
+        }
+        else if (FMovieSceneDoubleChannel* DoubleChannel = Proxy.GetChannel<FMovieSceneDoubleChannel>(ChannelIndex))
+        {
+            const double V = Channels[I];
+            if (KeyShape == EKeyShape::Cubic)
+            {
+                DoubleChannel->AddCubicKey(KeyFrame, V);
+            }
+            else if (KeyShape == EKeyShape::Linear)
+            {
+                DoubleChannel->AddLinearKey(KeyFrame, V);
+            }
+            else
+            {
+                DoubleChannel->AddConstantKey(KeyFrame, V);
+            }
+            ++KeysWritten;
+            ChannelKindLog.Add(TEXT("double"));
+        }
+        else
+        {
+            ++KeyFailures;
+            ChannelKindLog.Add(TEXT("missing"));
+        }
+    }
+
+    if (KeysWritten == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Track '%s' section has no FMovieSceneFloatChannel or FMovieSceneDoubleChannel at index %d"),
+                *Track->GetName(), ChannelOffset));
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (UPackage* Package = WBP->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WidgetBlueprintPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_keyframe"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WidgetBlueprintPath);
+    ResultObj->SetStringField(TEXT("animation_name"), AnimationName);
+    ResultObj->SetNumberField(TEXT("track_index"), TrackIndex);
+    ResultObj->SetStringField(TEXT("track_class"), Track->GetClass()->GetName());
+    if (OwningBindingGuid.IsValid())
+    {
+        ResultObj->SetStringField(TEXT("owning_binding_guid"), OwningBindingGuid.ToString(EGuidFormats::DigitsWithHyphens));
+    }
+    ResultObj->SetNumberField(TEXT("frame"), KeyFrame.Value);
+    if (TickResolution.Numerator > 0)
+    {
+        ResultObj->SetNumberField(TEXT("time"), TickResolution.AsSeconds(KeyFrame));
+    }
+    ResultObj->SetStringField(TEXT("interpolation"),
+        KeyShape == EKeyShape::Cubic ? TEXT("cubic")
+        : (KeyShape == EKeyShape::Linear ? TEXT("linear") : TEXT("constant")));
+    ResultObj->SetNumberField(TEXT("channel_offset"), ChannelOffset);
+    ResultObj->SetNumberField(TEXT("keys_written"), KeysWritten);
+    ResultObj->SetNumberField(TEXT("key_failures"), KeyFailures);
+    {
+        TArray<TSharedPtr<FJsonValue>> KindArr;
+        for (const FString& Kind : ChannelKindLog)
+        {
+            KindArr.Add(MakeShared<FJsonValueString>(Kind));
+        }
+        ResultObj->SetArrayField(TEXT("channel_kinds"), KindArr);
+    }
+    ResultObj->SetBoolField(TEXT("section_created"), bSectionCreated);
+    ResultObj->SetStringField(TEXT("section_class"), Section->GetClass()->GetName());
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }
