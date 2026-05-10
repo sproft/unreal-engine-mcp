@@ -42,7 +42,10 @@
 #include "MVVMBlueprintView.h"
 #include "MVVMBlueprintViewBinding.h"
 #include "MVVMBlueprintViewModelContext.h"
+#include "MVVMPropertyPath.h"
 #include "MVVMWidgetBlueprintExtension_View.h"
+#include "Types/MVVMBindingMode.h"
+#include "Types/MVVMFieldVariant.h"
 
 namespace
 {
@@ -315,9 +318,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetViewModel(Params);
     }
+    if (Operation == TEXT("add_property_binding") || Operation == TEXT("add_binding")
+        || Operation == TEXT("bind_property"))
+    {
+        return AddPropertyBinding(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -1702,6 +1710,259 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetViewModel(const TSharedPtr
         ResultObj->SetBoolField(TEXT("binding_added"), false);
     }
     ResultObj->SetNumberField(TEXT("binding_count"), BlueprintView->GetNumBindings());
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddPropertyBinding(const TSharedPtr<FJsonObject>& Params)
+{
+    // Full MVVM binding-row authoring. Adds a fresh
+    // FMVVMBlueprintViewBinding through UMVVMBlueprintView::AddDefaultBinding
+    // and configures its SourcePath / DestinationPath / BindingType through
+    // the public FMVVMBlueprintPropertyPath setters. The runtime MVVM
+    // compiler picks the row up on the next WBP compile via the existing
+    // UMVVMWidgetBlueprintExtension_View path the set_viewmodel op already
+    // wires.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+
+    UMVVMWidgetBlueprintExtension_View* MVVMExt =
+        UWidgetBlueprintExtension::RequestExtension<UMVVMWidgetBlueprintExtension_View>(WBP);
+    if (!MVVMExt)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not get-or-create UMVVMWidgetBlueprintExtension_View on '%s'"), *WBPPath));
+    }
+    UMVVMBlueprintView* BlueprintView = MVVMExt->GetBlueprintView();
+    if (!BlueprintView)
+    {
+        // Auto-create the view so the caller can land both a viewmodel and
+        // a binding through one set_viewmodel + add_property_binding pair
+        // without manual coordination.
+        MVVMExt->CreateBlueprintViewInstance();
+        BlueprintView = MVVMExt->GetBlueprintView();
+    }
+    if (!BlueprintView)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UMVVMWidgetBlueprintExtension_View on '%s' has no UMVVMBlueprintView; run set_viewmodel first"), *WBPPath));
+    }
+
+    // Resolve the source viewmodel. Caller may pass a viewmodel FName
+    // (set_viewmodel-side label) or the FGuid context id string.
+    FString ViewModelToken;
+    if (!Params->TryGetStringField(TEXT("viewmodel"), ViewModelToken)
+        && !Params->TryGetStringField(TEXT("viewmodel_name"), ViewModelToken)
+        && !Params->TryGetStringField(TEXT("source_viewmodel"), ViewModelToken)
+        && !Params->TryGetStringField(TEXT("viewmodel_id"), ViewModelToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'viewmodel' parameter (viewmodel slot name or context id GUID)"));
+    }
+    const FMVVMBlueprintViewModelContext* ContextPtr = nullptr;
+    FGuid ParsedGuid;
+    if (FGuid::Parse(ViewModelToken, ParsedGuid))
+    {
+        ContextPtr = BlueprintView->FindViewModel(ParsedGuid);
+    }
+    if (!ContextPtr)
+    {
+        ContextPtr = BlueprintView->FindViewModel(FName(*ViewModelToken));
+    }
+    if (!ContextPtr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve viewmodel '%s' on '%s'. Run set_viewmodel first."),
+                *ViewModelToken, *WBPPath));
+    }
+    UClass* ViewModelClass = ContextPtr->GetViewModelClass();
+    if (!ViewModelClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Viewmodel '%s' on '%s' has no resolved class"),
+                *ViewModelToken, *WBPPath));
+    }
+
+    // Resolve the source field on the viewmodel's class. Accepts a
+    // UFunction name (BlueprintCallable getters / BlueprintPure
+    // accessors) plus an FProperty name; the field-variant path stores
+    // the right kind.
+    FString SourceFieldToken;
+    if (!Params->TryGetStringField(TEXT("source_field"), SourceFieldToken)
+        && !Params->TryGetStringField(TEXT("source_property"), SourceFieldToken)
+        && !Params->TryGetStringField(TEXT("source"), SourceFieldToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'source_field' parameter (FProperty / UFunction name on the source viewmodel's class)"));
+    }
+    UE::MVVM::FMVVMConstFieldVariant SourceField;
+    if (const FProperty* SrcProp = FindFProperty<FProperty>(ViewModelClass, *SourceFieldToken))
+    {
+        SourceField = UE::MVVM::FMVVMConstFieldVariant(SrcProp);
+    }
+    else if (const UFunction* SrcFunc = ViewModelClass->FindFunctionByName(FName(*SourceFieldToken)))
+    {
+        SourceField = UE::MVVM::FMVVMConstFieldVariant(SrcFunc);
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No FProperty / UFunction named '%s' on viewmodel class '%s'"),
+                *SourceFieldToken, *ViewModelClass->GetPathName()));
+    }
+
+    // Resolve the destination widget. The MVVM compiler resolves the
+    // widget at runtime via the widget's FName on the WBP's
+    // WidgetTree; we look it up at author time so we can fail closed
+    // when the widget does not exist.
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("destination_widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target_widget"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget' parameter (target widget FName)"));
+    }
+    UWidget* TargetWidget = nullptr;
+    if (UWidgetTree* Tree = WBP->WidgetTree)
+    {
+        Tree->ForEachWidget([&](UWidget* W)
+        {
+            if (TargetWidget) return;
+            if (W && W->GetFName() == FName(*WidgetNameStr))
+            {
+                TargetWidget = W;
+            }
+        });
+    }
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    // Resolve the destination field on the widget's class. Same
+    // function / property fallback as the source side.
+    FString DestFieldToken;
+    if (!Params->TryGetStringField(TEXT("destination_field"), DestFieldToken)
+        && !Params->TryGetStringField(TEXT("destination_property"), DestFieldToken)
+        && !Params->TryGetStringField(TEXT("destination"), DestFieldToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'destination_field' parameter (FProperty / UFunction name on the destination widget's class)"));
+    }
+    UClass* WidgetClass = TargetWidget->GetClass();
+    UE::MVVM::FMVVMConstFieldVariant DestField;
+    if (const FProperty* DestProp = FindFProperty<FProperty>(WidgetClass, *DestFieldToken))
+    {
+        DestField = UE::MVVM::FMVVMConstFieldVariant(DestProp);
+    }
+    else if (const UFunction* DestFunc = WidgetClass->FindFunctionByName(FName(*DestFieldToken)))
+    {
+        DestField = UE::MVVM::FMVVMConstFieldVariant(DestFunc);
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No FProperty / UFunction named '%s' on widget class '%s'"),
+                *DestFieldToken, *WidgetClass->GetPathName()));
+    }
+
+    // Resolve the binding mode. The MVVM editor surfaces three
+    // designer-facing modes; the engine enum has more (e.g.
+    // OneWayToSource / OneTimeToSource) but those stay marked Hidden
+    // and are not part of the documented contract.
+    FString ModeToken;
+    Params->TryGetStringField(TEXT("binding_mode"), ModeToken);
+    if (ModeToken.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("mode"), ModeToken);
+    }
+    const FString ModeLower = ModeToken.ToLower();
+    EMVVMBindingMode Mode = EMVVMBindingMode::OneWayToDestination;
+    FString ModeCanonical = TEXT("OneWayToDestination");
+    if (ModeLower.IsEmpty() || ModeLower == TEXT("one_way") || ModeLower == TEXT("oneway")
+        || ModeLower == TEXT("one_way_to_destination") || ModeLower == TEXT("onewaytodestination"))
+    {
+        Mode = EMVVMBindingMode::OneWayToDestination;
+        ModeCanonical = TEXT("OneWayToDestination");
+    }
+    else if (ModeLower == TEXT("two_way") || ModeLower == TEXT("twoway"))
+    {
+        Mode = EMVVMBindingMode::TwoWay;
+        ModeCanonical = TEXT("TwoWay");
+    }
+    else if (ModeLower == TEXT("one_time") || ModeLower == TEXT("onetime")
+        || ModeLower == TEXT("one_time_to_destination") || ModeLower == TEXT("onetimetodestination"))
+    {
+        Mode = EMVVMBindingMode::OneTimeToDestination;
+        ModeCanonical = TEXT("OneTimeToDestination");
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unsupported 'binding_mode' '%s' (one_way / two_way / one_time)"), *ModeToken));
+    }
+
+    bool bEnabled = true;
+    Params->TryGetBoolField(TEXT("enabled"), bEnabled);
+    bool bCompileBinding = true;
+    Params->TryGetBoolField(TEXT("compile_binding"), bCompileBinding);
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    // Spawn the binding row. AddDefaultBinding emits a fresh
+    // FMVVMBlueprintViewBinding with a fresh BindingId and appends it
+    // to the BlueprintView's Bindings array. The returned mutable
+    // reference is the one we configure in place.
+    FMVVMBlueprintViewBinding& NewBinding = BlueprintView->AddDefaultBinding();
+    NewBinding.SourcePath.SetViewModelId(ContextPtr->GetViewModelId());
+    NewBinding.SourcePath.SetPropertyPath(WBP, SourceField);
+
+    NewBinding.DestinationPath.SetWidgetName(TargetWidget->GetFName());
+    NewBinding.DestinationPath.SetPropertyPath(WBP, DestField);
+
+    NewBinding.BindingType = Mode;
+    NewBinding.bEnabled = bEnabled;
+    NewBinding.bCompile = bCompileBinding;
+
+    const FGuid BindingId = NewBinding.BindingId;
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_property_binding"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("viewmodel_name"), ContextPtr->GetViewModelName().ToString());
+    ResultObj->SetStringField(TEXT("viewmodel_id"), ContextPtr->GetViewModelId().ToString(EGuidFormats::DigitsWithHyphens));
+    ResultObj->SetStringField(TEXT("viewmodel_class"), ViewModelClass->GetPathName());
+    ResultObj->SetStringField(TEXT("source_field"), SourceFieldToken);
+    ResultObj->SetStringField(TEXT("source_kind"), SourceField.IsFunction() ? TEXT("function") : TEXT("property"));
+    ResultObj->SetStringField(TEXT("widget"), TargetWidget->GetFName().ToString());
+    ResultObj->SetStringField(TEXT("widget_class"), WidgetClass->GetPathName());
+    ResultObj->SetStringField(TEXT("destination_field"), DestFieldToken);
+    ResultObj->SetStringField(TEXT("destination_kind"), DestField.IsFunction() ? TEXT("function") : TEXT("property"));
+    ResultObj->SetStringField(TEXT("binding_mode"), ModeCanonical);
+    ResultObj->SetStringField(TEXT("binding_id"), BindingId.ToString(EGuidFormats::DigitsWithHyphens));
+    ResultObj->SetNumberField(TEXT("binding_count"), BlueprintView->GetNumBindings());
+    ResultObj->SetBoolField(TEXT("enabled"), bEnabled);
+    ResultObj->SetBoolField(TEXT("compile"), bCompileBinding);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }

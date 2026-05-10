@@ -49,6 +49,23 @@
  *      `set_binding_path` ops. Conversion functions, two-way bindings,
  *      and bindings to widget properties beyond root stay on the
  *      BACKLOG.
+ *   - "add_property_binding": full MVVM binding row authoring. Resolves
+ *      an existing UWidgetBlueprint plus a viewmodel slot on its
+ *      UMVVMBlueprintView (by FName or by the resolved FGuid context
+ *      id) plus a source field name on that viewmodel's class plus a
+ *      destination widget FName on the widget tree plus a destination
+ *      property name on the widget's class. Routes through
+ *      `UMVVMBlueprintView::AddDefaultBinding()` to get a fresh
+ *      `FMVVMBlueprintViewBinding`, then sets the row's `SourcePath`
+ *      to (ViewModelContextId, viewmodel field) and `DestinationPath`
+ *      to (WidgetName, widget property) through the public
+ *      `FMVVMBlueprintPropertyPath::SetViewModelId` +
+ *      `SetPropertyPath(WBP, FieldVariant)` and `SetWidgetName` +
+ *      `SetPropertyPath(WBP, FieldVariant)` setters. The
+ *      `binding_mode` token maps `one_way` / `two_way` / `one_time`
+ *      onto the canonical `EMVVMBindingMode` enum values
+ *      (`OneWayToDestination` / `TwoWay` / `OneTimeToDestination`).
+ *      Conversion functions stay on the BACKLOG.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - FKismetEditorUtilities::CreateBlueprint for asset creation
@@ -81,4 +98,5 @@ private:
     TSharedPtr<FJsonObject> AddAnimationTrack(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddAnimationKeyframe(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetViewModel(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddPropertyBinding(const TSharedPtr<FJsonObject>& Params);
 };

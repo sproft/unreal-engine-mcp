@@ -3026,6 +3026,13 @@ def widget_edit(
     expose_as_variable: bool = True,
     save: bool = True,
     overwrite: bool = False,
+    viewmodel: Optional[str] = None,
+    source_field: Optional[str] = None,
+    widget: Optional[str] = None,
+    destination_field: Optional[str] = None,
+    binding_mode: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    compile_binding: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3081,6 +3088,22 @@ def widget_edit(
           gets one binding row seeded. The full MVVM surface
           (conversion functions, two-way bindings, bindings to widget
           properties beyond root) stays on the BACKLOG.
+        - "add_property_binding": full MVVM property-binding row
+          authoring. Adds a fresh
+          ``FMVVMBlueprintViewBinding`` through
+          ``UMVVMBlueprintView::AddDefaultBinding`` and configures
+          its ``SourcePath`` (viewmodel context id + field on the
+          viewmodel's class) and ``DestinationPath`` (target widget
+          FName + field on the widget's class) through the public
+          ``FMVVMBlueprintPropertyPath::SetViewModelId`` /
+          ``SetWidgetName`` plus ``SetPropertyPath`` setters.
+          ``viewmodel`` accepts the viewmodel's FName label
+          (set_viewmodel-side) or the FGuid context id string.
+          ``source_field`` / ``destination_field`` accept an
+          FProperty or UFunction name on the matched class; the
+          field-variant path stores the right kind. ``binding_mode``
+          tokens are ``one_way`` (default) / ``two_way`` /
+          ``one_time``. Conversion functions stay on the BACKLOG.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3185,6 +3208,20 @@ def widget_edit(
         params["viewmodel_name"] = viewmodel_name
     if binding_name is not None:
         params["binding_name"] = binding_name
+    if viewmodel is not None:
+        params["viewmodel"] = viewmodel
+    if source_field is not None:
+        params["source_field"] = source_field
+    if widget is not None:
+        params["widget"] = widget
+    if destination_field is not None:
+        params["destination_field"] = destination_field
+    if binding_mode is not None:
+        params["binding_mode"] = binding_mode
+    if enabled is not None:
+        params["enabled"] = enabled
+    if compile_binding is not None:
+        params["compile_binding"] = compile_binding
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite
