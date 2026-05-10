@@ -9,6 +9,60 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped four deepening edit slices that
+close keyframe / curve / module gaps on Animation, UMG, Niagara,
+and Material assets. `material_edit` gains
+`create_material_function`: NewObject's a `UMaterialFunction` at
+a `/Game/...` path through `UMaterialFunctionFactoryNew` and runs
+an optional initial `expressions` list (same shape as
+`add_expressions`, each spec carrying `class` plus optional
+`name` alias / `position` / `properties` dict) through
+`UMaterialEditingLibrary::CreateMaterialExpressionInFunction`,
+then runs `UpdateMaterialFunction` once after the batch so any
+existing materials that already reference the function recompile
+in one pass. The expression-class resolver picks up
+`function_input` / `function_output` short tokens for the
+canonical seed pair. With this op landing the `material_edit`
+BACKLOG row that read "Material Functions remain on the
+backlog" closes. `animation_edit` gains `add_curve` and
+`add_sync_marker`. `add_curve` registers a typed animation curve
+(`Float` / `Vector` / `Transform`) on a UAnimSequenceBase
+through `UAnimationBlueprintLibrary::AddCurve`, then optionally
+seeds the new curve with `[time, value]` keyframes through
+`AddFloatCurveKeys` / `AddVectorCurveKeys` /
+`AddTransformationCurveKeys`. Float keyframes accept a number,
+Vector keyframes take an `[x, y, z]` array, Transform keyframes
+take `[time, location, rotation, scale]` triples (each component
+a 3-vector; rotation interpreted as Euler degrees, matching the
+editor's "Curve" panel). `add_sync_marker` writes an
+`FAnimSyncMarker` onto a UAnimSequence's notify track through
+`UAnimationBlueprintLibrary::AddAnimationSyncMarker`; the notify
+track auto-creates through `AddAnimationNotifyTrack` when missing
+and `frame` (int) wins over `time` (float seconds), mirroring
+`add_notify`'s precedence. `widget_edit` gains `add_keyframe`:
+resolves a target track by global index across the animation's
+master + binding tracks, finds or spawns a section through
+`UMovieSceneTrack::CreateNewSection` + `AddSection` (extending
+the section range to cover the key time via
+`UMovieSceneSection::ExpandToFrame`), and writes the key through
+`FMovieSceneFloatChannel::AddCubicKey` / `AddLinearKey` /
+`AddConstantKey`, falling through to `FMovieSceneDoubleChannel`
+for the 5.4+ vector + transform track shape that switched away
+from float channels. `value` accepts a number (scalar tracks),
+an `[x, y, z, w?]` array, or an `{x,y,z,w}` / `{r,g,b,a}` object;
+channels write 0..N-1 starting at `channel_offset`. `niagara_edit`
+gains `add_module_to_stage`: resolves an existing system + emitter
+handle and an existing `UNiagaraScript` configured as a Module
+(`Usage = Module`), walks the spawn / update script's source
+graph for the `UNiagaraNodeOutput` whose `GetUsage()` matches
+the chosen stage (we walk `Source->NodeGraph->Nodes` directly
+because `UNiagaraGraph::FindOutputNode` is not exported as
+`NIAGARAEDITOR_API` in 5.7), and routes through the documented
+`FNiagaraStackGraphUtilities::AddScriptModuleToStack(ModuleScript,
+OutputNode, TargetIndex, SuggestedName)` overload (that one is
+`NIAGARAEDITOR_API` exported). `MarkNotSynchronized` on the
+script's source so the next compile re-runs.
+
+The pass before that shipped four deepening edit slices that
 fill small breadth gaps on already-shipped tools. `widget_edit`
 gains `add_animation` and `add_animation_track`: the first
 appends a `UWidgetAnimation` to the WBP's `Animations` array
