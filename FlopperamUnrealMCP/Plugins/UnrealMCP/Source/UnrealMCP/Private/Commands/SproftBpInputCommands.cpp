@@ -11,13 +11,18 @@
 #include "InputActionValue.h"
 #include "InputCoreTypes.h"
 #include "InputMappingContext.h"
+#include "InputModifiers.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_EnhancedInputAction.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/OutputDeviceNull.h"
 #include "Misc/PackageName.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -135,9 +140,14 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::HandleBpInput(const TSharedPtr<F
     {
         return AddActionEventNode(Params);
     }
+    if (Operation == TEXT("add_action_modifier") || Operation == TEXT("add_modifier")
+        || Operation == TEXT("add_mapping_modifier"))
+    {
+        return AddActionModifier(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported bp_input operation '%s'. Supported: create_input_action, create_input_mapping_context, add_mapping, add_action_event_node"), *Operation));
+        FString::Printf(TEXT("Unsupported bp_input operation '%s'. Supported: create_input_action, create_input_mapping_context, add_mapping, add_action_event_node, add_action_modifier"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftBpInputCommands::CreateInputAction(const TSharedPtr<FJsonObject>& Params)
@@ -573,6 +583,284 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::AddActionEventNode(const TShared
         ResultObj->SetStringField(TEXT("connected_function"), TargetFunctionName);
     }
     ResultObj->SetBoolField(TEXT("compiled"), bCompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Render a JSON value as ImportText input. Mirrors the helper used
+     *  in widget_edit / bp_component for the modifier-property dict. */
+    FString BpInput_JsonValueToImportText(const TSharedPtr<FJsonValue>& Value)
+    {
+        if (!Value.IsValid())
+        {
+            return FString();
+        }
+        switch (Value->Type)
+        {
+            case EJson::String:
+                return Value->AsString();
+            case EJson::Number:
+                return LexToString(Value->AsNumber());
+            case EJson::Boolean:
+                return Value->AsBool() ? TEXT("true") : TEXT("false");
+            case EJson::Null:
+                return TEXT("None");
+            default:
+            {
+                FString Buffer;
+                TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+                    TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Buffer);
+                FJsonSerializer::Serialize(Value.ToSharedRef(), TEXT(""), Writer);
+                return Buffer;
+            }
+        }
+    }
+
+    /** Resolve a UInputModifier subclass by short token, full UObject path,
+     *  or a bare class name (with the engine's `UInputModifier` prefix
+     *  added when the bare token has no leading `U`). */
+    UClass* BpInput_ResolveModifierClass(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        const FString Lower = Token.ToLower();
+        struct FShortTokenMap
+        {
+            const TCHAR* Token;
+            UClass* (*Resolver)();
+        };
+        static const FShortTokenMap Map[] = {
+            { TEXT("negate"),                  []() { return UInputModifierNegate::StaticClass(); } },
+            { TEXT("scalar"),                  []() { return UInputModifierScalar::StaticClass(); } },
+            { TEXT("dead_zone"),               []() { return UInputModifierDeadZone::StaticClass(); } },
+            { TEXT("deadzone"),                []() { return UInputModifierDeadZone::StaticClass(); } },
+            { TEXT("swizzle_axis"),            []() { return UInputModifierSwizzleAxis::StaticClass(); } },
+            { TEXT("swizzle"),                 []() { return UInputModifierSwizzleAxis::StaticClass(); } },
+        };
+        for (const FShortTokenMap& Entry : Map)
+        {
+            if (Lower == Entry.Token)
+            {
+                return Entry.Resolver();
+            }
+        }
+
+        if (Token.StartsWith(TEXT("/Script/")))
+        {
+            if (UClass* Loaded = LoadClass<UInputModifier>(nullptr, *Token))
+            {
+                return Loaded;
+            }
+        }
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            if (Found->IsChildOf(UInputModifier::StaticClass()))
+            {
+                return Found;
+            }
+        }
+        const FString EnhancedPath = FString::Printf(TEXT("/Script/EnhancedInput.%s"), *Token);
+        if (UClass* Loaded = LoadClass<UInputModifier>(nullptr, *EnhancedPath))
+        {
+            return Loaded;
+        }
+        return nullptr;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftBpInputCommands::AddActionModifier(const TSharedPtr<FJsonObject>& Params)
+{
+    FString IMCPath;
+    if (!Params->TryGetStringField(TEXT("input_mapping_context"), IMCPath)
+        && !Params->TryGetStringField(TEXT("imc"), IMCPath)
+        && !Params->TryGetStringField(TEXT("mapping_context"), IMCPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'input_mapping_context' parameter"));
+    }
+
+    FString ActionName;
+    if (!Params->TryGetStringField(TEXT("input_action"), ActionName)
+        && !Params->TryGetStringField(TEXT("action"), ActionName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'input_action' parameter (path or short name of the UInputAction the row binds)"));
+    }
+
+    FString KeyText;
+    if (!Params->TryGetStringField(TEXT("key"), KeyText))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'key' parameter (matches the FKey on the mapping row)"));
+    }
+
+    FString ModifierToken;
+    if (!Params->TryGetStringField(TEXT("modifier_class"), ModifierToken)
+        && !Params->TryGetStringField(TEXT("modifier"), ModifierToken)
+        && !Params->TryGetStringField(TEXT("class"), ModifierToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'modifier_class' parameter (negate / scalar / dead_zone / swizzle_axis or a UInputModifier subclass path)"));
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    UObject* IMCAsset = UEditorAssetLibrary::LoadAsset(IMCPath);
+    UInputMappingContext* IMC = Cast<UInputMappingContext>(IMCAsset);
+    if (!IMC)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UInputMappingContext: %s"), *IMCPath));
+    }
+
+    // The action argument can be a short name (resolved against the
+    // mapping rows directly) or an asset path (resolved through the
+    // asset registry first).
+    const UInputAction* TargetAction = nullptr;
+    if (ActionName.StartsWith(TEXT("/")))
+    {
+        if (UObject* AsAsset = UEditorAssetLibrary::LoadAsset(ActionName))
+        {
+            TargetAction = Cast<UInputAction>(AsAsset);
+        }
+    }
+
+    const FKey TargetKey(*KeyText);
+    if (!TargetKey.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("FKey '%s' is not a known engine key. Pass an FKey FName like 'SpaceBar', 'W', or 'Gamepad_FaceButton_Bottom'."), *KeyText));
+    }
+
+    const TArray<FEnhancedActionKeyMapping>& Mappings = IMC->GetMappings();
+    int32 MatchedIndex = INDEX_NONE;
+    for (int32 i = 0; i < Mappings.Num(); ++i)
+    {
+        const FEnhancedActionKeyMapping& Row = Mappings[i];
+        if (Row.Key != TargetKey)
+        {
+            continue;
+        }
+        if (TargetAction)
+        {
+            if (Row.Action == TargetAction)
+            {
+                MatchedIndex = i;
+                break;
+            }
+        }
+        else if (Row.Action && Row.Action->GetName().Equals(ActionName, ESearchCase::IgnoreCase))
+        {
+            MatchedIndex = i;
+            break;
+        }
+    }
+
+    if (MatchedIndex == INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find a mapping row for action '%s' + key '%s' on %s. Run bp_input add_mapping first."), *ActionName, *KeyText, *IMCPath));
+    }
+
+    UClass* ModifierClass = BpInput_ResolveModifierClass(ModifierToken);
+    if (!ModifierClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve modifier_class '%s'. Pass one of: negate, scalar, dead_zone, swizzle_axis, or a UInputModifier subclass path."), *ModifierToken));
+    }
+    if (!ModifierClass->IsChildOf(UInputModifier::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Resolved class '%s' is not a UInputModifier subclass."), *ModifierClass->GetName()));
+    }
+
+    // Construct the new modifier as an instanced subobject of the IMC.
+    // The Modifiers array on FEnhancedActionKeyMapping is `Instanced`,
+    // so we want one subobject per mapping; outered to the IMC keeps it
+    // serialised inside the asset.
+    UInputModifier* NewModifier = NewObject<UInputModifier>(IMC, ModifierClass, NAME_None, RF_Transactional);
+    if (!NewModifier)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to construct UInputModifier '%s'"), *ModifierClass->GetName()));
+    }
+
+    // Apply optional flat property dict to the new modifier through
+    // ImportText. Failed entries surface under skipped, mirroring the
+    // chaos_edit / pcg_graph_edit / widget_edit set_slot_property
+    // convention.
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+    if (Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid())
+    {
+        FOutputDeviceNull NullDevice;
+        for (const auto& Pair : (*PropsObj)->Values)
+        {
+            const FString& PropName = Pair.Key;
+            const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
+
+            FProperty* Prop = FindFProperty<FProperty>(ModifierClass, *PropName);
+            if (!Prop)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), PropName);
+                Skip->SetStringField(TEXT("reason"), TEXT("not_a_uproperty"));
+                SkippedJson.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            const FString TextValue = BpInput_JsonValueToImportText(JsonVal);
+            const TCHAR* TextPtr = *TextValue;
+            const TCHAR* Result = Prop->ImportText_InContainer(TextPtr, NewModifier, NewModifier, PPF_None, &NullDevice);
+            if (Result == nullptr)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), PropName);
+                Skip->SetStringField(TEXT("reason"), TEXT("import_text_failed"));
+                Skip->SetStringField(TEXT("attempted_value"), TextValue);
+                SkippedJson.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+            Applied->SetStringField(TEXT("name"), PropName);
+            Applied->SetStringField(TEXT("type"), Prop->GetCPPType());
+            AppliedJson.Add(MakeShared<FJsonValueObject>(Applied));
+        }
+    }
+
+    // Append to the row's Modifiers array. UInputMappingContext
+    // exposes a non-const GetMapping accessor for the editor's binding
+    // panel; we route through it for the same reason.
+    FEnhancedActionKeyMapping& Row = IMC->GetMapping(MatchedIndex);
+    Row.Modifiers.Add(NewModifier);
+
+    if (UPackage* Package = IMC->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(IMCPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_action_modifier"));
+    ResultObj->SetStringField(TEXT("input_mapping_context"), IMC->GetPathName());
+    if (Row.Action)
+    {
+        ResultObj->SetStringField(TEXT("input_action"), Row.Action->GetPathName());
+    }
+    ResultObj->SetStringField(TEXT("key"), Row.Key.ToString());
+    ResultObj->SetNumberField(TEXT("mapping_index"), MatchedIndex);
+    ResultObj->SetStringField(TEXT("modifier_class"), ModifierClass->GetName());
+    ResultObj->SetStringField(TEXT("modifier_class_path"), ModifierClass->GetPathName());
+    ResultObj->SetNumberField(TEXT("modifier_count"), Row.Modifiers.Num());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetArrayField(TEXT("skipped"), SkippedJson);
+    ResultObj->SetNumberField(TEXT("applied_count"), AppliedJson.Num());
+    ResultObj->SetNumberField(TEXT("skipped_count"), SkippedJson.Num());
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }

@@ -3211,6 +3211,8 @@ def bp_input(
     trigger: Optional[str] = None,
     connect_to_function: Optional[str] = None,
     position: Optional[List[float]] = None,
+    modifier_class: Optional[str] = None,
+    properties: Optional[Dict[str, Any]] = None,
     compile: bool = True,
     save: bool = True,
     overwrite: bool = False,
@@ -3218,7 +3220,7 @@ def bp_input(
     """
     Manage Enhanced Input data assets and wire input events into Blueprints.
 
-    Mirrors a slice of the hosted Flop "bp_input" tool. Four operations:
+    Mirrors a slice of the hosted Flop "bp_input" tool. Five operations:
 
         - "create_input_action": create a UInputAction asset with a chosen
           value type (Boolean, Axis1D, Axis2D, Axis3D).
@@ -3229,6 +3231,16 @@ def bp_input(
           asset. Optionally MakeLinkTo from the chosen trigger exec pin
           (default "Triggered") to a named function call on the same
           Blueprint.
+        - "add_action_modifier": append a UInputModifier subobject to an
+          existing mapping row's ``Modifiers`` array. The row is matched
+          by ``(input_action, key)``; ``modifier_class`` resolves through
+          short tokens (``negate`` / ``scalar`` / ``dead_zone`` /
+          ``swizzle_axis``) or a UInputModifier subclass path. An
+          optional ``properties`` flat dict lands on the new modifier
+          through ``FProperty::ImportText_InContainer`` so callers can
+          land ``Order`` on a swizzle, ``Scalar`` on a scalar, etc., in
+          the same call. Failed property entries surface under
+          ``skipped`` with a reason.
 
     Args:
         operation: "create_input_action", "create_input_mapping_context",
@@ -3292,6 +3304,10 @@ def bp_input(
         params["connect_to_function"] = connect_to_function
     if position is not None:
         params["position"] = position
+    if modifier_class is not None:
+        params["modifier_class"] = modifier_class
+    if properties is not None:
+        params["properties"] = properties
     params["compile"] = compile
     params["save"] = save
     params["overwrite"] = overwrite

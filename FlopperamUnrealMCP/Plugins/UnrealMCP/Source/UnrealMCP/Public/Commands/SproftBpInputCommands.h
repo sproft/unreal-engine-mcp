@@ -19,10 +19,25 @@
  *      node in a target Blueprint's event graph for a given UInputAction
  *      asset, and optionally MakeLinkTo from a chosen exec pin (default
  *      "Triggered") to a named function call on the same Blueprint.
+ *   - "add_action_modifier": append a UInputModifier subobject to a
+ *      mapping row's `Modifiers` array. The mapping row is found by
+ *      `(action, key)` pair; the modifier class resolves through a short
+ *      token (`negate` / `scalar` / `dead_zone` / `swizzle_axis`) or a
+ *      full UInputModifier subclass path. An optional flat property dict
+ *      lands on the new modifier instance through
+ *      `FProperty::ImportText_InContainer`, so callers can write `Order`
+ *      on a swizzle, `Scalar` on a scalar, `LowerThreshold` on a dead
+ *      zone, etc., in the same call.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UInputAction (UDataAsset subclass, EnhancedInput plugin)
  *   - UInputMappingContext::MapKey (the documented public binding entry point)
+ *   - UInputMappingContext::GetMapping (non-const accessor for in-place
+ *     `Modifiers` array writes; UnmapKey-then-rebuild is what the editor
+ *     uses for full mapping replacement, but the FEnhancedActionKeyMapping
+ *     surface is reflected so we can also attach modifiers in place)
+ *   - UInputModifierNegate / UInputModifierScalar / UInputModifierDeadZone
+ *     / UInputModifierSwizzleAxis (canonical modifier subclasses)
  *   - UK2Node_EnhancedInputAction (InputBlueprintNodes module)
  *   - UK2Node_CallFunction::SetFromFunction for the function-call follow-on
  *   - FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified +
@@ -46,4 +61,5 @@ private:
     TSharedPtr<FJsonObject> CreateInputMappingContext(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddMapping(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddActionEventNode(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddActionModifier(const TSharedPtr<FJsonObject>& Params);
 };
