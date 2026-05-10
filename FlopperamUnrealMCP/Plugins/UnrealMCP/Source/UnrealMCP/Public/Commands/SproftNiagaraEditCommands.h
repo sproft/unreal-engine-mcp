@@ -43,6 +43,28 @@
  *     `FNiagaraStackGraphUtilities::AddScriptModuleToStack(ModuleScript,
  *     OutputNode)`. The new node is appended to the end of the stage by
  *     default; pass `target_index` to insert at a chosen index.
+ *   - `request_compile`: resolves an existing `UNiagaraSystem` by
+ *     `/Game/...` path or short name and routes through the public
+ *     `UNiagaraSystem::RequestCompile(bForce)` (NIAGARA_API). The
+ *     optional `force` flag picks the bForce argument (default
+ *     false). After the call we mark the package dirty so the system
+ *     saves with any post-compile fix-up state baked in.
+ *   - `set_emitter_flag`: resolves an existing system + emitter
+ *     handle (same shape `set_emitter_local_parameter` uses) and
+ *     writes a boolean flag onto `FVersionedNiagaraEmitterData`.
+ *     Supported flags: `bLocalSpace`, `bDeterminism`,
+ *     `bInterpolatedSpawning`, `bRequiresPersistentIDs`. We resolve
+ *     the field through the engine's reflection database against
+ *     the `FVersionedNiagaraEmitterData` UScriptStruct so we do not
+ *     depend on the private vs. public split that the bitfield
+ *     wrappers ride on. The deprecated `bInterpolatedSpawning`
+ *     field is preserved here for the documented contract; the
+ *     engine's `InterpolatedSpawnMode` enum is the modern
+ *     replacement, so the op also accepts the canonical enum form
+ *     (`no_interpolation` / `run_update_script` /
+ *     `run_update_script_with_interpolation`) and writes through
+ *     `InterpolatedSpawnMode` when the flag token is
+ *     `bInterpolatedSpawning` to keep modern emitters consistent.
  *
  * Inputs (create_niagara_system):
  *   - path: `/Game/...` package path. Required.
@@ -113,4 +135,6 @@ private:
     TSharedPtr<FJsonObject> HandleAddEmitterFromAsset(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterLocalParameter(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddModuleToStage(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRequestCompile(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetEmitterFlag(const TSharedPtr<FJsonObject>& Params);
 };

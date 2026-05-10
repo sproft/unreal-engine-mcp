@@ -106,8 +106,18 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleAddModuleToStage(Params);
     }
+    if (Op.Equals(TEXT("request_compile"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("compile"), ESearchCase::IgnoreCase))
+    {
+        return HandleRequestCompile(Params);
+    }
+    if (Op.Equals(TEXT("set_emitter_flag"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_flag"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetEmitterFlag(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -828,5 +838,316 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleAddModuleToStage(const
 #else
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         TEXT("niagara_edit add_module_to_stage requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleRequestCompile(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    bool bForce = false;
+    Params->TryGetBoolField(TEXT("force"), bForce);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // RequestCompile is NIAGARA_API exported (NiagaraSystem.h line 438
+    // on the 5.7 source tree). The call kicks the per-script DDC build
+    // path and queues a delayed callback that finalises the compiled
+    // VM data; the returned bool reports whether a compile was
+    // dispatched (false when the system already has up-to-date scripts
+    // and bForce is false).
+    const bool bDispatched = System->RequestCompile(bForce);
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("request_compile"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetBoolField(TEXT("force"), bForce);
+    Out->SetBoolField(TEXT("compile_requested"), bDispatched);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit request_compile requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+namespace
+{
+    /** Canonicalise a flag token from caller input into one of the four
+     *  documented flag names so the response always carries a stable
+     *  identifier. Returns an empty FString on miss. */
+    FString CanonicaliseEmitterFlagToken(const FString& InToken)
+    {
+        const FString T = InToken.ToLower();
+        if (T == TEXT("blocalspace") || T == TEXT("local_space") || T == TEXT("localspace"))
+        {
+            return TEXT("bLocalSpace");
+        }
+        if (T == TEXT("bdeterminism") || T == TEXT("determinism"))
+        {
+            return TEXT("bDeterminism");
+        }
+        if (T == TEXT("binterpolatedspawning") || T == TEXT("interpolated_spawning") || T == TEXT("interpolatedspawning"))
+        {
+            return TEXT("bInterpolatedSpawning");
+        }
+        if (T == TEXT("brequirespersistentids") || T == TEXT("requires_persistent_ids") || T == TEXT("requirespersistentids") || T == TEXT("persistent_ids"))
+        {
+            return TEXT("bRequiresPersistentIDs");
+        }
+        return FString();
+    }
+
+    /** Map a ENiagaraInterpolatedSpawnMode caller token onto the typed
+     *  enum value. Returns false on miss. */
+    bool ResolveInterpolatedSpawnMode(const FString& InToken, ENiagaraInterpolatedSpawnMode& OutMode, FString& OutCanonical)
+    {
+        const FString T = InToken.ToLower();
+        if (T == TEXT("no_interpolation") || T == TEXT("nointerpolation") || T == TEXT("none") || T == TEXT("off") || T == TEXT("false") || T == TEXT("0"))
+        {
+            OutMode = ENiagaraInterpolatedSpawnMode::NoInterpolation;
+            OutCanonical = TEXT("NoInterpolation");
+            return true;
+        }
+        if (T == TEXT("run_update_script") || T == TEXT("runupdatescript"))
+        {
+            OutMode = ENiagaraInterpolatedSpawnMode::RunUpdateScript;
+            OutCanonical = TEXT("RunUpdateScript");
+            return true;
+        }
+        if (T == TEXT("run_update_script_with_interpolation")
+            || T == TEXT("runupdatescriptwithinterpolation")
+            || T == TEXT("interpolated")
+            || T == TEXT("interpolation")
+            || T == TEXT("on")
+            || T == TEXT("true")
+            || T == TEXT("1"))
+        {
+            OutMode = ENiagaraInterpolatedSpawnMode::RunUpdateScriptWithInterpolation;
+            OutCanonical = TEXT("RunUpdateScriptWithInterpolation");
+            return true;
+        }
+        return false;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterFlag(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString HandleToken;
+    if (!Params->TryGetStringField(TEXT("emitter"), HandleToken)
+        && !Params->TryGetStringField(TEXT("emitter_handle"), HandleToken)
+        && !Params->TryGetStringField(TEXT("handle_name"), HandleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'emitter' parameter"));
+    }
+
+    FString FlagToken;
+    if (!Params->TryGetStringField(TEXT("flag"), FlagToken)
+        && !Params->TryGetStringField(TEXT("name"), FlagToken)
+        && !Params->TryGetStringField(TEXT("property"), FlagToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'flag' parameter (try bLocalSpace / bDeterminism / bInterpolatedSpawning / bRequiresPersistentIDs)"));
+    }
+    const FString CanonicalFlag = CanonicaliseEmitterFlagToken(FlagToken);
+    if (CanonicalFlag.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unsupported emitter flag '%s' (supported: bLocalSpace, bDeterminism, bInterpolatedSpawning, bRequiresPersistentIDs)"),
+                *FlagToken));
+    }
+
+    // Read the requested value. Booleans, numbers (0/1), and strings
+    // all land. The bInterpolatedSpawning branch also accepts the
+    // canonical enum tokens so callers can keep modern emitters
+    // routing through InterpolatedSpawnMode.
+    bool bRequestedValue = false;
+    FString InterpolatedSpawnToken;
+    {
+        const TSharedPtr<FJsonValue> ValueJson = Params->TryGetField(TEXT("value"));
+        if (!ValueJson.IsValid())
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'value' parameter (bool)"));
+        }
+        if (ValueJson->Type == EJson::Boolean)
+        {
+            bRequestedValue = ValueJson->AsBool();
+        }
+        else if (ValueJson->Type == EJson::Number)
+        {
+            bRequestedValue = (ValueJson->AsNumber() != 0.0);
+        }
+        else if (ValueJson->Type == EJson::String)
+        {
+            const FString S = ValueJson->AsString();
+            if (CanonicalFlag == TEXT("bInterpolatedSpawning"))
+            {
+                InterpolatedSpawnToken = S;
+            }
+            const FString SLower = S.ToLower();
+            bRequestedValue = (SLower == TEXT("true") || SLower == TEXT("1") || SLower == TEXT("on") || SLower == TEXT("yes")
+                || SLower == TEXT("run_update_script_with_interpolation") || SLower == TEXT("runupdatescriptwithinterpolation"));
+        }
+        else
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'value' must be a bool, number, or string"));
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Walk the system's emitter handles and match by name.
+    FNiagaraEmitterHandle* MatchedHandle = nullptr;
+    int32 HandleIndex = INDEX_NONE;
+    TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    for (int32 I = 0; I < Handles.Num(); ++I)
+    {
+        FNiagaraEmitterHandle& H = Handles[I];
+        const FString HName = H.GetName().ToString();
+        FString SourceName;
+        if (UNiagaraEmitter* SrcEmitter = H.GetInstance().Emitter)
+        {
+            SourceName = SrcEmitter->GetName();
+        }
+        if (HName.Equals(HandleToken, ESearchCase::IgnoreCase)
+            || (!SourceName.IsEmpty() && SourceName.Equals(HandleToken, ESearchCase::IgnoreCase)))
+        {
+            MatchedHandle = &H;
+            HandleIndex = I;
+            break;
+        }
+    }
+    if (!MatchedHandle)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve emitter handle '%s' on system '%s'"),
+                *HandleToken, *System->GetPathName()));
+    }
+
+    FVersionedNiagaraEmitterData* EmitterData = MatchedHandle->GetEmitterData();
+    if (!EmitterData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Emitter handle '%s' has no emitter data"), *HandleToken));
+    }
+
+    // Resolve the FVersionedNiagaraEmitterData UScriptStruct and walk
+    // its property database for the matching FBoolProperty. The reflected
+    // route handles the BoolProperty / bitfield split (bLocalSpace and
+    // bDeterminism are plain bool fields; bRequiresPersistentIDs is a
+    // uint32:1 bitfield) without us spelling out two paths.
+    UScriptStruct* EmitterDataStruct = FVersionedNiagaraEmitterData::StaticStruct();
+    if (!EmitterDataStruct)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve FVersionedNiagaraEmitterData::StaticStruct()"));
+    }
+
+    // Capture the previous value so the response carries a "changed" flag.
+    bool bPreviousValue = false;
+    FString PostWriteCanonicalEnum;
+
+    if (CanonicalFlag == TEXT("bInterpolatedSpawning"))
+    {
+        // The bool field is deprecated; the modern slot is
+        // InterpolatedSpawnMode. Read + write the enum so modern
+        // emitters stay consistent.
+        bPreviousValue = (EmitterData->InterpolatedSpawnMode == ENiagaraInterpolatedSpawnMode::RunUpdateScriptWithInterpolation
+            || EmitterData->InterpolatedSpawnMode == ENiagaraInterpolatedSpawnMode::RunUpdateScript);
+
+        ENiagaraInterpolatedSpawnMode NewMode = ENiagaraInterpolatedSpawnMode::NoInterpolation;
+        if (!InterpolatedSpawnToken.IsEmpty())
+        {
+            FString CanonicalEnum;
+            if (!ResolveInterpolatedSpawnMode(InterpolatedSpawnToken, NewMode, CanonicalEnum))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Unsupported InterpolatedSpawnMode '%s' (try no_interpolation / run_update_script / run_update_script_with_interpolation)"),
+                        *InterpolatedSpawnToken));
+            }
+            PostWriteCanonicalEnum = CanonicalEnum;
+        }
+        else
+        {
+            NewMode = bRequestedValue
+                ? ENiagaraInterpolatedSpawnMode::RunUpdateScriptWithInterpolation
+                : ENiagaraInterpolatedSpawnMode::NoInterpolation;
+            PostWriteCanonicalEnum = bRequestedValue
+                ? TEXT("RunUpdateScriptWithInterpolation")
+                : TEXT("NoInterpolation");
+        }
+        EmitterData->InterpolatedSpawnMode = NewMode;
+    }
+    else
+    {
+        FBoolProperty* BoolProp = CastField<FBoolProperty>(EmitterDataStruct->FindPropertyByName(FName(*CanonicalFlag)));
+        if (!BoolProp)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("FVersionedNiagaraEmitterData has no FBoolProperty named '%s'"), *CanonicalFlag));
+        }
+        void* Container = static_cast<void*>(EmitterData);
+        bPreviousValue = BoolProp->GetPropertyValue_InContainer(Container);
+        BoolProp->SetPropertyValue_InContainer(Container, bRequestedValue);
+    }
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_emitter_flag"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("emitter_handle"), MatchedHandle->GetName().ToString());
+    Out->SetNumberField(TEXT("emitter_handle_index"), HandleIndex);
+    Out->SetStringField(TEXT("flag"), CanonicalFlag);
+    Out->SetBoolField(TEXT("value"), bRequestedValue);
+    Out->SetBoolField(TEXT("previous_value"), bPreviousValue);
+    Out->SetBoolField(TEXT("changed"), bPreviousValue != bRequestedValue);
+    if (!PostWriteCanonicalEnum.IsEmpty())
+    {
+        Out->SetStringField(TEXT("interpolated_spawn_mode"), PostWriteCanonicalEnum);
+    }
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit set_emitter_flag requires WITH_EDITORONLY_DATA"));
 #endif
 }

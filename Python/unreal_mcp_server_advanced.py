@@ -7369,12 +7369,14 @@ def niagara_edit(
     version_guid: Optional[str] = None,
     parameter_name: Optional[str] = None,
     parameter_type: Optional[str] = None,
-    value: Optional[Union[bool, int, float, List[float]]] = None,
+    value: Optional[Union[bool, int, float, str, List[float]]] = None,
     script: Optional[str] = None,
     stage: Optional[str] = None,
     module: Optional[str] = None,
     target_index: Optional[int] = None,
     suggested_name: Optional[str] = None,
+    force: Optional[bool] = None,
+    flag: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
@@ -7416,10 +7418,27 @@ def niagara_edit(
           optional ``target_index`` chooses the insert position;
           optional ``suggested_name`` overrides the new function-call
           node's display name.
+        - ``request_compile``: resolves an existing
+          ``UNiagaraSystem`` and routes through the public
+          ``UNiagaraSystem::RequestCompile(bForce)`` (NIAGARA_API).
+          The optional ``force`` flag picks the bForce argument
+          (default False).
+        - ``set_emitter_flag``: resolves an existing system + emitter
+          handle (same shape as ``set_emitter_local_parameter``) and
+          writes a boolean flag onto the
+          ``FVersionedNiagaraEmitterData`` of the matched handle
+          through the engine's reflection database. Supported
+          flags: ``bLocalSpace``, ``bDeterminism``,
+          ``bInterpolatedSpawning``, ``bRequiresPersistentIDs``. For
+          the deprecated ``bInterpolatedSpawning`` token the op
+          writes through the modern ``InterpolatedSpawnMode`` enum
+          slot instead and ``value`` may be a token
+          (``no_interpolation`` / ``run_update_script`` /
+          ``run_update_script_with_interpolation``).
 
-    The broader authoring surface (parameter store extensions,
-    modules, simulation stages, sim-target / determinism flag
-    writes) stays in BACKLOG.md.
+    The broader authoring surface (parameter store extensions
+    beyond emitter rapid-iteration writes, simulation stages,
+    sim-target flag writes) stays in BACKLOG.md.
 
     Args:
         path: create_niagara_system: ``/Game/...`` package path.
@@ -7507,6 +7526,10 @@ def niagara_edit(
         params["target_index"] = target_index
     if suggested_name is not None:
         params["suggested_name"] = suggested_name
+    if force is not None:
+        params["force"] = force
+    if flag is not None:
+        params["flag"] = flag
 
     try:
         response = unreal.send_command("niagara_edit", params)
