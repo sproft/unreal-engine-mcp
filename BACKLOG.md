@@ -8,7 +8,86 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped one maintenance fix and three deepening
+The most recent pass shipped three deepening tools plus one
+maintenance fix. `animation_graph_edit` gains two more edit
+ops on the AnimGraph state-machine surface: `add_transition`
+spawns a `UAnimStateTransitionNode` between two existing states
+on the same state machine through the same public schema-action
+template (`FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate<UAnimStateTransitionNode>`)
+and runs `CreateConnections(From, To)` so the transition arrow
+points the right way; the rule `BoundGraph` (the Boolean
+condition graph) is wired by `PostPlacedNewNode`; an optional
+`priority` lands on `PriorityOrder`; the duplicate-edge guard
+returns an error rather than spawning a parallel transition.
+`set_state_animation` writes the per-state animation asset
+reference into the state's `BoundGraph`: it resolves the right
+player class for the asset shape (`UAnimSequence` ->
+`UAnimGraphNode_SequencePlayer`, `UBlendSpace` ->
+`UAnimGraphNode_BlendSpacePlayer`, etc.) through the engine's
+`GetNodeClassForAsset(AssetClass)` helper. If a matching player
+already lives in the BoundGraph the op swaps its asset; otherwise
+it spawns a fresh player on the BoundGraph, runs
+`SetAnimationAsset` + `CopySettingsFromAnimationAsset` (so node-
+specific defaults pick up), and wires the player's `Pose`
+output into the state's `Result` input pin. `ik_rig_edit`
+gains the polymorphic solver mutation surface: `add_solver`
+resolves a `UIKRigSolverBase`-derived `UScriptStruct` from a
+short token (`full_body` / `fbik` / `limb` / `pole` /
+`body_mover` / `set_transform`), a bare struct name, or a
+`/Script/Module.FStructName` path, then routes through the
+typed `UIKRigController::AddSolver(UScriptStruct*)` overload
+(the BlueprintCallable string overload sits next to it but
+the typed one keeps us honest about which struct landed);
+`remove_solver_at` calls `UIKRigController::RemoveSolver(Index)`
+behind a stack-bounds guard; `set_solver_settings` resolves
+the solver at the given stack `index`, walks a flat `properties`
+dict, and applies each entry through `FProperty::ImportText_InContainer`
+against the reflected `GetSolverSettingsType()` struct rooted
+at `GetSolverSettings()`; failed entries surface under the
+response's `skipped` array; on success the solver's official
+`SetSolverSettings` mutator runs so per-derived-type custom
+logic (mirror copies, internal cache invalidation) fires.
+`niagara_script_edit` gains `set_module_usage` (writes the
+script's `ENiagaraScriptUsage` member; the underlying field
+is public on `UNiagaraScript`, so we drop the new value in
+directly, mark the source graph not-synchronised through
+`UNiagaraScriptSourceBase::MarkNotSynchronized` so the next
+compile request reruns, and call `PostEditChangeProperty` so
+any in-process compile-id machinery refreshes). The
+`add_input_parameter` op stayed dropped on this pass: the
+canonical entry point (`UNiagaraGraph::AddParameter`) is not
+exported by `NIAGARAEDITOR_API` in 5.7, and a clean-room
+implementation cannot link it without copying from the engine.
+The maintenance fix lays down a UE 5.7 portability batch.
+5.7 tightened the visibility on every reflected
+`FGameplayTagContainer` field on `UGameplayAbility` from public
+to protected (CancelAbilitiesWithTag / BlockAbilitiesWithTag /
+ActivationOwnedTags / ActivationRequiredTags /
+ActivationBlockedTags / SourceRequiredTags / SourceBlockedTags
+/ TargetRequiredTags / TargetBlockedTags), plus
+`CostGameplayEffectClass` / `CooldownGameplayEffectClass` /
+`AbilityTriggers`. The fields stay reflected, so the GAS
+inspect path now goes through the reflection accessor
+(FindFProperty + ContainerPtrToValuePtr) rather than the direct
+member; this keeps us clean-room (we read through the public
+reflection database, not through friending the class) and
+keeps the code compatible with 5.5 / 5.6 builds where the
+same members were public. The same pass demoted public access
+to `AActor::NetUpdateFrequency` in favour of the
+`GetNetUpdateFrequency()` accessor pair (works on 5.5 / 5.6
+too); `UPCGSettings::PostEditChangeProperty` to protected (we
+upcast the settings pointer to `UObject*` so the public base
+declaration of the virtual dispatches correctly); and the
+ternary-with-nullptr pattern in `performance_audit` to a
+two-statement init (5.7's `TSharedPtr` deduction stopped
+accepting `bIncludeSamples ? MakeShared<FJsonObject>() : nullptr`
+because the conversion to `TSharedRef` no longer round-trips).
+Adds `MetasoundFrontend` to PublicDependencyModuleNames so
+`FMetasoundFrontendClassName::Parse` and `GetFullName` link
+again, and adds the `GameplayEffectExecutionCalculation.h`
+forward-include the executor row needed.
+
+The pass before that shipped one maintenance fix and three deepening
 tools. The maintenance fix walks every `Sproft*Commands.cpp` file
 under `UnrealMCP/Source/UnrealMCP/Private/Commands/` and renames each
 helper that is defined in two or more files with a per-file prefix
