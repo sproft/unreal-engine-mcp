@@ -9,6 +9,58 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped four deepening edit slices that
+close the Niagara compile / flag gap, the bp_input trigger gap,
+the MVVM minimum cut on `widget_edit`, and the previously skipped
+graph-side `gas_edit set_ability_cue_tag`. `niagara_edit` gains
+`request_compile` (routes through the public
+`UNiagaraSystem::RequestCompile(bForce)` NIAGARA_API overload; the
+optional `force` flag picks the bForce argument; the bool return
+surfaces as `compile_requested`) and `set_emitter_flag` (writes a
+boolean flag onto `FVersionedNiagaraEmitterData` through the
+reflection database; supported flags `bLocalSpace` /
+`bDeterminism` / `bInterpolatedSpawning` /
+`bRequiresPersistentIDs`; the deprecated `bInterpolatedSpawning`
+token routes through the modern `InterpolatedSpawnMode` enum slot
+so modern emitters stay consistent, and the op accepts
+`no_interpolation` / `run_update_script` /
+`run_update_script_with_interpolation` tokens when value is a
+string). `bp_input` gains `add_action_trigger`: parallels the
+existing `add_action_modifier` op but writes to the mapping row's
+`Triggers` array on `FEnhancedActionKeyMapping`. The trigger class
+resolves through short tokens (`pressed` / `released` / `hold` /
+`hold_and_release` / `tap` / `pulse` / `chord_action` / `down` /
+`repeated_tap` / `combo`) or a UInputTrigger subclass path; the
+optional flat `properties` dict applies through
+`FProperty::ImportText_InContainer` so callers can land
+`HoldTimeThreshold` / `TapReleaseTimeThreshold` / `ChordAction` /
+`Interval` / etc. in the same call. `widget_edit` gains
+`set_viewmodel` (MVVM minimum cut): resolves a UWidgetBlueprint
+plus a UClass implementing `INotifyFieldValueChanged`
+(`UMVVMViewModelBase` subclasses are the canonical case) and
+routes through
+`UWidgetBlueprintExtension::RequestExtension<UMVVMWidgetBlueprintExtension_View>`
+to get-or-create the MVVM extension on the WBP. If the extension
+has no `UMVVMBlueprintView` instance yet we call
+`CreateBlueprintViewInstance()`, then append a fresh
+`FMVVMBlueprintViewModelContext(Class, Name)` through
+`UMVVMBlueprintView::AddViewModel`. An optional `binding_name`
+also runs `UMVVMBlueprintView::AddDefaultBinding` so the asset
+surfaces one seeded binding row ready for downstream
+property-path edits. The full MVVM surface (conversion
+functions, two-way bindings, bindings to widget properties
+beyond root) stays in [BACKLOG.md](BACKLOG.md). `gas_edit` gains
+`set_ability_cue_tag` as a graph-side authoring slice: the
+previous pass dropped the op because UGameplayAbility has no
+canonical UPROPERTY storing a per-ability cue association, but
+the runtime BlueprintCallable `K2_ExecuteGameplayCue` lives on
+the ability class itself. This op spawns a `UK2Node_CallFunction`
+wired to that UFunction and pre-fills the `GameplayCueTag`
+literal pin with the canonical struct ExportText form
+`(TagName="Foo.Bar")`. Reuses an existing matching call node
+when present so the op is idempotent. Unknown tags surface a
+clean `cue_tag_warning` rather than crash.
+
+The pass before that shipped four deepening edit slices that
 close keyframe / curve / module gaps on Animation, UMG, Niagara,
 and Material assets. `material_edit` gains
 `create_material_function`: NewObject's a `UMaterialFunction` at
