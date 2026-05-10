@@ -102,4 +102,7 @@ private:
     TSharedPtr<FJsonObject> HandleSetRetargetRoot(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddRetargetChain(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddIkGoal(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddSolver(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveSolverAt(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetSolverSettings(const TSharedPtr<FJsonObject>& Params);
 };

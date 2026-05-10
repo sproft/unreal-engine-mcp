@@ -131,8 +131,21 @@ TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleCommand(const FString& C
     {
         return HandleAddIkGoal(Params);
     }
+    if (Op.Equals(TEXT("add_solver"), ESearchCase::IgnoreCase))
+    {
+        return HandleAddSolver(Params);
+    }
+    if (Op.Equals(TEXT("remove_solver_at"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("remove_solver"), ESearchCase::IgnoreCase))
+    {
+        return HandleRemoveSolverAt(Params);
+    }
+    if (Op.Equals(TEXT("set_solver_settings"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetSolverSettings(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("ik_rig_edit: unsupported op '%s'. Supported: inspect, set_retarget_root, add_retarget_chain, add_ik_goal"), *Op));
+        FString::Printf(TEXT("ik_rig_edit: unsupported op '%s'. Supported: inspect, set_retarget_root, add_retarget_chain, add_ik_goal, add_solver, remove_solver_at, set_solver_settings"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleInspect(const TSharedPtr<FJsonObject>& Params)
@@ -497,6 +510,368 @@ TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleAddIkGoal(const TSharedP
     Out->SetStringField(TEXT("rig"), Rig->GetPathName());
     Out->SetStringField(TEXT("goal_name"), ResolvedGoalName.ToString());
     Out->SetStringField(TEXT("bone_name"), BoneStr);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+}
+
+namespace
+{
+    /** Resolve a UIKRigSolverBase-derived UScriptStruct from a string
+     *  token. Accepts a full `/Script/Module.FStructName` path, a
+     *  bare struct name (probes the loaded UScriptStruct set), and
+     *  short tokens for the stock solvers shipped by the IKRig
+     *  plugin (full_body / fbik / limb / pole / body_mover /
+     *  set_transform). */
+    UScriptStruct* IkRigEdit_ResolveSolverStruct(const FString& Token)
+    {
+        if (Token.IsEmpty()) return nullptr;
+        if (Token.StartsWith(TEXT("/")))
+        {
+            return Cast<UScriptStruct>(StaticLoadObject(UScriptStruct::StaticClass(), nullptr, *Token));
+        }
+        // Short-name table for the stock solvers; we keep the table
+        // small on purpose so callers stay aware of which solver
+        // they're appending.
+        static const TMap<FString, FString> Aliases =
+        {
+            { TEXT("full_body"),     TEXT("/Script/IKRig.IKRigFBIKSolver") },
+            { TEXT("fbik"),          TEXT("/Script/IKRig.IKRigFBIKSolver") },
+            { TEXT("full_body_ik"),  TEXT("/Script/IKRig.IKRigFBIKSolver") },
+            { TEXT("limb"),          TEXT("/Script/IKRig.IKRigLimbSolver") },
+            { TEXT("pole"),          TEXT("/Script/IKRig.IKRigPoleSolver") },
+            { TEXT("body_mover"),    TEXT("/Script/IKRig.IKRigBodyMoverSolver") },
+            { TEXT("bodymover"),     TEXT("/Script/IKRig.IKRigBodyMoverSolver") },
+            { TEXT("set_transform"), TEXT("/Script/IKRig.IKRigSetTransformSolver") },
+        };
+        if (const FString* Hit = Aliases.Find(Token.ToLower()))
+        {
+            return Cast<UScriptStruct>(StaticLoadObject(UScriptStruct::StaticClass(), nullptr, **Hit));
+        }
+        // Bare struct name fallback: probe the loaded UScriptStruct
+        // set with optional `F` prefix variants.
+        for (TObjectIterator<UScriptStruct> It; It; ++It)
+        {
+            UScriptStruct* Candidate = *It;
+            if (!Candidate) continue;
+            const FString Name = Candidate->GetName();
+            if (Name.Equals(Token, ESearchCase::IgnoreCase)
+                || Name.Equals(FString(TEXT("F")) + Token, ESearchCase::IgnoreCase))
+            {
+                if (Candidate->IsChildOf(FIKRigSolverBase::StaticStruct()))
+                {
+                    return Candidate;
+                }
+            }
+        }
+        return nullptr;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleAddSolver(const TSharedPtr<FJsonObject>& Params)
+{
+    UIKRigDefinition* Rig = ResolveRig(Params);
+    if (!Rig)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UIKRigDefinition (provide 'rig' or 'path' as /Game/... or short name)"));
+    }
+    UIKRigController* Controller = GetRigController(Rig);
+    if (!Controller)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UIKRigController for '%s'"), *Rig->GetPathName()));
+    }
+
+    FString SolverToken;
+    if (!Params->TryGetStringField(TEXT("solver_type"), SolverToken)
+        && !Params->TryGetStringField(TEXT("type"), SolverToken)
+        && !Params->TryGetStringField(TEXT("struct_path"), SolverToken)
+        && !Params->TryGetStringField(TEXT("class"), SolverToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'solver_type' parameter (full_body / limb / pole / body_mover / set_transform / `/Script/Module.FStructName` / bare struct name)"));
+    }
+
+    UScriptStruct* SolverStruct = IkRigEdit_ResolveSolverStruct(SolverToken);
+    if (!SolverStruct)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UScriptStruct for solver token '%s'"), *SolverToken));
+    }
+    if (!SolverStruct->IsChildOf(FIKRigSolverBase::StaticStruct()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Resolved struct '%s' is not a FIKRigSolverBase derivative"), *SolverStruct->GetPathName()));
+    }
+
+    // The 5.6 polymorphic op-stack accepts either an FString
+    // struct path (BlueprintCallable overload) or a UScriptStruct*
+    // (C++ overload). Use the typed overload so we control the
+    // resolved struct exactly.
+    const int32 NewIndex = Controller->AddSolver(SolverStruct);
+    if (NewIndex == INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UIKRigController::AddSolver returned INDEX_NONE for '%s'"), *SolverStruct->GetPathName()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveRigIfRequested(Rig, bSave);
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("add_solver"));
+    Out->SetStringField(TEXT("rig"), Rig->GetPathName());
+    Out->SetNumberField(TEXT("index"), NewIndex);
+    Out->SetStringField(TEXT("struct_type"), SolverStruct->GetName());
+    Out->SetStringField(TEXT("struct_path"), SolverStruct->GetPathName());
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleRemoveSolverAt(const TSharedPtr<FJsonObject>& Params)
+{
+    UIKRigDefinition* Rig = ResolveRig(Params);
+    if (!Rig)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UIKRigDefinition (provide 'rig' or 'path' as /Game/... or short name)"));
+    }
+    UIKRigController* Controller = GetRigController(Rig);
+    if (!Controller)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UIKRigController for '%s'"), *Rig->GetPathName()));
+    }
+
+    int32 Index = INDEX_NONE;
+    double IndexDouble = 0.0;
+    if (Params->TryGetNumberField(TEXT("index"), IndexDouble))
+    {
+        Index = static_cast<int32>(IndexDouble);
+    }
+    else if (Params->TryGetNumberField(TEXT("solver_index"), IndexDouble))
+    {
+        Index = static_cast<int32>(IndexDouble);
+    }
+    if (Index < 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing or negative 'index' parameter"));
+    }
+
+    const int32 NumBefore = Controller->GetNumSolvers();
+    if (Index >= NumBefore)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Solver index %d is out of range (0..%d) on rig '%s'"),
+                Index, NumBefore - 1, *Rig->GetPathName()));
+    }
+
+    // Capture the struct identity for the response before the
+    // remove call invalidates the slot.
+    FString RemovedStructPath;
+    if (FInstancedStruct* SolverStruct = Controller->GetSolverStructAtIndex(Index))
+    {
+        if (const UScriptStruct* StructType = SolverStruct->GetScriptStruct())
+        {
+            RemovedStructPath = StructType->GetPathName();
+        }
+    }
+
+    const bool bRemoved = Controller->RemoveSolver(Index);
+    if (!bRemoved)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UIKRigController::RemoveSolver(%d) refused on rig '%s'"),
+                Index, *Rig->GetPathName()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveRigIfRequested(Rig, bSave);
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("remove_solver_at"));
+    Out->SetStringField(TEXT("rig"), Rig->GetPathName());
+    Out->SetNumberField(TEXT("index"), Index);
+    Out->SetNumberField(TEXT("solver_count"), Controller->GetNumSolvers());
+    if (!RemovedStructPath.IsEmpty())
+    {
+        Out->SetStringField(TEXT("removed_struct_path"), RemovedStructPath);
+    }
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftIkRigEditCommands::HandleSetSolverSettings(const TSharedPtr<FJsonObject>& Params)
+{
+    UIKRigDefinition* Rig = ResolveRig(Params);
+    if (!Rig)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UIKRigDefinition (provide 'rig' or 'path' as /Game/... or short name)"));
+    }
+    UIKRigController* Controller = GetRigController(Rig);
+    if (!Controller)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UIKRigController for '%s'"), *Rig->GetPathName()));
+    }
+
+    int32 Index = INDEX_NONE;
+    double IndexDouble = 0.0;
+    if (Params->TryGetNumberField(TEXT("index"), IndexDouble))
+    {
+        Index = static_cast<int32>(IndexDouble);
+    }
+    else if (Params->TryGetNumberField(TEXT("solver_index"), IndexDouble))
+    {
+        Index = static_cast<int32>(IndexDouble);
+    }
+    if (Index < 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing or negative 'index' parameter"));
+    }
+
+    if (Index >= Controller->GetNumSolvers())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Solver index %d is out of range (0..%d) on rig '%s'"),
+                Index, Controller->GetNumSolvers() - 1, *Rig->GetPathName()));
+    }
+
+    FIKRigSolverBase* Solver = Controller->GetSolverAtIndex(Index);
+    if (!Solver)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve FIKRigSolverBase at index %d"), Index));
+    }
+    const UScriptStruct* SettingsType = Solver->GetSolverSettingsType();
+    FIKRigSolverSettingsBase* SettingsPtr = Solver->GetSolverSettings();
+    if (!SettingsType || !SettingsPtr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Solver at index %d does not expose a settings struct"), Index));
+    }
+
+    const TSharedPtr<FJsonObject>* PropertiesObj = nullptr;
+    if (!Params->TryGetObjectField(TEXT("properties"), PropertiesObj) || !PropertiesObj || !PropertiesObj->IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'properties' object (flat dict of property name -> string value)"));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> AppliedArr;
+    TArray<TSharedPtr<FJsonValue>> SkippedArr;
+    void* SettingsContainer = static_cast<void*>(SettingsPtr);
+
+    for (const auto& Entry : (*PropertiesObj)->Values)
+    {
+        const FString& PropName = Entry.Key;
+        const TSharedPtr<FJsonValue>& Value = Entry.Value;
+
+        FProperty* Prop = SettingsType->FindPropertyByName(FName(*PropName));
+        if (!Prop)
+        {
+            // Case-insensitive fallback walk; FProperty::FindPropertyByName
+            // is case-sensitive on FName equality.
+            for (TFieldIterator<FProperty> It(SettingsType); It; ++It)
+            {
+                if (It->GetName().Equals(PropName, ESearchCase::IgnoreCase))
+                {
+                    Prop = *It;
+                    break;
+                }
+            }
+        }
+        if (!Prop)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), PropName);
+            Skip->SetStringField(TEXT("reason"), TEXT("unknown_property"));
+            SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+
+        // Render the JSON value back to a literal string
+        // FProperty::ImportText understands. Bools / numbers / strings
+        // each go through their natural rendering.
+        FString Literal;
+        if (!Value.IsValid())
+        {
+            Literal = TEXT("None");
+        }
+        else if (Value->Type == EJson::Boolean)
+        {
+            Literal = Value->AsBool() ? TEXT("True") : TEXT("False");
+        }
+        else if (Value->Type == EJson::Number)
+        {
+            Literal = LexToString(Value->AsNumber());
+        }
+        else if (Value->Type == EJson::String)
+        {
+            Literal = Value->AsString();
+        }
+        else
+        {
+            // Object / array literals: serialise raw and let
+            // ImportText handle the deeper grammar (transform, vector
+            // etc. callers should pass the canonical text form).
+            const TSharedPtr<FJsonObject>* SubObj = nullptr;
+            if (Value->TryGetObject(SubObj) && SubObj && SubObj->IsValid())
+            {
+                TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Literal);
+                FJsonSerializer::Serialize(SubObj->ToSharedRef(), Writer);
+            }
+            else
+            {
+                Literal = Value->AsString();
+            }
+        }
+
+        const TCHAR* ImportResult =
+            Prop->ImportText_InContainer(*Literal, SettingsContainer, nullptr, PPF_None);
+        if (!ImportResult)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), PropName);
+            Skip->SetStringField(TEXT("reason"), TEXT("import_text_failed"));
+            Skip->SetStringField(TEXT("attempted"), Literal);
+            SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+        Applied->SetStringField(TEXT("name"), PropName);
+        Applied->SetStringField(TEXT("cpp_type"), Prop->GetCPPType());
+        Applied->SetStringField(TEXT("imported"), Literal);
+        AppliedArr.Add(MakeShared<FJsonValueObject>(Applied));
+    }
+
+    // Run the solver's official settings setter so any
+    // derived-type custom logic (e.g. UpdateSettingsFromAsset
+    // mirror copies) fires. The base implementation memcpys the
+    // settings struct over the existing pointer.
+    if (AppliedArr.Num() > 0)
+    {
+        Solver->SetSolverSettings(SettingsPtr);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveRigIfRequested(Rig, bSave);
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_solver_settings"));
+    Out->SetStringField(TEXT("rig"), Rig->GetPathName());
+    Out->SetNumberField(TEXT("index"), Index);
+    Out->SetStringField(TEXT("settings_type"), SettingsType->GetName());
+    Out->SetStringField(TEXT("settings_path"), SettingsType->GetPathName());
+    Out->SetArrayField(TEXT("applied"), AppliedArr);
+    Out->SetNumberField(TEXT("applied_count"), AppliedArr.Num());
+    Out->SetArrayField(TEXT("skipped"), SkippedArr);
+    Out->SetNumberField(TEXT("skipped_count"), SkippedArr.Num());
     Out->SetBoolField(TEXT("saved"), bSave);
     return Out;
 }

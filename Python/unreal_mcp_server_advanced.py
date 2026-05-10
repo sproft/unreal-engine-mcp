@@ -6874,6 +6874,9 @@ def ik_rig_edit(
     end_bone: Optional[str] = None,
     ik_goal_name: Optional[str] = None,
     goal_name: Optional[str] = None,
+    solver_type: Optional[str] = None,
+    index: Optional[int] = None,
+    properties: Optional[Dict[str, Any]] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
@@ -6894,6 +6897,22 @@ def ik_rig_edit(
           through ``UIKRigController::AddRetargetChain``.
         - ``add_ik_goal``: appends a new IK goal through
           ``UIKRigController::AddNewGoal``.
+        - ``add_solver``: appends a new solver to the polymorphic
+          solver stack through ``UIKRigController::AddSolver``.
+          ``solver_type`` accepts a short token (``full_body`` /
+          ``fbik`` / ``limb`` / ``pole`` / ``body_mover`` /
+          ``set_transform``), a bare struct name, or a full
+          ``/Script/Module.FStructName`` path.
+        - ``remove_solver_at``: removes the solver at the given
+          stack ``index`` through
+          ``UIKRigController::RemoveSolver``.
+        - ``set_solver_settings``: applies a flat ``properties``
+          dict against the solver's reflected
+          ``GetSolverSettings()`` struct through
+          ``FProperty::ImportText_InContainer``, then runs the
+          solver's official ``SetSolverSettings`` mutator so
+          per-derived-type custom logic fires. Failed entries
+          surface under the response's ``skipped`` array.
 
     Each mutating op runs ``MarkPackageDirty`` and (when ``save``
     stays True, the default) saves the asset to disk.
@@ -6903,7 +6922,9 @@ def ik_rig_edit(
             Required.
         op: Operation discriminator. ``inspect`` /
             ``set_retarget_root`` / ``add_retarget_chain`` /
-            ``add_ik_goal``. Default ``inspect``.
+            ``add_ik_goal`` / ``add_solver`` /
+            ``remove_solver_at`` / ``set_solver_settings``.
+            Default ``inspect``.
         include_solver_settings: Inspect-only. Default True.
         include_bone_settings: Inspect-only. Default True.
         max_chains: Inspect-only cap. Default 256.
@@ -6919,6 +6940,14 @@ def ik_rig_edit(
         ik_goal_name: add_retarget_chain optional. FName of an
             existing IK goal to associate with the chain.
         goal_name: add_ik_goal. FName of the new goal.
+        solver_type: add_solver. Short token / bare struct name /
+            ``/Script/Module.FStructName`` path.
+        index: remove_solver_at + set_solver_settings. Stack index
+            into the solver array.
+        properties: set_solver_settings. Flat dict of property name
+            -> string / number / bool literal applied through
+            ``FProperty::ImportText_InContainer`` against the
+            solver settings struct.
         save: Mutating ops only. Default True.
 
     Returns:
@@ -6958,6 +6987,12 @@ def ik_rig_edit(
         params["ik_goal_name"] = ik_goal_name
     if goal_name is not None:
         params["goal_name"] = goal_name
+    if solver_type is not None:
+        params["solver_type"] = solver_type
+    if index is not None:
+        params["index"] = index
+    if properties is not None:
+        params["properties"] = properties
     if save is not None:
         params["save"] = save
 
