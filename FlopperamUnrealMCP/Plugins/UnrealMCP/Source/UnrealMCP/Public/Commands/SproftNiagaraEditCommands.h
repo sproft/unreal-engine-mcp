@@ -34,6 +34,15 @@
  *     bAdd=true)` byte-buffer overload (the documented helper that
  *     supports arbitrary type sizes). The parameter is added if it
  *     does not exist on the store.
+ *   - `add_module_to_stage`: resolves an existing system + emitter
+ *     handle (same shape `set_emitter_local_parameter` uses) and an
+ *     existing `UNiagaraScript` configured as a Module
+ *     (Usage = `Module`), then walks the spawn / update script's
+ *     source graph for the `UNiagaraNodeOutput` node whose `GetUsage()`
+ *     matches the chosen stage and routes through
+ *     `FNiagaraStackGraphUtilities::AddScriptModuleToStack(ModuleScript,
+ *     OutputNode)`. The new node is appended to the end of the stage by
+ *     default; pass `target_index` to insert at a chosen index.
  *
  * Inputs (create_niagara_system):
  *   - path: `/Game/...` package path. Required.
@@ -103,4 +112,5 @@ private:
     TSharedPtr<FJsonObject> HandleCreateSystem(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddEmitterFromAsset(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterLocalParameter(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddModuleToStage(const TSharedPtr<FJsonObject>& Params);
 };

@@ -7371,6 +7371,10 @@ def niagara_edit(
     parameter_type: Optional[str] = None,
     value: Optional[Union[bool, int, float, List[float]]] = None,
     script: Optional[str] = None,
+    stage: Optional[str] = None,
+    module: Optional[str] = None,
+    target_index: Optional[int] = None,
+    suggested_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
@@ -7400,6 +7404,18 @@ def niagara_edit(
           ``vec3`` / ``vec4`` / ``color`` / ``quat``. ``value`` is
           a JSON literal (number / bool) for scalars or a JSON
           array of numbers for vector / color / quat shapes.
+        - ``add_module_to_stage``: resolves an existing system and
+          emitter handle (same shape as
+          ``set_emitter_local_parameter``) and an existing
+          ``UNiagaraScript`` configured as a Module
+          (``Usage = Module``), then walks the chosen stage's source
+          graph for the ``UNiagaraNodeOutput`` whose ``GetUsage()``
+          matches and routes through
+          ``FNiagaraStackGraphUtilities::AddScriptModuleToStack``.
+          ``stage`` accepts ``SpawnScript`` / ``UpdateScript``;
+          optional ``target_index`` chooses the insert position;
+          optional ``suggested_name`` overrides the new function-call
+          node's display name.
 
     The broader authoring surface (parameter store extensions,
     modules, simulation stages, sim-target / determinism flag
@@ -7483,6 +7499,14 @@ def niagara_edit(
         params["value"] = value
     if script is not None:
         params["script"] = script
+    if stage is not None:
+        params["stage"] = stage
+    if module is not None:
+        params["module"] = module
+    if target_index is not None:
+        params["target_index"] = target_index
+    if suggested_name is not None:
+        params["suggested_name"] = suggested_name
 
     try:
         response = unreal.send_command("niagara_edit", params)

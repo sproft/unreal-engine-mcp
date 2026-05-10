@@ -5,11 +5,16 @@
 #include "EditorAssetLibrary.h"
 #include "NiagaraEmitter.h"
 #include "NiagaraEmitterHandle.h"
+#include "NiagaraGraph.h"
+#include "NiagaraNodeFunctionCall.h"
+#include "NiagaraNodeOutput.h"
 #include "NiagaraParameterStore.h"
 #include "NiagaraScript.h"
+#include "NiagaraScriptSource.h"
 #include "NiagaraSystem.h"
 #include "NiagaraSystemFactoryNew.h"
 #include "NiagaraTypes.h"
+#include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
 #include "UObject/Package.h"
 
 namespace
@@ -96,8 +101,13 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleSetEmitterLocalParameter(Params);
     }
+    if (Op.Equals(TEXT("add_module_to_stage"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("add_module"), ESearchCase::IgnoreCase))
+    {
+        return HandleAddModuleToStage(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -604,5 +614,219 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterLocalParamet
 #else
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         TEXT("niagara_edit set_emitter_local_parameter requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleAddModuleToStage(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString HandleToken;
+    if (!Params->TryGetStringField(TEXT("emitter"), HandleToken)
+        && !Params->TryGetStringField(TEXT("emitter_handle"), HandleToken)
+        && !Params->TryGetStringField(TEXT("handle_name"), HandleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'emitter' parameter"));
+    }
+
+    FString StageToken;
+    if (!Params->TryGetStringField(TEXT("stage"), StageToken)
+        && !Params->TryGetStringField(TEXT("script"), StageToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'stage' parameter (try SpawnScript / UpdateScript)"));
+    }
+
+    FString ModuleToken;
+    if (!Params->TryGetStringField(TEXT("module"), ModuleToken)
+        && !Params->TryGetStringField(TEXT("module_path"), ModuleToken)
+        && !Params->TryGetStringField(TEXT("module_script"), ModuleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'module' parameter (path to a Module-usage UNiagaraScript)"));
+    }
+    UNiagaraScript* ModuleScript = ResolveAssetOfClass<UNiagaraScript>(ModuleToken);
+    if (!ModuleScript)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraScript '%s'"), *ModuleToken));
+    }
+    if (ModuleScript->GetUsage() != ENiagaraScriptUsage::Module)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UNiagaraScript '%s' has Usage='%d'; expected ENiagaraScriptUsage::Module"),
+                *ModuleScript->GetPathName(), static_cast<int32>(ModuleScript->GetUsage())));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    int32 TargetIndex = INDEX_NONE;
+    {
+        double TargetIndexValue = -1.0;
+        if (Params->TryGetNumberField(TEXT("target_index"), TargetIndexValue)
+            || Params->TryGetNumberField(TEXT("index"), TargetIndexValue))
+        {
+            TargetIndex = static_cast<int32>(TargetIndexValue);
+        }
+    }
+
+    FString SuggestedName;
+    Params->TryGetStringField(TEXT("suggested_name"), SuggestedName);
+
+    // Walk the system's emitter handles and match by name.
+    FNiagaraEmitterHandle* MatchedHandle = nullptr;
+    int32 HandleIndex = INDEX_NONE;
+    TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    for (int32 I = 0; I < Handles.Num(); ++I)
+    {
+        FNiagaraEmitterHandle& H = Handles[I];
+        const FString HName = H.GetName().ToString();
+        FString SourceName;
+        if (UNiagaraEmitter* SrcEmitter = H.GetInstance().Emitter)
+        {
+            SourceName = SrcEmitter->GetName();
+        }
+        if (HName.Equals(HandleToken, ESearchCase::IgnoreCase)
+            || (!SourceName.IsEmpty() && SourceName.Equals(HandleToken, ESearchCase::IgnoreCase)))
+        {
+            MatchedHandle = &H;
+            HandleIndex = I;
+            break;
+        }
+    }
+    if (!MatchedHandle)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve emitter handle '%s' on system '%s'"),
+                *HandleToken, *System->GetPathName()));
+    }
+
+    FVersionedNiagaraEmitterData* EmitterData = MatchedHandle->GetEmitterData();
+    if (!EmitterData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Emitter handle '%s' has no emitter data"), *HandleToken));
+    }
+
+    // Resolve the script for the chosen stage and the matching usage.
+    // The hosted Flop tool documents `SpawnScript` / `UpdateScript`
+    // tokens; we accept the same tokens plus a few ergonomic variants
+    // (`particle_spawn` / `particle_update` / `spawn` / `update`).
+    UNiagaraScript* TargetScript = nullptr;
+    ENiagaraScriptUsage TargetUsage = ENiagaraScriptUsage::ParticleSpawnScript;
+    FString CanonicalStage;
+    {
+        const FString StageLower = StageToken.ToLower();
+        if (StageLower == TEXT("spawnscript") || StageLower == TEXT("spawn")
+            || StageLower == TEXT("particle_spawn") || StageLower == TEXT("particle_spawn_script"))
+        {
+            TargetScript = EmitterData->SpawnScriptProps.Script;
+            TargetUsage = ENiagaraScriptUsage::ParticleSpawnScript;
+            CanonicalStage = TEXT("SpawnScript");
+        }
+        else if (StageLower == TEXT("updatescript") || StageLower == TEXT("update")
+            || StageLower == TEXT("particle_update") || StageLower == TEXT("particle_update_script"))
+        {
+            TargetScript = EmitterData->UpdateScriptProps.Script;
+            TargetUsage = ENiagaraScriptUsage::ParticleUpdateScript;
+            CanonicalStage = TEXT("UpdateScript");
+        }
+        else
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unsupported 'stage' '%s' (try SpawnScript / UpdateScript)"), *StageToken));
+        }
+    }
+    if (!TargetScript)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Emitter handle '%s' has no '%s'"),
+                *HandleToken, *CanonicalStage));
+    }
+
+    // Walk the script's source graph for the UNiagaraNodeOutput whose
+    // GetUsage() matches the chosen stage. UNiagaraGraph::FindOutputNode
+    // is not exported as NIAGARAEDITOR_API; the public source pointer
+    // is reachable through UNiagaraScript::GetLatestSource and the
+    // NodeGraph is a plain UPROPERTY on UNiagaraScriptSource.
+    UNiagaraScriptSourceBase* SourceBase = TargetScript->GetLatestSource();
+    UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(SourceBase);
+    if (!Source || !Source->NodeGraph)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Script '%s' has no source graph"), *TargetScript->GetPathName()));
+    }
+
+    UNiagaraNodeOutput* OutputNode = nullptr;
+    for (const TObjectPtr<UEdGraphNode>& NodePtr : Source->NodeGraph->Nodes)
+    {
+        UNiagaraNodeOutput* Candidate = Cast<UNiagaraNodeOutput>(NodePtr.Get());
+        if (Candidate && Candidate->GetUsage() == TargetUsage)
+        {
+            OutputNode = Candidate;
+            break;
+        }
+    }
+    if (!OutputNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find a UNiagaraNodeOutput for stage '%s' in script '%s'"),
+                *CanonicalStage, *TargetScript->GetPathName()));
+    }
+
+    // AddScriptModuleToStack is the documented public surface
+    // (NIAGARAEDITOR_API). The function spawns a UNiagaraNodeFunctionCall
+    // wrapping the module script, wires it into the stage's parameter
+    // map chain, and patches up the UPROPERTYs that the stack viewmodel
+    // refreshes automatically.
+    UNiagaraNodeFunctionCall* NewModuleNode =
+        FNiagaraStackGraphUtilities::AddScriptModuleToStack(
+            ModuleScript, *OutputNode, TargetIndex, SuggestedName);
+    if (!NewModuleNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("FNiagaraStackGraphUtilities::AddScriptModuleToStack returned null for module '%s' on stage '%s'"),
+                *ModuleScript->GetPathName(), *CanonicalStage));
+    }
+
+    // Mark the source as desynchronised so the next compile re-runs.
+    SourceBase->MarkNotSynchronized(TEXT("Sproft niagara_edit add_module_to_stage"));
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("add_module_to_stage"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("emitter_handle"), MatchedHandle->GetName().ToString());
+    Out->SetNumberField(TEXT("emitter_handle_index"), HandleIndex);
+    Out->SetStringField(TEXT("stage"), CanonicalStage);
+    Out->SetStringField(TEXT("module"), ModuleScript->GetPathName());
+    Out->SetStringField(TEXT("module_node"), NewModuleNode->GetName());
+    Out->SetStringField(TEXT("module_node_guid"), NewModuleNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+    if (TargetIndex != INDEX_NONE)
+    {
+        Out->SetNumberField(TEXT("target_index"), TargetIndex);
+    }
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit add_module_to_stage requires WITH_EDITORONLY_DATA"));
 #endif
 }
