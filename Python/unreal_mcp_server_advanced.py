@@ -3009,6 +3009,11 @@ def widget_edit(
     parent_name: Optional[str] = None,
     text: Optional[str] = None,
     properties: Optional[Dict[str, Any]] = None,
+    animation_name: Optional[str] = None,
+    duration: Optional[float] = None,
+    display_rate: Optional[float] = None,
+    track_class: Optional[str] = None,
+    property_path: Optional[str] = None,
     expose_as_variable: bool = True,
     save: bool = True,
     overwrite: bool = False,
@@ -3016,8 +3021,8 @@ def widget_edit(
     """
     Edit a Widget Blueprint asset.
 
-    Mirrors a small slice of the hosted Flop "widget_edit" tool. Three
-    operations are supported:
+    Mirrors a small slice of the hosted Flop "widget_edit" tool. The
+    operations are:
         - "create_widget_blueprint": create a UWidgetBlueprint at a path with
           a parent UUserWidget class and an optional root panel class.
         - "add_child_widget": construct a named widget (e.g. vertical_box,
@@ -3029,6 +3034,15 @@ def widget_edit(
           any other UPanelSlot-derived class without us spelling out each
           property by name. Properties go through
           ``FProperty::ImportText_InContainer``.
+        - "add_animation": append a UWidgetAnimation to the WBP's
+          ``Animations`` array. The new animation owns a fresh UMovieScene
+          whose playback range covers ``[0, duration]`` seconds at a chosen
+          display rate (default 20 fps).
+        - "add_animation_track": append a UMovieSceneTrack subclass against
+          an existing animation, scoped to the binding for a target widget
+          by FName. The first call for a given target widget spawns a fresh
+          possessable + FWidgetAnimationBinding pair so the runtime can
+          resolve the binding GUID back to the widget.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3105,6 +3119,16 @@ def widget_edit(
         params["text"] = text
     if properties is not None:
         params["properties"] = properties
+    if animation_name is not None:
+        params["animation_name"] = animation_name
+    if duration is not None:
+        params["duration"] = duration
+    if display_rate is not None:
+        params["display_rate"] = display_rate
+    if track_class is not None:
+        params["track_class"] = track_class
+    if property_path is not None:
+        params["property_path"] = property_path
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite

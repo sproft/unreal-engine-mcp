@@ -1,6 +1,8 @@
 #include "Commands/SproftWidgetEditCommands.h"
 #include "Commands/EpicUnrealMCPCommonUtils.h"
 
+#include "Animation/WidgetAnimation.h"
+#include "Animation/WidgetAnimationBinding.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
@@ -24,6 +26,8 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/OutputDeviceNull.h"
+#include "MovieScene.h"
+#include "MovieSceneTrack.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/Package.h"
@@ -282,9 +286,18 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetSlotProperty(Params);
     }
+    if (Operation == TEXT("add_animation") || Operation == TEXT("create_animation"))
+    {
+        return AddAnimation(Params);
+    }
+    if (Operation == TEXT("add_animation_track") || Operation == TEXT("add_track")
+        || Operation == TEXT("animation_add_track"))
+    {
+        return AddAnimationTrack(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -660,6 +673,413 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetSlotProperty(const TShared
     ResultObj->SetArrayField(TEXT("skipped"), SkippedJson);
     ResultObj->SetNumberField(TEXT("applied_count"), AppliedJson.Num());
     ResultObj->SetNumberField(TEXT("skipped_count"), SkippedJson.Num());
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Resolve a UMovieSceneTrack subclass by short token, full
+     *  `/Script/Module.ClassName` path, or bare class name. Mirrors the
+     *  resolver `sequencer_edit add_track` uses, narrowed to the tracks
+     *  designers actually drop on a Widget animation (transform-style
+     *  tracks plus the property tracks UMG materializes most often). */
+    UClass* WidgetEdit_ResolveTrackClass(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        const FString Lower = Token.ToLower();
+        struct FShortTokenMap
+        {
+            const TCHAR* Token;
+            const TCHAR* Path;
+        };
+        static const FShortTokenMap Map[] = {
+            { TEXT("float"),     TEXT("/Script/MovieSceneTracks.MovieSceneFloatTrack") },
+            { TEXT("color"),     TEXT("/Script/MovieSceneTracks.MovieSceneColorTrack") },
+            { TEXT("vector"),    TEXT("/Script/MovieSceneTracks.MovieSceneVectorTrack") },
+            { TEXT("vector2d"),  TEXT("/Script/MovieSceneTracks.MovieSceneVectorTrack") },
+            { TEXT("transform"), TEXT("/Script/MovieSceneTracks.MovieScene3DTransformTrack") },
+            { TEXT("visibility"),TEXT("/Script/MovieSceneTracks.MovieSceneVisibilityTrack") },
+            { TEXT("bool"),      TEXT("/Script/MovieSceneTracks.MovieSceneBoolTrack") },
+            { TEXT("byte"),      TEXT("/Script/MovieSceneTracks.MovieSceneByteTrack") },
+            { TEXT("event"),     TEXT("/Script/MovieSceneTracks.MovieSceneEventTrack") },
+            { TEXT("audio"),     TEXT("/Script/MovieSceneTracks.MovieSceneAudioTrack") },
+            { TEXT("material"),  TEXT("/Script/MovieSceneTracks.MovieSceneComponentMaterialTrack") },
+        };
+        for (const FShortTokenMap& Entry : Map)
+        {
+            if (Lower == Entry.Token)
+            {
+                if (UClass* Loaded = LoadClass<UMovieSceneTrack>(nullptr, Entry.Path))
+                {
+                    return Loaded;
+                }
+            }
+        }
+
+        if (Token.StartsWith(TEXT("/Script/")))
+        {
+            if (UClass* Loaded = LoadClass<UMovieSceneTrack>(nullptr, *Token))
+            {
+                return Loaded;
+            }
+        }
+        if (UClass* Found = FindObject<UClass>(nullptr, *Token))
+        {
+            if (Found->IsChildOf(UMovieSceneTrack::StaticClass()))
+            {
+                return Found;
+            }
+        }
+        const FString TracksPath = FString::Printf(TEXT("/Script/MovieSceneTracks.%s"), *Token);
+        if (UClass* Loaded = LoadClass<UMovieSceneTrack>(nullptr, *TracksPath))
+        {
+            return Loaded;
+        }
+        return nullptr;
+    }
+
+    /** Locate a UWidgetAnimation by FName on a target UWidgetBlueprint.
+     *  Matches against the sub-object name (which is what the editor
+     *  surfaces in the Animations panel) and falls back to the
+     *  asset's display label. */
+    UWidgetAnimation* WidgetEdit_FindAnimation(UWidgetBlueprint* WBP, const FString& AnimationName)
+    {
+        if (!WBP || AnimationName.IsEmpty())
+        {
+            return nullptr;
+        }
+        const FName TargetName(*AnimationName);
+        for (TObjectPtr<UWidgetAnimation>& Anim : WBP->Animations)
+        {
+            UWidgetAnimation* Cur = Anim.Get();
+            if (!Cur)
+            {
+                continue;
+            }
+            if (Cur->GetFName() == TargetName)
+            {
+                return Cur;
+            }
+            if (Cur->GetName().Equals(AnimationName, ESearchCase::IgnoreCase))
+            {
+                return Cur;
+            }
+#if WITH_EDITOR
+            if (Cur->GetDisplayLabel().Equals(AnimationName, ESearchCase::IgnoreCase))
+            {
+                return Cur;
+            }
+#endif
+        }
+        return nullptr;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddAnimation(const TSharedPtr<FJsonObject>& Params)
+{
+    FString WidgetBlueprintPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WidgetBlueprintPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+
+    FString AnimationName;
+    if (!Params->TryGetStringField(TEXT("animation_name"), AnimationName)
+        && !Params->TryGetStringField(TEXT("name"), AnimationName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'animation_name' parameter"));
+    }
+
+    double Duration = 1.0;
+    if (Params->HasField(TEXT("duration")))
+    {
+        Duration = Params->GetNumberField(TEXT("duration"));
+    }
+    else if (Params->HasField(TEXT("duration_seconds")))
+    {
+        Duration = Params->GetNumberField(TEXT("duration_seconds"));
+    }
+    if (Duration <= 0.0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'duration' must be greater than zero, got %f"), Duration));
+    }
+
+    double DisplayRateNumerator = 20.0;
+    double DisplayRateDenominator = 1.0;
+    if (Params->HasField(TEXT("display_rate")))
+    {
+        DisplayRateNumerator = Params->GetNumberField(TEXT("display_rate"));
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    UObject* Loaded = UEditorAssetLibrary::LoadAsset(WidgetBlueprintPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(Loaded);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WidgetBlueprintPath));
+    }
+
+    // Refuse a duplicate name to keep the variable surface stable; the editor
+    // does the same when the user types a duplicate label.
+    const FName TargetName(*AnimationName);
+    for (const TObjectPtr<UWidgetAnimation>& Existing : WBP->Animations)
+    {
+        if (UWidgetAnimation* Cur = Existing.Get())
+        {
+            if (Cur->GetFName() == TargetName
+                || Cur->GetName().Equals(AnimationName, ESearchCase::IgnoreCase))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("An animation named '%s' already exists on %s"), *AnimationName, *WidgetBlueprintPath));
+            }
+        }
+    }
+
+    UWidgetAnimation* NewAnim = NewObject<UWidgetAnimation>(WBP, TargetName, RF_Transactional);
+    if (!NewAnim)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to construct UWidgetAnimation"));
+    }
+
+    UMovieScene* NewScene = NewObject<UMovieScene>(NewAnim, TargetName, RF_Transactional);
+    if (!NewScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to construct UMovieScene for animation"));
+    }
+    NewAnim->MovieScene = NewScene;
+#if WITH_EDITOR
+    NewAnim->SetDisplayLabel(AnimationName);
+#endif
+
+    // Match the AnimationTabSummoner default: 20 fps display rate. The
+    // tick resolution stays on the engine default which is what the
+    // Sequencer editor uses for new widget animations.
+    NewScene->SetDisplayRate(FFrameRate(
+        FMath::Max<int32>(1, static_cast<int32>(DisplayRateNumerator)),
+        FMath::Max<int32>(1, static_cast<int32>(DisplayRateDenominator))));
+
+    const FFrameTime EndFrame = Duration * NewScene->GetTickResolution();
+    // The MovieScene uses an inclusive start / exclusive end bound, so we
+    // bump the end by one tick to mirror the AnimationTabSummoner pattern.
+    NewScene->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), EndFrame.FrameNumber + 1));
+#if WITH_EDITORONLY_DATA
+    NewScene->GetEditorData().WorkStart = 0.0;
+    NewScene->GetEditorData().WorkEnd = static_cast<float>(Duration);
+#endif
+
+    WBP->Animations.Add(NewAnim);
+    WBP->OnVariableAdded(TargetName);
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+    if (UPackage* Package = WBP->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WidgetBlueprintPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_animation"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WidgetBlueprintPath);
+    ResultObj->SetStringField(TEXT("animation_name"), AnimationName);
+    ResultObj->SetNumberField(TEXT("duration"), Duration);
+    ResultObj->SetNumberField(TEXT("display_rate_numerator"), DisplayRateNumerator);
+    ResultObj->SetNumberField(TEXT("display_rate_denominator"), DisplayRateDenominator);
+    ResultObj->SetNumberField(TEXT("animation_count"), WBP->Animations.Num());
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddAnimationTrack(const TSharedPtr<FJsonObject>& Params)
+{
+    FString WidgetBlueprintPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WidgetBlueprintPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+
+    FString AnimationName;
+    if (!Params->TryGetStringField(TEXT("animation_name"), AnimationName)
+        && !Params->TryGetStringField(TEXT("animation"), AnimationName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'animation_name' parameter"));
+    }
+
+    FString TargetWidgetName;
+    if (!Params->TryGetStringField(TEXT("widget_name"), TargetWidgetName)
+        && !Params->TryGetStringField(TEXT("target_widget"), TargetWidgetName)
+        && !Params->TryGetStringField(TEXT("target"), TargetWidgetName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_name' parameter (target widget on the WBP for the binding)"));
+    }
+
+    FString TrackToken;
+    if (!Params->TryGetStringField(TEXT("track_class"), TrackToken)
+        && !Params->TryGetStringField(TEXT("class"), TrackToken)
+        && !Params->TryGetStringField(TEXT("track"), TrackToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'track_class' parameter"));
+    }
+
+    FString PropertyPath;
+    Params->TryGetStringField(TEXT("property_path"), PropertyPath);
+    if (PropertyPath.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("property"), PropertyPath);
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    UObject* Loaded = UEditorAssetLibrary::LoadAsset(WidgetBlueprintPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(Loaded);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WidgetBlueprintPath));
+    }
+
+    UWidgetAnimation* Animation = WidgetEdit_FindAnimation(WBP, AnimationName);
+    if (!Animation)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find animation '%s' on %s. Run widget_edit add_animation first."), *AnimationName, *WidgetBlueprintPath));
+    }
+    UMovieScene* MovieScene = Animation->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Animation '%s' has no UMovieScene; widget_edit add_animation will repair this asset."), *AnimationName));
+    }
+
+    if (!WBP->WidgetTree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("WidgetBlueprint has no WidgetTree"));
+    }
+    UWidget* TargetWidget = WBP->WidgetTree->FindWidget(FName(*TargetWidgetName));
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find target widget '%s' in %s"), *TargetWidgetName, *WidgetBlueprintPath));
+    }
+
+    UClass* TrackClass = WidgetEdit_ResolveTrackClass(TrackToken);
+    if (!TrackClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve track class '%s'. Pass a short token (float / color / vector / transform / visibility / event / material / audio) or a UMovieSceneTrack subclass path."), *TrackToken));
+    }
+
+    // Reuse an existing FWidgetAnimationBinding for the same widget, or
+    // create a fresh possessable + binding pair. This mirrors how the
+    // editor wires a new track on an existing widget row in the Sequencer
+    // panel: one MovieScene possessable + one FWidgetAnimationBinding the
+    // runtime maps back through.
+    FGuid BindingGuid;
+    bool bReusedBinding = false;
+    for (const FWidgetAnimationBinding& ExistingBind : Animation->GetBindings())
+    {
+        if (ExistingBind.WidgetName == TargetWidget->GetFName())
+        {
+            BindingGuid = ExistingBind.AnimationGuid;
+            bReusedBinding = true;
+            break;
+        }
+    }
+
+    if (!BindingGuid.IsValid())
+    {
+        BindingGuid = MovieScene->AddPossessable(TargetWidget->GetName(), TargetWidget->GetClass());
+        if (!BindingGuid.IsValid())
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("UMovieScene::AddPossessable failed for widget '%s'"), *TargetWidgetName));
+        }
+
+        // Wire the runtime binding so playback resolves the GUID back to
+        // this UWidget once the preview / live UUserWidget instances spin up.
+        // UWidgetAnimation::BindPossessableObject expects a UUserWidget
+        // context that does not exist at asset-author time, so we write the
+        // FWidgetAnimationBinding row directly. UMG's runtime resolution
+        // path goes through FWidgetAnimationBinding::FindRuntimeObject,
+        // which takes a WidgetTree + UUserWidget pair, so the binding row
+        // is enough to round-trip the GUID at play time.
+        FWidgetAnimationBinding NewBinding;
+        NewBinding.WidgetName = TargetWidget->GetFName();
+        NewBinding.AnimationGuid = BindingGuid;
+        NewBinding.bIsRootWidget = (WBP->WidgetTree->RootWidget == TargetWidget);
+        Animation->AnimationBindings.Add(NewBinding);
+    }
+
+    UMovieSceneTrack* NewTrack = MovieScene->AddTrack(TrackClass, BindingGuid);
+    if (!NewTrack)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UMovieScene::AddTrack returned null for class '%s' on binding for widget '%s'"), *TrackClass->GetName(), *TargetWidgetName));
+    }
+
+    // Property tracks expect a property path ImportText'd onto the
+    // reflected `PropertyPath` member; rather than tying us to per-class
+    // includes for every property-track subclass, we route through the
+    // reflection database. Older property-track classes use FName
+    // PropertyName + FString PropertyPath; newer ones consolidate on a
+    // PropertyPath name. We write whichever one the resolved class
+    // declares. Designers calling without a property_path (transform /
+    // visibility / event / material on a component slot) leave this
+    // alone; the next Sequencer panel open populates the row.
+    bool bAppliedPropertyPath = false;
+    if (!PropertyPath.IsEmpty())
+    {
+        FOutputDeviceNull NullDevice;
+        for (const TCHAR* PropName : { TEXT("PropertyPath"), TEXT("PropertyName") })
+        {
+            if (FProperty* Prop = FindFProperty<FProperty>(TrackClass, FName(PropName)))
+            {
+                if (Prop->ImportText_InContainer(*PropertyPath, NewTrack, NewTrack, PPF_None, &NullDevice) != nullptr)
+                {
+                    bAppliedPropertyPath = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+    if (UPackage* Package = WBP->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WidgetBlueprintPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_animation_track"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WidgetBlueprintPath);
+    ResultObj->SetStringField(TEXT("animation_name"), AnimationName);
+    ResultObj->SetStringField(TEXT("widget_name"), TargetWidgetName);
+    ResultObj->SetStringField(TEXT("track_class"), TrackClass->GetName());
+    ResultObj->SetStringField(TEXT("track_class_path"), TrackClass->GetPathName());
+    ResultObj->SetStringField(TEXT("binding_guid"), BindingGuid.ToString(EGuidFormats::DigitsWithHyphens));
+    ResultObj->SetBoolField(TEXT("reused_binding"), bReusedBinding);
+    if (!PropertyPath.IsEmpty())
+    {
+        ResultObj->SetStringField(TEXT("property_path"), PropertyPath);
+        ResultObj->SetBoolField(TEXT("property_path_applied"), bAppliedPropertyPath);
+    }
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }
