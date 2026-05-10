@@ -195,7 +195,11 @@ TSharedPtr<FJsonObject> FSproftPerformanceAuditCommands::HandlePerformanceAudit(
             { TEXT("rhi"),    &StatData->RHITTimes },
             { TEXT("gpu"),    &GPU0 },
         };
-        TSharedPtr<FJsonObject> SamplesObj = bIncludeSamples ? MakeShared<FJsonObject>() : nullptr;
+        TSharedPtr<FJsonObject> SamplesObj;
+        if (bIncludeSamples)
+        {
+            SamplesObj = MakeShared<FJsonObject>();
+        }
         for (const FMetricRow& Row : Rows)
         {
             if (!MetricEnabled(Row.Token))

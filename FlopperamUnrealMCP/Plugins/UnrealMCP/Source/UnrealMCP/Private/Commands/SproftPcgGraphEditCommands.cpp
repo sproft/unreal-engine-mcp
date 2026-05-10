@@ -782,12 +782,15 @@ TSharedPtr<FJsonObject> FSproftPcgGraphEditCommands::HandleSetNodeSettings(const
     // Fire the editor change machinery: PostEditChangeProperty on the
     // settings subobject (so the engine's own listeners that listen
     // through PostEditChangeProperty fire), then broadcast the node-
-    // change delegate so any open PCG editor refreshes.
+    // change delegate so any open PCG editor refreshes. UE 5.7
+    // tightened UPCGSettings::PostEditChangeProperty to protected, so
+    // we cast back up to UObject (the base declaration is public) to
+    // dispatch the virtual.
     if (AppliedArr.Num() > 0)
     {
         FProperty* AnyProp = nullptr;
         FPropertyChangedEvent ChangeEvent(AnyProp, EPropertyChangeType::ValueSet);
-        Settings->PostEditChangeProperty(ChangeEvent);
+        static_cast<UObject*>(Settings)->PostEditChangeProperty(ChangeEvent);
         Node->OnNodeChangedDelegate.Broadcast(Node, EPCGChangeType::Settings);
     }
 

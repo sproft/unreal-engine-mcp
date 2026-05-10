@@ -298,7 +298,10 @@ TSharedPtr<FJsonObject> FSproftActorInspectCommands::HandleActorInspect(const TS
     Result->SetBoolField(TEXT("replicates"), Actor->GetIsReplicated());
     Result->SetBoolField(TEXT("replicates_movement"), Actor->IsReplicatingMovement());
     Result->SetNumberField(TEXT("net_priority"), Actor->NetPriority);
-    Result->SetNumberField(TEXT("net_update_frequency"), Actor->NetUpdateFrequency);
+    // 5.7 demoted public access to AActor::NetUpdateFrequency in
+    // favour of the GetNetUpdateFrequency() / SetNetUpdateFrequency()
+    // accessor pair; the accessor pair compiles on 5.5 / 5.6 too.
+    Result->SetNumberField(TEXT("net_update_frequency"), Actor->GetNetUpdateFrequency());
 
     if (USceneComponent* Root = Actor->GetRootComponent())
     {

@@ -8,6 +8,7 @@
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "GameplayEffect.h"
+#include "GameplayEffectExecutionCalculation.h"
 #include "GameplayEffectComponent.h"
 #include "GameplayEffectComponents/AssetTagsGameplayEffectComponent.h"
 #include "GameplayEffectComponents/BlockAbilityTagsGameplayEffectComponent.h"
@@ -278,33 +279,83 @@ namespace
     {
         Out->SetStringField(TEXT("kind"), TEXT("gameplay_ability"));
         Out->SetArrayField(TEXT("ability_tags"), TagContainerToJson(Ability->GetAssetTags()));
-        Out->SetArrayField(TEXT("cancel_abilities_with_tag"), TagContainerToJson(Ability->CancelAbilitiesWithTag));
-        Out->SetArrayField(TEXT("block_abilities_with_tag"), TagContainerToJson(Ability->BlockAbilitiesWithTag));
-        Out->SetArrayField(TEXT("activation_owned_tags"), TagContainerToJson(Ability->ActivationOwnedTags));
-        Out->SetArrayField(TEXT("activation_required_tags"), TagContainerToJson(Ability->ActivationRequiredTags));
-        Out->SetArrayField(TEXT("activation_blocked_tags"), TagContainerToJson(Ability->ActivationBlockedTags));
-        Out->SetArrayField(TEXT("source_required_tags"), TagContainerToJson(Ability->SourceRequiredTags));
-        Out->SetArrayField(TEXT("source_blocked_tags"), TagContainerToJson(Ability->SourceBlockedTags));
-        Out->SetArrayField(TEXT("target_required_tags"), TagContainerToJson(Ability->TargetRequiredTags));
-        Out->SetArrayField(TEXT("target_blocked_tags"), TagContainerToJson(Ability->TargetBlockedTags));
 
-        if (UClass* CostClass = Ability->CostGameplayEffectClass.Get())
+        // UE 5.7 tightened the visibility on every reflected tag-
+        // container field on UGameplayAbility from public to
+        // protected. The fields stay reflected (UPROPERTY-decorated)
+        // so we go through the reflection accessor here instead of
+        // the direct member; this stays clean-room (we are reading
+        // through the public reflection database, not friending the
+        // class) and keeps the code compatible with 5.5 / 5.6 builds
+        // where the same members were public.
+        UClass* AbilityClass = Ability->GetClass();
+        auto ReadTagContainerByName = [&](const TCHAR* PropName) -> FGameplayTagContainer
+        {
+            FStructProperty* StructProp = FindFProperty<FStructProperty>(AbilityClass, FName(PropName));
+            if (!StructProp || StructProp->Struct != TBaseStructure<FGameplayTagContainer>::Get())
+            {
+                return FGameplayTagContainer();
+            }
+            const FGameplayTagContainer* Ptr = StructProp->ContainerPtrToValuePtr<FGameplayTagContainer>(Ability);
+            return Ptr ? *Ptr : FGameplayTagContainer();
+        };
+        Out->SetArrayField(TEXT("cancel_abilities_with_tag"),
+            TagContainerToJson(ReadTagContainerByName(TEXT("CancelAbilitiesWithTag"))));
+        Out->SetArrayField(TEXT("block_abilities_with_tag"),
+            TagContainerToJson(ReadTagContainerByName(TEXT("BlockAbilitiesWithTag"))));
+        Out->SetArrayField(TEXT("activation_owned_tags"),
+            TagContainerToJson(ReadTagContainerByName(TEXT("ActivationOwnedTags"))));
+        Out->SetArrayField(TEXT("activation_required_tags"),
+            TagContainerToJson(ReadTagContainerByName(TEXT("ActivationRequiredTags"))));
+        Out->SetArrayField(TEXT("activation_blocked_tags"),
+            TagContainerToJson(ReadTagContainerByName(TEXT("ActivationBlockedTags"))));
+        Out->SetArrayField(TEXT("source_required_tags"),
+            TagContainerToJson(ReadTagContainerByName(TEXT("SourceRequiredTags"))));
+        Out->SetArrayField(TEXT("source_blocked_tags"),
+            TagContainerToJson(ReadTagContainerByName(TEXT("SourceBlockedTags"))));
+        Out->SetArrayField(TEXT("target_required_tags"),
+            TagContainerToJson(ReadTagContainerByName(TEXT("TargetRequiredTags"))));
+        Out->SetArrayField(TEXT("target_blocked_tags"),
+            TagContainerToJson(ReadTagContainerByName(TEXT("TargetBlockedTags"))));
+
+        auto ReadClassByName = [&](const TCHAR* PropName) -> UClass*
+        {
+            FClassProperty* ClassProp = FindFProperty<FClassProperty>(AbilityClass, FName(PropName));
+            if (!ClassProp)
+            {
+                return nullptr;
+            }
+            const TSubclassOf<UObject>* Ptr = ClassProp->ContainerPtrToValuePtr<TSubclassOf<UObject>>(Ability);
+            return Ptr ? Ptr->Get() : nullptr;
+        };
+        if (UClass* CostClass = ReadClassByName(TEXT("CostGameplayEffectClass")))
         {
             Out->SetStringField(TEXT("cost_gameplay_effect_class"), CostClass->GetPathName());
         }
-        if (UClass* CooldownClass = Ability->CooldownGameplayEffectClass.Get())
+        if (UClass* CooldownClass = ReadClassByName(TEXT("CooldownGameplayEffectClass")))
         {
             Out->SetStringField(TEXT("cooldown_gameplay_effect_class"), CooldownClass->GetPathName());
         }
 
-        // Triggers (e.g. on_gameplay_event with a tag).
+        // Triggers (e.g. on_gameplay_event with a tag). Same visibility
+        // tightening on `AbilityTriggers`; reflection-walk the array.
         TArray<TSharedPtr<FJsonValue>> TriggerArr;
-        for (const FAbilityTriggerData& Trigger : Ability->AbilityTriggers)
+        if (FArrayProperty* TriggersProp = FindFProperty<FArrayProperty>(AbilityClass, TEXT("AbilityTriggers")))
         {
-            TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
-            Row->SetStringField(TEXT("trigger_tag"), Trigger.TriggerTag.ToString());
-            Row->SetNumberField(TEXT("trigger_source"), static_cast<int32>(Trigger.TriggerSource));
-            TriggerArr.Add(MakeShared<FJsonValueObject>(Row));
+            FScriptArrayHelper Helper(TriggersProp, TriggersProp->ContainerPtrToValuePtr<void>(Ability));
+            FStructProperty* InnerStructProp = CastField<FStructProperty>(TriggersProp->Inner);
+            if (InnerStructProp && InnerStructProp->Struct == FAbilityTriggerData::StaticStruct())
+            {
+                for (int32 I = 0; I < Helper.Num(); ++I)
+                {
+                    const FAbilityTriggerData* Trigger =
+                        reinterpret_cast<const FAbilityTriggerData*>(Helper.GetRawPtr(I));
+                    TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+                    Row->SetStringField(TEXT("trigger_tag"), Trigger->TriggerTag.ToString());
+                    Row->SetNumberField(TEXT("trigger_source"), static_cast<int32>(Trigger->TriggerSource));
+                    TriggerArr.Add(MakeShared<FJsonValueObject>(Row));
+                }
+            }
         }
         Out->SetArrayField(TEXT("triggers"), TriggerArr);
     }
