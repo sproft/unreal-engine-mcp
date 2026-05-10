@@ -61,6 +61,7 @@ public class UnrealMCP : ModuleRules
 				"RenderCore",         // For GGameThreadTime / GRenderThreadTime / GRHIThreadTime (Sproft performance_audit)
 				"RHI",                // For GGPUFrameTime (Sproft performance_audit)
 				"MetasoundEngine",    // For UMetaSoundSource / UMetaSoundPatch (Sproft metasound_edit)
+				"MetasoundFrontend",  // For FMetasoundFrontendClassName::Parse / GetFullName (Sproft metasound_edit)
 				"IKRig",              // For UIKRetargeter / FRetargetChainMapping / FInstancedStruct ops (Sproft ik_retarget)
 				"GeometryCollectionEngine", // For UGeometryCollection (Sproft chaos_edit)
 				"Chaos",              // For FGeometryCollection / FTransformCollection managed-array data (Sproft chaos_edit)

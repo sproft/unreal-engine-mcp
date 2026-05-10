@@ -13,12 +13,22 @@
 #include "UObject/UnrealType.h"
 
 #if WITH_EDITOR
+#include "AnimGraphNode_AssetPlayerBase.h"
 #include "AnimGraphNode_StateMachineBase.h"
+#include "AnimGraphNode_StateResult.h"
 #include "AnimStateNode.h"
+#include "AnimStateNodeBase.h"
+#include "AnimStateTransitionNode.h"
+#include "AnimationStateGraph.h"
 #include "AnimationStateMachineGraph.h"
 #include "AnimationStateMachineSchema.h"
+#include "Animation/AnimationAsset.h"
+#include "Animation/AnimSequenceBase.h"
+#include "Animation/BlendSpace.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -108,8 +118,16 @@ TSharedPtr<FJsonObject> FSproftAnimationGraphEditCommands::HandleCommand(const F
     {
         return HandleAddState(Params);
     }
+    if (Op.Equals(TEXT("add_transition"), ESearchCase::IgnoreCase))
+    {
+        return HandleAddTransition(Params);
+    }
+    if (Op.Equals(TEXT("set_state_animation"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetStateAnimation(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("animation_graph_edit: unsupported op '%s'. Supported: inspect, add_state"), *Op));
+        FString::Printf(TEXT("animation_graph_edit: unsupported op '%s'. Supported: inspect, add_state, add_transition, set_state_animation"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationGraphEditCommands::HandleAnimationGraphInspect(const TSharedPtr<FJsonObject>& Params)
@@ -542,6 +560,419 @@ TSharedPtr<FJsonObject> FSproftAnimationGraphEditCommands::HandleAddState(const 
         Out->SetStringField(TEXT("bound_graph"), BoundGraph->GetName());
         Out->SetStringField(TEXT("bound_graph_path"), BoundGraph->GetPathName());
     }
+    Out->SetBoolField(TEXT("compiled"), bCompile);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#endif
+}
+
+#if WITH_EDITOR
+namespace
+{
+    /** Read a UAnimStateNode from the supplied state-machine graph by
+     *  case-insensitive FName / GetStateName() match. Returns null when
+     *  no state matches. */
+    UAnimStateNode* AnimationGraphEdit_FindStateByName(UAnimationStateMachineGraph* Graph, const FString& StateName)
+    {
+        if (!Graph || StateName.IsEmpty()) return nullptr;
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (UAnimStateNode* StateNode = Cast<UAnimStateNode>(Node))
+            {
+                if (StateNode->GetFName().ToString().Equals(StateName, ESearchCase::IgnoreCase)
+                    || StateNode->GetStateName().Equals(StateName, ESearchCase::IgnoreCase))
+                {
+                    return StateNode;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    /** Walk a state machine graph for an existing transition between
+     *  the two states. Used by the duplicate-edge guard so we do not
+     *  silently spawn parallel transitions on every call. */
+    UAnimStateTransitionNode* AnimationGraphEdit_FindTransitionBetween(
+        UAnimationStateMachineGraph* Graph, UAnimStateNode* From, UAnimStateNode* To)
+    {
+        if (!Graph || !From || !To) return nullptr;
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (UAnimStateTransitionNode* Transition = Cast<UAnimStateTransitionNode>(Node))
+            {
+                if (Transition->GetPreviousState() == From && Transition->GetNextState() == To)
+                {
+                    return Transition;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    /** Resolve a UAnimationAsset from a `/Game/...` path or short name. */
+    UAnimationAsset* AnimationGraphEdit_ResolveAnimAsset(const FString& Input)
+    {
+        if (Input.IsEmpty()) return nullptr;
+        if (Input.StartsWith(TEXT("/")))
+        {
+            return Cast<UAnimationAsset>(UEditorAssetLibrary::LoadAsset(Input));
+        }
+        FAssetRegistryModule& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        TArray<FAssetData> Found;
+        AssetRegistry.Get().GetAssetsByClass(UAnimationAsset::StaticClass()->GetClassPathName(), Found, /*bSearchSubClasses=*/true);
+        for (const FAssetData& Data : Found)
+        {
+            if (Data.AssetName.ToString().Equals(Input, ESearchCase::IgnoreCase))
+            {
+                return Cast<UAnimationAsset>(Data.GetAsset());
+            }
+        }
+        return nullptr;
+    }
+
+    /** Walk every UAnimGraphNode_AssetPlayerBase already inside the
+     *  state's BoundGraph. Used by set_state_animation so a second
+     *  call swaps the player's asset instead of spawning a parallel
+     *  player. */
+    UAnimGraphNode_AssetPlayerBase* AnimationGraphEdit_FindExistingPlayer(UAnimationStateGraph* StateGraph)
+    {
+        if (!StateGraph) return nullptr;
+        for (UEdGraphNode* Node : StateGraph->Nodes)
+        {
+            if (UAnimGraphNode_AssetPlayerBase* Player = Cast<UAnimGraphNode_AssetPlayerBase>(Node))
+            {
+                return Player;
+            }
+        }
+        return nullptr;
+    }
+}
+#endif
+
+TSharedPtr<FJsonObject> FSproftAnimationGraphEditCommands::HandleAddTransition(const TSharedPtr<FJsonObject>& Params)
+{
+#if !WITH_EDITOR
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("animation_graph_edit add_transition requires WITH_EDITOR (the editor-only AnimGraph module)"));
+#else
+    FString AnimBpParam;
+    if (!Params->TryGetStringField(TEXT("anim_bp"), AnimBpParam)
+        && !Params->TryGetStringField(TEXT("blueprint"), AnimBpParam)
+        && !Params->TryGetStringField(TEXT("path"), AnimBpParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'anim_bp' parameter"));
+    }
+    UAnimBlueprint* AnimBP = ResolveAnimBlueprint(AnimBpParam);
+    if (!AnimBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UAnimBlueprint '%s'"), *AnimBpParam));
+    }
+
+    FString MachineName;
+    if (!Params->TryGetStringField(TEXT("state_machine"), MachineName)
+        && !Params->TryGetStringField(TEXT("machine"), MachineName)
+        && !Params->TryGetStringField(TEXT("machine_name"), MachineName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'state_machine' parameter"));
+    }
+
+    FString FromStateName;
+    if (!Params->TryGetStringField(TEXT("from_state"), FromStateName)
+        && !Params->TryGetStringField(TEXT("from"), FromStateName)
+        && !Params->TryGetStringField(TEXT("previous_state"), FromStateName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'from_state' parameter"));
+    }
+
+    FString ToStateName;
+    if (!Params->TryGetStringField(TEXT("to_state"), ToStateName)
+        && !Params->TryGetStringField(TEXT("to"), ToStateName)
+        && !Params->TryGetStringField(TEXT("next_state"), ToStateName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'to_state' parameter"));
+    }
+
+    UAnimGraphNode_StateMachineBase* StateMachineNode = AnimationGraphEdit_FindStateMachineNode(AnimBP, MachineName);
+    if (!StateMachineNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find state machine '%s' on AnimBP '%s'"), *MachineName, *AnimBP->GetName()));
+    }
+    UAnimationStateMachineGraph* StateMachineGraph = StateMachineNode->EditorStateMachineGraph;
+    if (!StateMachineGraph)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("State machine '%s' has no editor graph (uncompiled or stripped)"), *MachineName));
+    }
+
+    UAnimStateNode* FromState = AnimationGraphEdit_FindStateByName(StateMachineGraph, FromStateName);
+    if (!FromState)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find state '%s' on state machine '%s'"), *FromStateName, *MachineName));
+    }
+    UAnimStateNode* ToState = AnimationGraphEdit_FindStateByName(StateMachineGraph, ToStateName);
+    if (!ToState)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find state '%s' on state machine '%s'"), *ToStateName, *MachineName));
+    }
+    if (FromState == ToState)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("'from_state' and 'to_state' resolve to the same state; transitions need two distinct states"));
+    }
+
+    if (UAnimStateTransitionNode* Existing = AnimationGraphEdit_FindTransitionBetween(StateMachineGraph, FromState, ToState))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Transition '%s' -> '%s' already exists on state machine '%s'"),
+                *FromStateName, *ToStateName, *MachineName));
+    }
+
+    int32 PriorityOrder = 1;
+    double PriorityDouble = 0.0;
+    if (Params->TryGetNumberField(TEXT("priority"), PriorityDouble))
+    {
+        PriorityOrder = static_cast<int32>(PriorityDouble);
+    }
+    else if (Params->TryGetNumberField(TEXT("priority_order"), PriorityDouble))
+    {
+        PriorityOrder = static_cast<int32>(PriorityDouble);
+    }
+
+    bool bCompile = true;
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Lay the transition between the two state pins. We mirror the
+    // canonical engine path that
+    // `UAnimationStateMachineSchema::CreateAutomaticConversionNodeAndConnections`
+    // takes: spawn a UAnimStateTransitionNode through the public
+    // schema-action template (PostPlacedNewNode wires the
+    // BoundGraph that holds the rule sub-graph) and then call
+    // CreateConnections(From, To) so the arrow points the right
+    // direction.
+    const FVector2f Location(
+        (FromState->NodePosX + ToState->NodePosX) * 0.5f,
+        (FromState->NodePosY + ToState->NodePosY) * 0.5f);
+    UAnimStateTransitionNode* TransitionTemplate = NewObject<UAnimStateTransitionNode>();
+    UAnimStateTransitionNode* TransitionNode = FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate<UAnimStateTransitionNode>(
+        StateMachineGraph, TransitionTemplate, Location, /*bSelectNewNode=*/false);
+    if (!TransitionNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("FEdGraphSchemaAction_NewStateNode::PerformAction returned null spawning a transition on state machine '%s'"),
+                *MachineName));
+    }
+
+    TransitionNode->CreateConnections(FromState, ToState);
+    TransitionNode->PriorityOrder = PriorityOrder;
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(AnimBP);
+    if (bCompile)
+    {
+        FCompilerResultsLog Results;
+        FKismetEditorUtilities::CompileBlueprint(AnimBP, EBlueprintCompileOptions::None, &Results);
+    }
+    AnimBP->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(AnimBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("add_transition"));
+    Out->SetStringField(TEXT("anim_bp"), AnimBP->GetPathName());
+    Out->SetStringField(TEXT("state_machine"), MachineName);
+    Out->SetStringField(TEXT("from_state"), FromState->GetStateName());
+    Out->SetStringField(TEXT("to_state"), ToState->GetStateName());
+    Out->SetStringField(TEXT("transition_node"), TransitionNode->GetFName().ToString());
+    Out->SetNumberField(TEXT("priority_order"), TransitionNode->PriorityOrder);
+    if (UEdGraph* RuleGraph = TransitionNode->BoundGraph)
+    {
+        Out->SetStringField(TEXT("bound_graph"), RuleGraph->GetName());
+        Out->SetStringField(TEXT("bound_graph_path"), RuleGraph->GetPathName());
+    }
+    Out->SetBoolField(TEXT("compiled"), bCompile);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#endif
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationGraphEditCommands::HandleSetStateAnimation(const TSharedPtr<FJsonObject>& Params)
+{
+#if !WITH_EDITOR
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("animation_graph_edit set_state_animation requires WITH_EDITOR (the editor-only AnimGraph module)"));
+#else
+    FString AnimBpParam;
+    if (!Params->TryGetStringField(TEXT("anim_bp"), AnimBpParam)
+        && !Params->TryGetStringField(TEXT("blueprint"), AnimBpParam)
+        && !Params->TryGetStringField(TEXT("path"), AnimBpParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'anim_bp' parameter"));
+    }
+    UAnimBlueprint* AnimBP = ResolveAnimBlueprint(AnimBpParam);
+    if (!AnimBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UAnimBlueprint '%s'"), *AnimBpParam));
+    }
+
+    FString MachineName;
+    if (!Params->TryGetStringField(TEXT("state_machine"), MachineName)
+        && !Params->TryGetStringField(TEXT("machine"), MachineName)
+        && !Params->TryGetStringField(TEXT("machine_name"), MachineName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'state_machine' parameter"));
+    }
+
+    FString StateName;
+    if (!Params->TryGetStringField(TEXT("state_name"), StateName)
+        && !Params->TryGetStringField(TEXT("state"), StateName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'state_name' parameter"));
+    }
+
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("animation"), AssetParam)
+        && !Params->TryGetStringField(TEXT("asset"), AssetParam)
+        && !Params->TryGetStringField(TEXT("anim_asset"), AssetParam)
+        && !Params->TryGetStringField(TEXT("sequence"), AssetParam)
+        && !Params->TryGetStringField(TEXT("blend_space"), AssetParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'animation' parameter (UAnimSequence or UBlendSpace path / short name)"));
+    }
+    UAnimationAsset* Asset = AnimationGraphEdit_ResolveAnimAsset(AssetParam);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UAnimationAsset '%s'"), *AssetParam));
+    }
+
+    UAnimGraphNode_StateMachineBase* StateMachineNode = AnimationGraphEdit_FindStateMachineNode(AnimBP, MachineName);
+    if (!StateMachineNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find state machine '%s' on AnimBP '%s'"), *MachineName, *AnimBP->GetName()));
+    }
+    UAnimationStateMachineGraph* StateMachineGraph = StateMachineNode->EditorStateMachineGraph;
+    if (!StateMachineGraph)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("State machine '%s' has no editor graph (uncompiled or stripped)"), *MachineName));
+    }
+    UAnimStateNode* StateNode = AnimationGraphEdit_FindStateByName(StateMachineGraph, StateName);
+    if (!StateNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find state '%s' on state machine '%s'"), *StateName, *MachineName));
+    }
+
+    UAnimationStateGraph* StateGraph = Cast<UAnimationStateGraph>(StateNode->BoundGraph);
+    if (!StateGraph)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("State '%s' has no UAnimationStateGraph BoundGraph"), *StateName));
+    }
+    UAnimGraphNode_StateResult* ResultNode = StateGraph->GetResultNode();
+    if (!ResultNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("State '%s' BoundGraph has no MyResultNode (broken state)"), *StateName));
+    }
+
+    // Resolve the right player class for this asset shape (sequence,
+    // montage, blend space, aim offset, pose asset, etc.). The
+    // helper is the same one the engine calls when an asset is
+    // dropped on an animation graph.
+    UClass* NewNodeClass = GetNodeClassForAsset(Asset->GetClass());
+    if (!NewNodeClass || !NewNodeClass->IsChildOf(UAnimGraphNode_AssetPlayerBase::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No UAnimGraphNode_AssetPlayerBase subclass registered for asset class '%s'"),
+                *Asset->GetClass()->GetName()));
+    }
+
+    bool bSwappedExisting = false;
+    UAnimGraphNode_AssetPlayerBase* PlayerNode = AnimationGraphEdit_FindExistingPlayer(StateGraph);
+    if (PlayerNode && PlayerNode->GetClass() == NewNodeClass)
+    {
+        // Same kind of player already there; just swap its asset.
+        PlayerNode->Modify();
+        PlayerNode->SetAnimationAsset(Asset);
+        PlayerNode->ReconstructNode();
+        bSwappedExisting = true;
+    }
+    else
+    {
+        // No matching player on the graph (or the player class differs,
+        // e.g. swap a sequence player out for a blend space player).
+        // Mirror the engine's drop path: spawn the right player class,
+        // set its asset, attach to the BoundGraph, and wire the
+        // player's pose output to the state's Result pose input.
+        const FVector2f SpawnLocation(ResultNode->NodePosX - 280.0f, ResultNode->NodePosY);
+        UAnimGraphNode_AssetPlayerBase* NewPlayer =
+            NewObject<UAnimGraphNode_AssetPlayerBase>(StateGraph, NewNodeClass, NAME_None, RF_Transactional);
+        if (!NewPlayer)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Failed to NewObject a player node of class '%s' on state '%s'"),
+                    *NewNodeClass->GetName(), *StateName));
+        }
+        StateGraph->AddNode(NewPlayer, /*bFromUI=*/false, /*bSelectNewNode=*/false);
+        NewPlayer->CreateNewGuid();
+        NewPlayer->NodePosX = static_cast<int32>(SpawnLocation.X);
+        NewPlayer->NodePosY = static_cast<int32>(SpawnLocation.Y);
+        NewPlayer->SetAnimationAsset(Asset);
+        NewPlayer->CopySettingsFromAnimationAsset(Asset);
+        NewPlayer->AllocateDefaultPins();
+
+        // Wire the player's pose output into the state's Result pin.
+        // The pose pin on every UAnimGraphNode_AssetPlayerBase is
+        // named "Pose"; use the K2 schema's MakeLinkTo so type checks
+        // run.
+        UEdGraphPin* PlayerPosePin = NewPlayer->FindPin(TEXT("Pose"), EGPD_Output);
+        UEdGraphPin* ResultPosePin = ResultNode->FindPin(TEXT("Result"));
+        if (PlayerPosePin && ResultPosePin)
+        {
+            PlayerPosePin->MakeLinkTo(ResultPosePin);
+        }
+
+        PlayerNode = NewPlayer;
+    }
+
+    bool bCompile = true;
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(AnimBP);
+    if (bCompile)
+    {
+        FCompilerResultsLog Results;
+        FKismetEditorUtilities::CompileBlueprint(AnimBP, EBlueprintCompileOptions::None, &Results);
+    }
+    AnimBP->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(AnimBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_state_animation"));
+    Out->SetStringField(TEXT("anim_bp"), AnimBP->GetPathName());
+    Out->SetStringField(TEXT("state_machine"), MachineName);
+    Out->SetStringField(TEXT("state_name"), StateName);
+    Out->SetStringField(TEXT("animation_path"), Asset->GetPathName());
+    Out->SetStringField(TEXT("animation_class"), Asset->GetClass()->GetName());
+    Out->SetStringField(TEXT("player_class"), PlayerNode->GetClass()->GetName());
+    Out->SetStringField(TEXT("player_node"), PlayerNode->GetFName().ToString());
+    Out->SetBoolField(TEXT("swapped_existing_player"), bSwappedExisting);
     Out->SetBoolField(TEXT("compiled"), bCompile);
     Out->SetBoolField(TEXT("saved"), bSave);
     return Out;

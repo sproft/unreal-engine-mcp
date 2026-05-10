@@ -7503,6 +7503,10 @@ def animation_graph_edit(
     state_machine: Optional[str] = None,
     state_name: Optional[str] = None,
     position: Optional[Dict[str, Any]] = None,
+    from_state: Optional[str] = None,
+    to_state: Optional[str] = None,
+    priority: Optional[int] = None,
+    animation: Optional[str] = None,
     compile: Optional[bool] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
@@ -7532,6 +7536,26 @@ def animation_graph_edit(
           ``PostPlacedNewNode``. The duplicate-name guard surfaces
           a clear error rather than silently spawning a same-named
           state.
+        - ``add_transition``: spawns a ``UAnimStateTransitionNode``
+          between two existing states on the same state machine
+          through the same schema-action template, then runs
+          ``CreateConnections(From, To)`` so the arrow points the
+          right direction. Optional ``priority`` lands on the new
+          node's ``PriorityOrder`` field. The per-transition rule
+          ``BoundGraph`` (the Boolean condition graph) is wired by
+          ``PostPlacedNewNode``. The duplicate-edge guard returns
+          an error rather than spawning a parallel transition.
+        - ``set_state_animation``: writes the per-state animation
+          asset reference into the state's ``BoundGraph``. Resolves
+          the right player class for the asset shape (``UAnimSequence``
+          -> ``UAnimGraphNode_SequencePlayer``, ``UBlendSpace`` ->
+          ``UAnimGraphNode_BlendSpacePlayer``, etc.) through the
+          engine's ``GetNodeClassForAsset(AssetClass)`` helper. If
+          a matching player already lives in the BoundGraph the
+          op swaps its asset; otherwise it spawns a fresh player,
+          calls ``SetAnimationAsset`` + ``CopySettingsFromAnimationAsset``,
+          and wires the player's ``Pose`` output into the state's
+          ``Result`` input pin.
 
     The AnimBP must compile at least once for the baked-state-
     machine surface to populate; uncompiled assets return a
@@ -7542,8 +7566,9 @@ def animation_graph_edit(
     Args:
         anim_bp: Short asset name or ``/Game/...`` UAnimBlueprint
             path. Required.
-        op: Operation discriminator. ``inspect`` (default) or
-            ``add_state``.
+        op: Operation discriminator. ``inspect`` (default),
+            ``add_state``, ``add_transition``, or
+            ``set_state_animation``.
         include_state_machines: Default True.
         include_states: Default True. Per-state details.
         include_transitions: Default True. Per-machine transition
@@ -7564,7 +7589,20 @@ def animation_graph_edit(
         state_name: ``add_state`` only. The new state's FName.
         position: ``add_state`` only. ``{"x": 0, "y": 0}`` 2D
             editor position. Defaults to 0,0.
-        compile: ``add_state`` only. Recompile the AnimBP after
+        from_state: ``add_transition`` only. The source state's
+            FName or display name (case-insensitive).
+        to_state: ``add_transition`` only. The destination state's
+            FName or display name (case-insensitive).
+        priority: ``add_transition`` optional. Sets the new
+            transition's ``PriorityOrder``. Lower values take
+            precedence when multiple transitions out of one state
+            evaluate true on the same frame. Default 1.
+        animation: ``set_state_animation`` only. Path or short
+            name of a ``UAnimSequence`` / ``UBlendSpace`` /
+            ``UAimOffsetBlendSpace`` / ``UPoseAsset`` /
+            ``UAnimMontage`` asset.
+        compile: ``add_state`` / ``add_transition`` /
+            ``set_state_animation``. Recompile the AnimBP after
             the edit. Default True.
         save: Mutating ops. Save the AnimBP to disk. Default True.
 
@@ -7610,6 +7648,14 @@ def animation_graph_edit(
         params["state_name"] = state_name
     if position is not None:
         params["position"] = position
+    if from_state is not None:
+        params["from_state"] = from_state
+    if to_state is not None:
+        params["to_state"] = to_state
+    if priority is not None:
+        params["priority"] = priority
+    if animation is not None:
+        params["animation"] = animation
     if compile is not None:
         params["compile"] = compile
     if save is not None:
