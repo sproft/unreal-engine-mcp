@@ -66,6 +66,10 @@
 		{
 			"Name": "GeometryCollectionPlugin",
 			"Enabled": true
+		},
+		{
+			"Name": "ModelViewViewModel",
+			"Enabled": true
 		}
 	]
 }

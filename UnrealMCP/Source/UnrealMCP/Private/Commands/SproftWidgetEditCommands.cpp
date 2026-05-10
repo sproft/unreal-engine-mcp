@@ -37,6 +37,12 @@
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 #include "WidgetBlueprint.h"
+#include "WidgetBlueprintExtension.h"
+#include "INotifyFieldValueChanged.h"
+#include "MVVMBlueprintView.h"
+#include "MVVMBlueprintViewBinding.h"
+#include "MVVMBlueprintViewModelContext.h"
+#include "MVVMWidgetBlueprintExtension_View.h"
 
 namespace
 {
@@ -304,9 +310,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return AddAnimationKeyframe(Params);
     }
+    if (Operation == TEXT("set_viewmodel") || Operation == TEXT("add_viewmodel")
+        || Operation == TEXT("bind_viewmodel"))
+    {
+        return SetViewModel(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -1436,6 +1447,261 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddAnimationKeyframe(const TS
     }
     ResultObj->SetBoolField(TEXT("section_created"), bSectionCreated);
     ResultObj->SetStringField(TEXT("section_class"), Section->GetClass()->GetName());
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Resolve a UClass for the viewmodel argument. Accepts a full
+     *  `/Script/Module.ClassName` path, a `/Game/...` Blueprint class
+     *  path (auto-suffixed with `_C` if missing), or a short class name
+     *  that we probe against the loaded class set with a `U` prefix
+     *  fallback. The returned class must implement
+     *  `INotifyFieldValueChanged`; UMVVMViewModelBase is the canonical
+     *  parent that does so. */
+    UClass* WidgetEdit_ResolveViewModelClass(const FString& Token, FString& OutReason)
+    {
+        OutReason.Reset();
+        if (Token.IsEmpty())
+        {
+            OutReason = TEXT("empty token");
+            return nullptr;
+        }
+
+        UClass* Resolved = nullptr;
+        if (Token.StartsWith(TEXT("/Script/")))
+        {
+            Resolved = LoadClass<UObject>(nullptr, *Token);
+        }
+        else if (Token.StartsWith(TEXT("/Game/")))
+        {
+            // Blueprint generated classes live at `/Game/Path/AssetName.AssetName_C`.
+            FString WithSuffix = Token;
+            if (!WithSuffix.EndsWith(TEXT("_C")))
+            {
+                int32 DotIdx = INDEX_NONE;
+                if (!WithSuffix.FindChar('.', DotIdx))
+                {
+                    int32 Slash = INDEX_NONE;
+                    if (WithSuffix.FindLastChar('/', Slash))
+                    {
+                        const FString AssetName = WithSuffix.Mid(Slash + 1);
+                        WithSuffix = WithSuffix + TEXT(".") + AssetName + TEXT("_C");
+                    }
+                }
+                else
+                {
+                    WithSuffix = WithSuffix + TEXT("_C");
+                }
+            }
+            Resolved = LoadClass<UObject>(nullptr, *WithSuffix);
+            if (!Resolved)
+            {
+                Resolved = LoadClass<UObject>(nullptr, *Token);
+            }
+        }
+        else
+        {
+            // Short name. Probe loaded classes with a couple of prefix
+            // variants. UClass names omit the `U` prefix in their FName.
+            Resolved = FindObject<UClass>(nullptr, *Token);
+            if (!Resolved && !Token.StartsWith(TEXT("U")))
+            {
+                Resolved = FindObject<UClass>(nullptr, *(TEXT("U") + Token));
+            }
+            if (!Resolved)
+            {
+                const FString Stripped = Token.StartsWith(TEXT("U")) ? Token.Mid(1) : Token;
+                Resolved = FindObject<UClass>(nullptr, *Stripped);
+            }
+        }
+
+        if (!Resolved)
+        {
+            OutReason = FString::Printf(TEXT("Could not resolve viewmodel class '%s'"), *Token);
+            return nullptr;
+        }
+
+        if (!Resolved->ImplementsInterface(UNotifyFieldValueChanged::StaticClass()))
+        {
+            OutReason = FString::Printf(TEXT("Resolved class '%s' does not implement INotifyFieldValueChanged. The MVVM extension requires the viewmodel class to implement the FieldNotification interface (UMVVMViewModelBase is the canonical parent)."),
+                *Resolved->GetPathName());
+            return nullptr;
+        }
+
+        if (Resolved->IsChildOf(UWidget::StaticClass()))
+        {
+            OutReason = FString::Printf(TEXT("Resolved class '%s' derives from UWidget; the MVVM `AllowedClasses` schema disallows widget viewmodels."),
+                *Resolved->GetPathName());
+            return nullptr;
+        }
+
+        return Resolved;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetViewModel(const TSharedPtr<FJsonObject>& Params)
+{
+    // The minimum-cut MVVM op. Routes through
+    //   UWidgetBlueprintExtension::RequestExtension<UMVVMWidgetBlueprintExtension_View>(WBP)
+    // to get-or-create the editor-only MVVM extension on the WBP, then
+    //   UMVVMBlueprintView::AddViewModel(FMVVMBlueprintViewModelContext(Class, Name))
+    // appends the typed viewmodel slot. An optional binding_name also
+    // runs UMVVMBlueprintView::AddDefaultBinding so the asset surfaces a
+    // seeded binding row ready for downstream property-path edits. The
+    // full MVVM surface (conversion functions, two-way bindings,
+    // bindings to widget properties beyond root) stays on the BACKLOG.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+
+    FString ViewModelToken;
+    if (!Params->TryGetStringField(TEXT("viewmodel_class"), ViewModelToken)
+        && !Params->TryGetStringField(TEXT("viewmodel"), ViewModelToken)
+        && !Params->TryGetStringField(TEXT("class"), ViewModelToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'viewmodel_class' parameter (path or short name of a UMVVMViewModelBase subclass)"));
+    }
+
+    FString ViewModelName;
+    Params->TryGetStringField(TEXT("viewmodel_name"), ViewModelName);
+    if (ViewModelName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("name"), ViewModelName);
+    }
+
+    FString BindingName;
+    Params->TryGetStringField(TEXT("binding_name"), BindingName);
+    if (BindingName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("binding"), BindingName);
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+
+    FString ResolveError;
+    UClass* ViewModelClass = WidgetEdit_ResolveViewModelClass(ViewModelToken, ResolveError);
+    if (!ViewModelClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    // Default the viewmodel slot name to the class's display name minus
+    // the `U` prefix when the caller did not pass one.
+    if (ViewModelName.IsEmpty())
+    {
+        FString Default = ViewModelClass->GetName();
+        if (Default.StartsWith(TEXT("U")))
+        {
+            Default = Default.Mid(1);
+        }
+        // Strip a trailing `_C` for Blueprint generated classes.
+        Default.RemoveFromEnd(TEXT("_C"));
+        ViewModelName = Default;
+    }
+
+    // Get-or-create the MVVM extension on the WBP. The templated
+    // RequestExtension overload calls the base class's untyped version
+    // and CastChecked's the result to UMVVMWidgetBlueprintExtension_View.
+    UMVVMWidgetBlueprintExtension_View* MVVMExt =
+        UWidgetBlueprintExtension::RequestExtension<UMVVMWidgetBlueprintExtension_View>(WBP);
+    if (!MVVMExt)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not get-or-create UMVVMWidgetBlueprintExtension_View on '%s'"), *WBPPath));
+    }
+
+    UMVVMBlueprintView* BlueprintView = MVVMExt->GetBlueprintView();
+    bool bViewCreated = false;
+    if (!BlueprintView)
+    {
+        MVVMExt->CreateBlueprintViewInstance();
+        BlueprintView = MVVMExt->GetBlueprintView();
+        bViewCreated = true;
+    }
+    if (!BlueprintView)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("UMVVMWidgetBlueprintExtension_View::CreateBlueprintViewInstance left BlueprintView null"));
+    }
+
+    // Guard against a duplicate viewmodel slot with the same FName.
+    // FindViewModel returns non-null when there's already an entry with
+    // that name; we surface it as an error rather than silently shadow.
+    const FName ViewModelFName(*ViewModelName);
+    if (BlueprintView->FindViewModel(ViewModelFName) != nullptr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Viewmodel '%s' already exists on '%s'. Use a different 'viewmodel_name'."),
+                *ViewModelName, *WBPPath));
+    }
+
+    // Construct and add the new viewmodel context. The single-arg
+    // (Class, Name) constructor sets a fresh ViewModelContextId GUID,
+    // bCreateGetterFunction=true, bCreateSetterFunction=false, and the
+    // default CreationType=CreateInstance which spawns a fresh
+    // viewmodel instance on widget construction. Callers that want a
+    // manual / global / property-path setup can run the eventual
+    // dedicated edit op once shipped.
+    FMVVMBlueprintViewModelContext NewContext(ViewModelClass, ViewModelFName);
+    BlueprintView->AddViewModel(NewContext);
+
+    // Optional default binding row. AddDefaultBinding constructs an
+    // empty FMVVMBlueprintViewBinding with a fresh BindingId and
+    // appends to the BlueprintView's Bindings array. The row's
+    // SourcePath / DestinationPath stay default-empty; downstream
+    // edit ops on the MVVM surface will set both.
+    FGuid BindingId;
+    bool bDefaultBindingAdded = false;
+    if (!BindingName.IsEmpty())
+    {
+        FMVVMBlueprintViewBinding& NewBinding = BlueprintView->AddDefaultBinding();
+        BindingId = NewBinding.BindingId;
+        bDefaultBindingAdded = true;
+    }
+
+    // Mark the WBP as structurally modified so the next compile picks
+    // up the new viewmodel slot. Save the asset by default.
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_viewmodel"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("viewmodel_class"), ViewModelClass->GetPathName());
+    ResultObj->SetStringField(TEXT("viewmodel_name"), ViewModelName);
+    ResultObj->SetBoolField(TEXT("view_created"), bViewCreated);
+    ResultObj->SetNumberField(TEXT("viewmodel_count"), BlueprintView->GetViewModels().Num());
+    if (bDefaultBindingAdded)
+    {
+        ResultObj->SetBoolField(TEXT("binding_added"), true);
+        ResultObj->SetStringField(TEXT("binding_name"), BindingName);
+        ResultObj->SetStringField(TEXT("binding_id"), BindingId.ToString(EGuidFormats::DigitsWithHyphens));
+    }
+    else
+    {
+        ResultObj->SetBoolField(TEXT("binding_added"), false);
+    }
+    ResultObj->SetNumberField(TEXT("binding_count"), BlueprintView->GetNumBindings());
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }

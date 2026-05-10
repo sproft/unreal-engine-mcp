@@ -33,6 +33,22 @@
  *      `FMovieSceneDoubleChannel::AddCubicKey` for the 5.4+ vector track
  *      shape). Vector tracks accept an `[x, y, z, w?]` JSON array routed
  *      to channels 0..N-1; transform tracks take the same vector shape.
+ *   - "set_viewmodel": MVVM minimum cut. Resolves an existing
+ *      UWidgetBlueprint and a UClass implementing
+ *      `INotifyFieldValueChanged` (UMVVMViewModelBase subclasses are the
+ *      canonical case) and routes through
+ *      `UWidgetBlueprintExtension::RequestExtension<UMVVMWidgetBlueprintExtension_View>(WidgetBlueprint)`
+ *      to get-or-create the MVVM extension on the WBP. If the extension
+ *      has no `UMVVMBlueprintView` instance yet we call
+ *      `CreateBlueprintViewInstance()`, then route a new
+ *      `FMVVMBlueprintViewModelContext(ClassPtr, ViewModelName)` through
+ *      `UMVVMBlueprintView::AddViewModel`. An optional `binding_name`
+ *      arg also runs `UMVVMBlueprintView::AddDefaultBinding()` so the
+ *      caller gets one binding row seeded; the row's `SourcePath` /
+ *      `DestinationPath` stay at default ready for downstream
+ *      `set_binding_path` ops. Conversion functions, two-way bindings,
+ *      and bindings to widget properties beyond root stay on the
+ *      BACKLOG.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - FKismetEditorUtilities::CreateBlueprint for asset creation
@@ -64,4 +80,5 @@ private:
     TSharedPtr<FJsonObject> AddAnimation(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddAnimationTrack(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddAnimationKeyframe(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetViewModel(const TSharedPtr<FJsonObject>& Params);
 };

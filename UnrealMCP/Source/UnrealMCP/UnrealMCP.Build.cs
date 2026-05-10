@@ -66,7 +66,9 @@ public class UnrealMCP : ModuleRules
 				"GeometryCollectionEngine", // For UGeometryCollection (Sproft chaos_edit)
 				"Chaos",              // For FGeometryCollection / FTransformCollection managed-array data (Sproft chaos_edit)
 				"ImageWrapper",       // For IImageWrapperModule PNG decode (Sproft landscape_edit)
-				"PCG"                 // For UPCGGraph / UPCGNode / UPCGPin / UPCGEdge (Sproft pcg_graph_edit)
+				"PCG",                // For UPCGGraph / UPCGNode / UPCGPin / UPCGEdge (Sproft pcg_graph_edit)
+				"ModelViewViewModel", // For UMVVMViewModelBase + INotifyFieldValueChanged (Sproft widget_edit set_viewmodel)
+				"FieldNotification"   // For INotifyFieldValueChanged interface check (Sproft widget_edit set_viewmodel)
 			}
 		);
 
@@ -99,7 +101,8 @@ public class UnrealMCP : ModuleRules
 					"NiagaraEditor",       // For UNiagaraSystemFactoryNew::InitializeSystem (Sproft niagara_edit)
 					"IKRigEditor",         // For UIKRigController::SetRetargetRoot / AddRetargetChain / AddNewGoal (Sproft ik_rig_edit)
 					"GeometryCollectionEditor", // For FGeometryCollectionConversion::AppendStaticMesh (Sproft chaos_edit)
-					"AnimGraph"            // For FEdGraphSchemaAction_NewStateNode / UAnimationStateMachineGraph (Sproft animation_graph_edit add_state)
+					"AnimGraph",           // For FEdGraphSchemaAction_NewStateNode / UAnimationStateMachineGraph (Sproft animation_graph_edit add_state)
+					"ModelViewViewModelBlueprint"  // For UMVVMBlueprintView / UMVVMWidgetBlueprintExtension_View / FMVVMBlueprintViewModelContext (Sproft widget_edit set_viewmodel)
 				}
 			);
 		}

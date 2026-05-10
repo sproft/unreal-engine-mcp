@@ -3020,6 +3020,9 @@ def widget_edit(
     value: Optional[Any] = None,
     interpolation: Optional[str] = None,
     channel_offset: Optional[int] = None,
+    viewmodel_class: Optional[str] = None,
+    viewmodel_name: Optional[str] = None,
+    binding_name: Optional[str] = None,
     expose_as_variable: bool = True,
     save: bool = True,
     overwrite: bool = False,
@@ -3065,6 +3068,19 @@ def widget_edit(
           ``constant``; optional ``channel_offset`` lets the caller
           target a non-zero starting channel index on multi-channel
           sections.
+        - "set_viewmodel": MVVM minimum cut. Adds a viewmodel slot to
+          the WBP through the editor-only
+          ``UMVVMWidgetBlueprintExtension_View`` extension. Resolves
+          ``viewmodel_class`` (a class implementing
+          ``INotifyFieldValueChanged``; UMVVMViewModelBase subclasses
+          are the canonical case) and routes through
+          ``UMVVMBlueprintView::AddViewModel`` with a fresh
+          ``FMVVMBlueprintViewModelContext``. Optional
+          ``binding_name`` also runs
+          ``UMVVMBlueprintView::AddDefaultBinding`` so the caller
+          gets one binding row seeded. The full MVVM surface
+          (conversion functions, two-way bindings, bindings to widget
+          properties beyond root) stays on the BACKLOG.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3163,6 +3179,12 @@ def widget_edit(
         params["interpolation"] = interpolation
     if channel_offset is not None:
         params["channel_offset"] = channel_offset
+    if viewmodel_class is not None:
+        params["viewmodel_class"] = viewmodel_class
+    if viewmodel_name is not None:
+        params["viewmodel_name"] = viewmodel_name
+    if binding_name is not None:
+        params["binding_name"] = binding_name
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite
