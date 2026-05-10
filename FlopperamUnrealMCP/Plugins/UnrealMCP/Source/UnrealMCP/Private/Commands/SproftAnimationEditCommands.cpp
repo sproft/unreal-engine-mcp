@@ -1,6 +1,7 @@
 #include "Commands/SproftAnimationEditCommands.h"
 #include "Commands/EpicUnrealMCPCommonUtils.h"
 
+#include "Animation/AnimCurveTypes.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
@@ -9,6 +10,7 @@
 #include "AnimationBlueprintLibrary.h"
 #include "EditorAssetLibrary.h"
 #include "Engine/Blueprint.h"
+#include "Math/Transform.h"
 #include "Misc/FrameNumber.h"
 #include "Misc/FrameRate.h"
 #include "Misc/FrameTime.h"
@@ -151,6 +153,56 @@ namespace
             default:              return TEXT("unknown");
         }
     }
+
+    /** Parse a `curve_type` token to ERawCurveTrackTypes. */
+    bool ParseRawCurveTrackType(const FString& Token, ERawCurveTrackTypes& Out)
+    {
+        const FString Norm = Token.ToLower().Replace(TEXT("_"), TEXT(""));
+        if (Norm == TEXT("float") || Norm == TEXT("scalar"))
+        {
+            Out = ERawCurveTrackTypes::RCT_Float;
+            return true;
+        }
+        if (Norm == TEXT("vector") || Norm == TEXT("vec3"))
+        {
+            Out = ERawCurveTrackTypes::RCT_Vector;
+            return true;
+        }
+        if (Norm == TEXT("transform") || Norm == TEXT("transformation"))
+        {
+            Out = ERawCurveTrackTypes::RCT_Transform;
+            return true;
+        }
+        return false;
+    }
+
+    /** Render ERawCurveTrackTypes back to its short token. */
+    FString RawCurveTrackTypeToken(ERawCurveTrackTypes Type)
+    {
+        switch (Type)
+        {
+            case ERawCurveTrackTypes::RCT_Float:     return TEXT("float");
+            case ERawCurveTrackTypes::RCT_Vector:    return TEXT("vector");
+            case ERawCurveTrackTypes::RCT_Transform: return TEXT("transform");
+            default:                                 return TEXT("unknown");
+        }
+    }
+
+    /** Pull an FVector out of a JSON array of three numbers. */
+    bool TryParseVector3(const TSharedPtr<FJsonValue>& Value, FVector& Out)
+    {
+        if (!Value.IsValid() || Value->Type != EJson::Array)
+        {
+            return false;
+        }
+        const TArray<TSharedPtr<FJsonValue>>& Arr = Value->AsArray();
+        if (Arr.Num() < 3)
+        {
+            return false;
+        }
+        Out = FVector(Arr[0]->AsNumber(), Arr[1]->AsNumber(), Arr[2]->AsNumber());
+        return true;
+    }
 }
 
 FSproftAnimationEditCommands::FSproftAnimationEditCommands()
@@ -185,8 +237,16 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleAddNotify(Params);
     }
+    if (Op == TEXT("add_curve"))
+    {
+        return HandleAddCurve(Params);
+    }
+    if (Op == TEXT("add_sync_marker") || Op == TEXT("add_marker"))
+    {
+        return HandleAddSyncMarker(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_sync_marker'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -529,6 +589,311 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddNotify(const TSha
         Result->SetStringField(TEXT("notify_object"), CreatedNotify->GetName());
     }
     Result->SetNumberField(TEXT("notify_count"), SeqBase->Notifies.Num());
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddCurve(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_curve: missing 'asset'"));
+    }
+    FString CurveNameParam;
+    if (!Params->TryGetStringField(TEXT("curve_name"), CurveNameParam)
+        && !Params->TryGetStringField(TEXT("name"), CurveNameParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_curve: missing 'curve_name'"));
+    }
+    if (CurveNameParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_curve: 'curve_name' must be non-empty"));
+    }
+
+    FString CurveTypeToken;
+    if (!Params->TryGetStringField(TEXT("curve_type"), CurveTypeToken)
+        && !Params->TryGetStringField(TEXT("type"), CurveTypeToken))
+    {
+        // Default to float curves; the editor's "Add Curve" button does
+        // the same thing.
+        CurveTypeToken = TEXT("float");
+    }
+    ERawCurveTrackTypes CurveType;
+    if (!ParseRawCurveTrackType(CurveTypeToken, CurveType))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_curve: unknown curve_type '%s'; expected Float / Vector / Transform"), *CurveTypeToken));
+    }
+
+    bool bMetaDataCurve = false;
+    Params->TryGetBoolField(TEXT("metadata"), bMetaDataCurve);
+    Params->TryGetBoolField(TEXT("metadata_curve"), bMetaDataCurve);
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    UAnimSequenceBase* SeqBase = Cast<UAnimSequenceBase>(Asset);
+    if (!SeqBase)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_curve: '%s' is not a UAnimSequenceBase"), *AssetParam));
+    }
+
+    const FName CurveFName(*CurveNameParam);
+
+    // AddCurve registers the curve on the asset's USkeleton + the
+    // sequence's per-curve table; the BP library handles the
+    // FRawCurveTracks::AddCurveData path plus IAnimationDataController
+    // when the asset uses the new model.
+    UAnimationBlueprintLibrary::AddCurve(SeqBase, CurveFName, CurveType, bMetaDataCurve);
+
+    // Optional initial keyframe list. Each row is `[time, value]`.
+    // For Float curves `value` is a number; Vector curves take a
+    // 3-vector; Transform curves take three 3-vectors (location,
+    // rotation, scale). The BP library has a parallel-array
+    // `AddFloatCurveKeys` / `AddVectorCurveKeys` /
+    // `AddTransformationCurveKeys` overload, so we collect the per-row
+    // values into parallel arrays before the bulk write.
+    int32 KeyframeCount = 0;
+    int32 KeyframeFailures = 0;
+    TArray<TSharedPtr<FJsonValue>> KeyframeErrors;
+
+    const TArray<TSharedPtr<FJsonValue>>* KeyframesArr = nullptr;
+    if (Params->TryGetArrayField(TEXT("keyframes"), KeyframesArr) && KeyframesArr)
+    {
+        TArray<float> Times;
+        TArray<float> FloatValues;
+        TArray<FVector> VectorValues;
+        TArray<FTransform> TransformValues;
+
+        for (int32 RowIdx = 0; RowIdx < KeyframesArr->Num(); ++RowIdx)
+        {
+            const TSharedPtr<FJsonValue>& RowVal = (*KeyframesArr)[RowIdx];
+            if (!RowVal.IsValid() || RowVal->Type != EJson::Array)
+            {
+                KeyframeErrors.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("row %d is not an array"), RowIdx)));
+                ++KeyframeFailures;
+                continue;
+            }
+            const TArray<TSharedPtr<FJsonValue>>& Row = RowVal->AsArray();
+            if (Row.Num() < 2)
+            {
+                KeyframeErrors.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("row %d expected [time, value]"), RowIdx)));
+                ++KeyframeFailures;
+                continue;
+            }
+            const float Time = static_cast<float>(Row[0]->AsNumber());
+
+            if (CurveType == ERawCurveTrackTypes::RCT_Float)
+            {
+                if (Row[1]->Type != EJson::Number)
+                {
+                    KeyframeErrors.Add(MakeShared<FJsonValueString>(
+                        FString::Printf(TEXT("row %d expected float value"), RowIdx)));
+                    ++KeyframeFailures;
+                    continue;
+                }
+                Times.Add(Time);
+                FloatValues.Add(static_cast<float>(Row[1]->AsNumber()));
+                ++KeyframeCount;
+            }
+            else if (CurveType == ERawCurveTrackTypes::RCT_Vector)
+            {
+                FVector Vec;
+                if (!TryParseVector3(Row[1], Vec))
+                {
+                    KeyframeErrors.Add(MakeShared<FJsonValueString>(
+                        FString::Printf(TEXT("row %d expected [x, y, z] vector"), RowIdx)));
+                    ++KeyframeFailures;
+                    continue;
+                }
+                Times.Add(Time);
+                VectorValues.Add(Vec);
+                ++KeyframeCount;
+            }
+            else if (CurveType == ERawCurveTrackTypes::RCT_Transform)
+            {
+                // Transform rows expect [time, location, rotation, scale]
+                // where each component is a 3-vector. The rotation
+                // 3-vector is interpreted as Euler degrees, matching
+                // the editor's "Curve" panel.
+                if (Row.Num() < 4)
+                {
+                    KeyframeErrors.Add(MakeShared<FJsonValueString>(
+                        FString::Printf(TEXT("row %d expected [time, location, rotation, scale]"), RowIdx)));
+                    ++KeyframeFailures;
+                    continue;
+                }
+                FVector Location, Rotation, Scale;
+                if (!TryParseVector3(Row[1], Location)
+                    || !TryParseVector3(Row[2], Rotation)
+                    || !TryParseVector3(Row[3], Scale))
+                {
+                    KeyframeErrors.Add(MakeShared<FJsonValueString>(
+                        FString::Printf(TEXT("row %d expected three [x, y, z] components"), RowIdx)));
+                    ++KeyframeFailures;
+                    continue;
+                }
+                Times.Add(Time);
+                TransformValues.Add(FTransform(
+                    FRotator::MakeFromEuler(Rotation),
+                    Location,
+                    Scale));
+                ++KeyframeCount;
+            }
+        }
+
+        if (Times.Num() > 0)
+        {
+            if (CurveType == ERawCurveTrackTypes::RCT_Float)
+            {
+                UAnimationBlueprintLibrary::AddFloatCurveKeys(SeqBase, CurveFName, Times, FloatValues);
+            }
+            else if (CurveType == ERawCurveTrackTypes::RCT_Vector)
+            {
+                UAnimationBlueprintLibrary::AddVectorCurveKeys(SeqBase, CurveFName, Times, VectorValues);
+            }
+            else if (CurveType == ERawCurveTrackTypes::RCT_Transform)
+            {
+                UAnimationBlueprintLibrary::AddTransformationCurveKeys(SeqBase, CurveFName, Times, TransformValues);
+            }
+        }
+    }
+
+    SeqBase->MarkPackageDirty();
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(SeqBase->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("add_curve"));
+    Result->SetStringField(TEXT("asset"), SeqBase->GetName());
+    Result->SetStringField(TEXT("path"), SeqBase->GetPathName());
+    Result->SetStringField(TEXT("class"), SeqBase->GetClass()->GetName());
+    Result->SetStringField(TEXT("curve_name"), CurveNameParam);
+    Result->SetStringField(TEXT("curve_type"), RawCurveTrackTypeToken(CurveType));
+    Result->SetBoolField(TEXT("metadata_curve"), bMetaDataCurve);
+    Result->SetNumberField(TEXT("keyframes_added"), KeyframeCount);
+    Result->SetNumberField(TEXT("keyframe_failures"), KeyframeFailures);
+    if (KeyframeErrors.Num() > 0)
+    {
+        Result->SetArrayField(TEXT("keyframe_errors"), KeyframeErrors);
+    }
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddSyncMarker(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_sync_marker: missing 'asset'"));
+    }
+
+    FString TrackParam;
+    if (!Params->TryGetStringField(TEXT("track"), TrackParam)
+        && !Params->TryGetStringField(TEXT("track_name"), TrackParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_sync_marker: missing 'track' name"));
+    }
+    if (TrackParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_sync_marker: 'track' must be non-empty"));
+    }
+
+    FString MarkerParam;
+    if (!Params->TryGetStringField(TEXT("marker_name"), MarkerParam)
+        && !Params->TryGetStringField(TEXT("marker"), MarkerParam)
+        && !Params->TryGetStringField(TEXT("name"), MarkerParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_sync_marker: missing 'marker_name'"));
+    }
+    if (MarkerParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_sync_marker: 'marker_name' must be non-empty"));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    UAnimSequence* Seq = Cast<UAnimSequence>(Asset);
+    if (!Seq)
+    {
+        // Sync markers live on UAnimSequence directly; UAnimMontage and
+        // UAnimComposite do not carry an `AuthoredSyncMarkers` array.
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_sync_marker: '%s' is not a UAnimSequence (sync markers live on UAnimSequence)"), *AssetParam));
+    }
+
+    // Resolve the marker time. `frame` (integer) wins when both are
+    // present, mirroring `add_notify`'s frame-vs-time precedence.
+    double FrameValue = 0.0;
+    bool bHasFrame = Params->TryGetNumberField(TEXT("frame"), FrameValue);
+    double TimeValue = 0.0;
+    bool bHasTime = Params->TryGetNumberField(TEXT("time"), TimeValue);
+    if (!bHasFrame && !bHasTime)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_sync_marker: one of 'frame' (int) or 'time' (float seconds) is required"));
+    }
+
+    float StartTime = 0.0f;
+    if (bHasFrame)
+    {
+        const FFrameRate Rate = Seq->GetSamplingFrameRate();
+        if (Rate.Numerator > 0)
+        {
+            const FFrameTime FrameTime(FFrameNumber(static_cast<int32>(FrameValue)));
+            StartTime = static_cast<float>(Rate.AsSeconds(FrameTime));
+        }
+        else
+        {
+            StartTime = static_cast<float>(FrameValue / 30.0);
+        }
+    }
+    else
+    {
+        StartTime = static_cast<float>(TimeValue);
+    }
+
+    const FName TrackFName(*TrackParam);
+    const FName MarkerFName(*MarkerParam);
+
+    // Auto-create the notify track when missing. Sync markers anchor to
+    // the same notify track surface as notifies (the editor's "Sync
+    // Markers" panel and "Notifies" panel both write to AnimNotifyTracks).
+    if (!UAnimationBlueprintLibrary::IsValidAnimNotifyTrackName(Seq, TrackFName))
+    {
+        UAnimationBlueprintLibrary::AddAnimationNotifyTrack(Seq, TrackFName, FLinearColor::White);
+    }
+
+    UAnimationBlueprintLibrary::AddAnimationSyncMarker(Seq, MarkerFName, StartTime, TrackFName);
+
+    Seq->MarkPackageDirty();
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(Seq->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    const int32 SyncMarkerCount = Seq->AuthoredSyncMarkers.Num();
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("add_sync_marker"));
+    Result->SetStringField(TEXT("asset"), Seq->GetName());
+    Result->SetStringField(TEXT("path"), Seq->GetPathName());
+    Result->SetStringField(TEXT("class"), Seq->GetClass()->GetName());
+    Result->SetStringField(TEXT("track_name"), TrackParam);
+    Result->SetStringField(TEXT("marker_name"), MarkerParam);
+    Result->SetNumberField(TEXT("time"), StartTime);
+    Result->SetNumberField(TEXT("sync_marker_count"), SyncMarkerCount);
     Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }

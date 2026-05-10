@@ -30,6 +30,20 @@
  *     and handles the `AnimNotifyTracks` re-link on the base class.
  *     The notify track is auto-added through `AddAnimationNotifyTrack`
  *     when the named track does not yet exist.
+ *   - `add_curve`: declare a typed animation curve (`Float` / `Vector`
+ *     / `Transform`) on UAnimSequenceBase through
+ *     `UAnimationBlueprintLibrary::AddCurve`, then optionally seed it
+ *     with `[time, value]` keyframes through `AddFloatCurveKeys` /
+ *     `AddVectorCurveKeys` / `AddTransformationCurveKeys`. The
+ *     keyframe shape per `curve_type` is: `Float` -> `[time]` (number)
+ *     plus a parallel `values` array, or per-row `[time, value]`;
+ *     `Vector` -> `[time, [x, y, z]]`; `Transform` -> `[time, location,
+ *     rotation, scale]` triples (each as `[x, y, z]`).
+ *   - `add_sync_marker`: append an `FAnimSyncMarker` to a UAnimSequence's
+ *     notify track through
+ *     `UAnimationBlueprintLibrary::AddAnimationSyncMarker`. The named
+ *     notify track is auto-created through `AddAnimationNotifyTrack`
+ *     when missing, mirroring the `add_notify` shape.
  *
  * Inputs (set_rate_scale):
  *   - asset: short asset name or `/Game/...` UAnimSequenceBase path.
@@ -104,4 +118,6 @@ private:
     TSharedPtr<FJsonObject> HandleSetRateScale(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetAdditive(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddNotify(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddCurve(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddSyncMarker(const TSharedPtr<FJsonObject>& Params);
 };

@@ -6225,6 +6225,11 @@ def animation_edit(
     notify_class: Optional[str] = None,
     event_name: Optional[str] = None,
     duration: Optional[float] = None,
+    curve_name: Optional[str] = None,
+    curve_type: Optional[str] = None,
+    keyframes: Optional[List[Any]] = None,
+    metadata_curve: Optional[bool] = None,
+    marker_name: Optional[str] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
@@ -6248,6 +6253,20 @@ def animation_edit(
           UAnimNotifyState. When ``notify_class`` is omitted we
           treat the entry as a custom-event notify (writes
           ``event_name`` only).
+        - ``add_curve``: declare a typed animation curve on a
+          UAnimSequenceBase. ``curve_name`` is required;
+          ``curve_type`` is one of ``Float`` (default) / ``Vector``
+          / ``Transform``. Optional ``keyframes`` is a list of
+          ``[time, value]`` rows: a number for Float curves, an
+          ``[x, y, z]`` array for Vector curves, or
+          ``[time, location, rotation, scale]`` (each component an
+          ``[x, y, z]`` array; rotation in Euler degrees) for
+          Transform curves.
+        - ``add_sync_marker``: append an FAnimSyncMarker to a
+          UAnimSequence's notify track. ``track`` is the notify
+          track FName (auto-created when missing); ``marker_name``
+          is the new marker's FName; ``frame`` (int, wins) or
+          ``time`` (float seconds) places the marker on the timeline.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -6271,6 +6290,15 @@ def animation_edit(
         event_name: Optional FName for the custom-event notify.
         duration: Float seconds; required for UAnimNotifyState
             subclasses.
+        curve_name: FName for ``add_curve``.
+        curve_type: ``Float`` / ``Vector`` / ``Transform`` for
+            ``add_curve``. Defaults to ``Float`` when omitted.
+        keyframes: Optional ``[time, value]`` list for ``add_curve``.
+            Float: ``[time, number]``; Vector: ``[time, [x, y, z]]``;
+            Transform: ``[time, [lx, ly, lz], [rx, ry, rz], [sx, sy, sz]]``.
+        metadata_curve: Optional bool for ``add_curve``; when true
+            the curve is registered as a metadata-only curve.
+        marker_name: FName for ``add_sync_marker``.
         save: Persist the asset on success. Default True.
 
     Returns:
@@ -6307,6 +6335,16 @@ def animation_edit(
         params["event_name"] = event_name
     if duration is not None:
         params["duration"] = duration
+    if curve_name is not None:
+        params["curve_name"] = curve_name
+    if curve_type is not None:
+        params["curve_type"] = curve_type
+    if keyframes is not None:
+        params["keyframes"] = keyframes
+    if metadata_curve is not None:
+        params["metadata_curve"] = metadata_curve
+    if marker_name is not None:
+        params["marker_name"] = marker_name
     if save is not None:
         params["save"] = save
 
