@@ -48,12 +48,26 @@
  *      response so a follow-up call can address it. Recompiles + saves
  *      once after the whole batch unless `recompile=false` /
  *      `save=false` is passed.
+ *   - "create_parameter_collection": create a UMaterialParameterCollection
+ *      asset at a `/Game/...` path through
+ *      `UMaterialParameterCollectionFactoryNew`. Empty by default; a
+ *      follow-up `add_collection_parameter` populates the scalar / vector
+ *      arrays.
+ *   - "add_collection_parameter": append a typed entry to a
+ *      UMaterialParameterCollection's `ScalarParameters` / `VectorParameters`
+ *      array. The type token is `scalar` / `float` for scalar, `vector` /
+ *      `color` for vector. Default values come in as a JSON number
+ *      (scalar) or `[r, g, b, a]` array / `{r,g,b,a}` object (vector).
+ *      The op runs PreEditChange + PostEditChangeProperty under a
+ *      synthesized FPropertyChangedEvent so the asset's StateId
+ *      regenerates and any UMaterial referencing the collection picks
+ *      the new entry up on the next compile.
  *
- * Material Functions and Material Parameter Collections remain on the
- * backlog; the per-expression authoring above closes the largest gap.
+ * Material Functions remain on the backlog.
  *
  * Clean-room implementation derived from the public UE5 API:
- *   - UMaterialFactoryNew / UMaterialInstanceConstantFactoryNew
+ *   - UMaterialFactoryNew / UMaterialInstanceConstantFactoryNew /
+ *     UMaterialParameterCollectionFactoryNew
  *   - UMaterialEditingLibrary::CreateMaterialExpression +
  *     ConnectMaterialExpressions + ConnectMaterialProperty +
  *     RecompileMaterial + UpdateMaterialInstance
@@ -62,6 +76,8 @@
  *     VectorParameter / Time / Panner / TextureCoordinate / OneMinus /
  *     Saturate / Clamp / Fresnel / Power / Sine / Cosine /
  *     ComponentMask / If / MakeMaterialAttributes
+ *   - UMaterialParameterCollection::ScalarParameters /
+ *     VectorParameters arrays + PostEditChangeProperty broadcast
  *   - FProperty::ImportText for the property writes
  *
  * No code from the proprietary FlopAI plugin is used.
@@ -84,4 +100,7 @@ private:
     TSharedPtr<FJsonObject> ConnectExpressions(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetExpressionProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddExpressionsBulk(const TSharedPtr<FJsonObject>& Params);
+
+    TSharedPtr<FJsonObject> CreateParameterCollection(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddCollectionParameter(const TSharedPtr<FJsonObject>& Params);
 };

@@ -6,9 +6,11 @@
 #include "Engine/Texture.h"
 #include "Factories/MaterialFactoryNew.h"
 #include "Factories/MaterialInstanceConstantFactoryNew.h"
+#include "Factories/MaterialParameterCollectionFactoryNew.h"
 #include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceConstant.h"
+#include "Materials/MaterialParameterCollection.h"
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionAdd.h"
 #include "Materials/MaterialExpressionClamp.h"
@@ -442,9 +444,19 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddExpressionsBulk(Params);
     }
+    if (Operation == TEXT("create_parameter_collection") || Operation == TEXT("create_mpc")
+        || Operation == TEXT("create_collection"))
+    {
+        return CreateParameterCollection(Params);
+    }
+    if (Operation == TEXT("add_collection_parameter") || Operation == TEXT("add_mpc_parameter")
+        || Operation == TEXT("add_parameter"))
+    {
+        return AddCollectionParameter(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -1495,5 +1507,242 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddExpressionsBulk(const TS
     ResultObj->SetNumberField(TEXT("connection_failures"), ConnectionFailures);
     ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
     ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateParameterCollection(const TSharedPtr<FJsonObject>& Params)
+{
+    FString PackagePath;
+    if (!Params->TryGetStringField(TEXT("package_path"), PackagePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'package_path' parameter"));
+    }
+    if (!PackagePath.StartsWith(TEXT("/")))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'package_path' must be an absolute content-browser path, got '%s'"), *PackagePath));
+    }
+
+    bool bSaveAfterCreate = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterCreate);
+
+    bool bOverwrite = false;
+    Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+
+    FString PackageDir;
+    FString AssetName;
+    MaterialEdit_SplitPackagePath(PackagePath, PackageDir, AssetName);
+    if (AssetName.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not derive asset name from '%s'"), *PackagePath));
+    }
+
+    const FString AssetObjectPath = PackageDir + AssetName;
+    if (UEditorAssetLibrary::DoesAssetExist(AssetObjectPath) && !bOverwrite)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset already exists: %s (set 'overwrite': true to replace)"), *AssetObjectPath));
+    }
+
+    UPackage* Package = CreatePackage(*AssetObjectPath);
+    if (!Package)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to create package at '%s'"), *AssetObjectPath));
+    }
+    Package->FullyLoad();
+
+    UMaterialParameterCollectionFactoryNew* Factory = NewObject<UMaterialParameterCollectionFactoryNew>();
+    UMaterialParameterCollection* NewMPC = Cast<UMaterialParameterCollection>(Factory->FactoryCreateNew(
+        UMaterialParameterCollection::StaticClass(),
+        Package,
+        *AssetName,
+        RF_Public | RF_Standalone | RF_Transactional,
+        nullptr,
+        GWarn));
+    if (!NewMPC)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create UMaterialParameterCollection"));
+    }
+
+    FAssetRegistryModule::AssetCreated(NewMPC);
+    Package->MarkPackageDirty();
+
+    if (bSaveAfterCreate)
+    {
+        UEditorAssetLibrary::SaveAsset(AssetObjectPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("create_parameter_collection"));
+    ResultObj->SetStringField(TEXT("name"), AssetName);
+    ResultObj->SetStringField(TEXT("path"), AssetObjectPath);
+    ResultObj->SetNumberField(TEXT("scalar_parameter_count"), NewMPC->ScalarParameters.Num());
+    ResultObj->SetNumberField(TEXT("vector_parameter_count"), NewMPC->VectorParameters.Num());
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterCreate);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddCollectionParameter(const TSharedPtr<FJsonObject>& Params)
+{
+    FString CollectionPath;
+    if (!Params->TryGetStringField(TEXT("collection"), CollectionPath)
+        && !Params->TryGetStringField(TEXT("parameter_collection"), CollectionPath)
+        && !Params->TryGetStringField(TEXT("mpc"), CollectionPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'collection' parameter (path to a UMaterialParameterCollection)"));
+    }
+
+    FString ParameterName;
+    if (!Params->TryGetStringField(TEXT("parameter_name"), ParameterName)
+        && !Params->TryGetStringField(TEXT("name"), ParameterName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'parameter_name' parameter"));
+    }
+
+    FString ParameterTypeText;
+    if (!Params->TryGetStringField(TEXT("parameter_type"), ParameterTypeText)
+        && !Params->TryGetStringField(TEXT("type"), ParameterTypeText))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'parameter_type' parameter (scalar / float / vector / color)"));
+    }
+    const FString TypeLower = ParameterTypeText.ToLower();
+    const bool bIsScalar = (TypeLower == TEXT("scalar") || TypeLower == TEXT("float"));
+    const bool bIsVector = (TypeLower == TEXT("vector") || TypeLower == TEXT("color")
+                            || TypeLower == TEXT("linear_color") || TypeLower == TEXT("linearcolor"));
+    if (!bIsScalar && !bIsVector)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unsupported parameter_type '%s'. Use 'scalar' / 'float' or 'vector' / 'color'."), *ParameterTypeText));
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    UObject* CollectionAsset = UEditorAssetLibrary::LoadAsset(CollectionPath);
+    UMaterialParameterCollection* MPC = Cast<UMaterialParameterCollection>(CollectionAsset);
+    if (!MPC)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UMaterialParameterCollection: %s"), *CollectionPath));
+    }
+
+    const FName ParamFName(*ParameterName);
+
+    // Refuse a duplicate name across both arrays. The asset's
+    // PostEditChangeProperty has SanitizeParameters that auto-renames
+    // duplicates, but emitting a clear error keeps the response surface
+    // predictable for callers chaining several add_collection_parameter
+    // calls.
+    if (MPC->GetScalarParameterIndexByName(ParamFName) != INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Scalar parameter '%s' already exists on %s"), *ParameterName, *CollectionPath));
+    }
+    if (MPC->GetVectorParameterIndexByName(ParamFName) != INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Vector parameter '%s' already exists on %s"), *ParameterName, *CollectionPath));
+    }
+
+    // Cache the previous storage total so PostEditChangeProperty's
+    // "if storage grew, regenerate StateId + recompile referencing
+    // materials" branch fires. We trigger PreEditChange on a synthesized
+    // FProperty pointer so the asset's bookkeeping reads the previous
+    // total before we mutate the array.
+    FProperty* TargetProperty = bIsScalar
+        ? UMaterialParameterCollection::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UMaterialParameterCollection, ScalarParameters))
+        : UMaterialParameterCollection::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UMaterialParameterCollection, VectorParameters));
+    if (!TargetProperty)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve ScalarParameters / VectorParameters UPROPERTY on the parameter collection class"));
+    }
+
+    MPC->PreEditChange(TargetProperty);
+
+    if (bIsScalar)
+    {
+        FCollectionScalarParameter NewParam;
+        NewParam.ParameterName = ParamFName;
+        NewParam.Id = FGuid::NewGuid();
+        NewParam.DefaultValue = 0.0f;
+        if (Params->HasField(TEXT("value")))
+        {
+            const TSharedPtr<FJsonValue> ValueField = Params->TryGetField(TEXT("value"));
+            if (ValueField.IsValid() && ValueField->Type == EJson::Number)
+            {
+                NewParam.DefaultValue = static_cast<float>(ValueField->AsNumber());
+            }
+        }
+        MPC->ScalarParameters.Add(NewParam);
+    }
+    else
+    {
+        FCollectionVectorParameter NewParam;
+        NewParam.ParameterName = ParamFName;
+        NewParam.Id = FGuid::NewGuid();
+        NewParam.DefaultValue = FLinearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        if (Params->HasField(TEXT("value")))
+        {
+            const TSharedPtr<FJsonValue> ValueField = Params->TryGetField(TEXT("value"));
+            FLinearColor ParsedColor;
+            if (TryParseLinearColor(ValueField, ParsedColor))
+            {
+                NewParam.DefaultValue = ParsedColor;
+            }
+        }
+        MPC->VectorParameters.Add(NewParam);
+    }
+
+    // PostEditChangeProperty rebuilds the asset's uniform buffer layout
+    // and regenerates StateId when total vector storage changes. It also
+    // walks every loaded UMaterial referencing this collection and
+    // requeues a recompile through FMaterialUpdateContext, which is the
+    // canonical "I just changed an MPC, materials need to know" broadcast.
+    FPropertyChangedEvent ChangeEvent(TargetProperty, EPropertyChangeType::ArrayAdd);
+    MPC->PostEditChangeProperty(ChangeEvent);
+
+    if (UPackage* Package = MPC->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(CollectionPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_collection_parameter"));
+    ResultObj->SetStringField(TEXT("collection"), MPC->GetPathName());
+    ResultObj->SetStringField(TEXT("parameter_name"), ParameterName);
+    ResultObj->SetStringField(TEXT("parameter_type"), bIsScalar ? TEXT("scalar") : TEXT("vector"));
+    ResultObj->SetNumberField(TEXT("scalar_parameter_count"), MPC->ScalarParameters.Num());
+    ResultObj->SetNumberField(TEXT("vector_parameter_count"), MPC->VectorParameters.Num());
+    if (bIsScalar)
+    {
+        const int32 Idx = MPC->GetScalarParameterIndexByName(ParamFName);
+        if (MPC->ScalarParameters.IsValidIndex(Idx))
+        {
+            ResultObj->SetNumberField(TEXT("default_value"), MPC->ScalarParameters[Idx].DefaultValue);
+        }
+    }
+    else
+    {
+        const int32 Idx = MPC->GetVectorParameterIndexByName(ParamFName);
+        if (MPC->VectorParameters.IsValidIndex(Idx))
+        {
+            const FLinearColor& C = MPC->VectorParameters[Idx].DefaultValue;
+            TArray<TSharedPtr<FJsonValue>> ColorArr;
+            ColorArr.Add(MakeShared<FJsonValueNumber>(C.R));
+            ColorArr.Add(MakeShared<FJsonValueNumber>(C.G));
+            ColorArr.Add(MakeShared<FJsonValueNumber>(C.B));
+            ColorArr.Add(MakeShared<FJsonValueNumber>(C.A));
+            ResultObj->SetArrayField(TEXT("default_value"), ColorArr);
+        }
+    }
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }

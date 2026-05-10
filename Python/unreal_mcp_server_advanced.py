@@ -3531,6 +3531,7 @@ def material_edit(
     expressions: Optional[List[Dict[str, Any]]] = None,
     connections: Optional[List[Dict[str, Any]]] = None,
     recompile: bool = True,
+    collection: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -3576,9 +3577,22 @@ def material_edit(
           a connection can reference an expression created earlier in
           the same call without waiting for the engine's resolved FName
           to come back. Recompiles + saves once after the whole batch.
+        - "create_parameter_collection": create a UMaterialParameterCollection
+          asset at ``package_path`` through
+          ``UMaterialParameterCollectionFactoryNew``. Empty by default; a
+          follow-up ``add_collection_parameter`` populates the parameter
+          arrays.
+        - "add_collection_parameter": append a typed entry to a
+          UMaterialParameterCollection's ScalarParameters or
+          VectorParameters array. ``parameter_type`` is "scalar" /
+          "float" or "vector" / "color"; the optional ``value`` is a
+          number for scalars or an ``[r, g, b, a]`` array (or
+          ``{r,g,b,a}`` object) for vectors. Runs PreEditChange +
+          PostEditChangeProperty so the asset's StateId regenerates
+          and any UMaterial referencing the collection picks the new
+          entry up on the next compile.
 
-    Material Functions and Material Parameter Collections remain on the
-    backlog.
+    Material Functions remain on the backlog.
 
     Args:
         operation: One of the operation names listed above.
@@ -3680,6 +3694,8 @@ def material_edit(
     if recompile is False:
         # The C++ default is true; only forward when caller wants false.
         params["recompile"] = False
+    if collection is not None:
+        params["collection"] = collection
 
     try:
         response = unreal.send_command("material_edit", params)
