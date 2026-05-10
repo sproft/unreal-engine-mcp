@@ -18,6 +18,10 @@
 #include "GameplayEffectTypes.h"
 #include "GameplayTagContainer.h"
 #include "GameplayTagsManager.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "K2Node_CallFunction.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "UObject/Class.h"
@@ -777,6 +781,11 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCommand(const FString& Com
         || Op == TEXT("create_cue"))
     {
         return HandleCreateCueNotify(Params);
+    }
+    if (Op == TEXT("set_ability_cue_tag") || Op == TEXT("set_cue_tag")
+        || Op == TEXT("add_cue_tag") || Op == TEXT("bind_cue_tag"))
+    {
+        return HandleSetAbilityCueTag(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("gas_edit: unsupported op '%s'"), *Op));
@@ -1827,4 +1836,196 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCreateCueNotify(const TSha
     Result->SetBoolField(TEXT("compiled"), bCompile);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleSetAbilityCueTag(const TSharedPtr<FJsonObject>& Params)
+{
+    // Graph-side authoring slice for the "bind a cue tag to an ability"
+    // surface. Spawns a UK2Node_CallFunction for
+    //   UGameplayAbility::K2_ExecuteGameplayCue(FGameplayTag, FGameplayEffectContextHandle)
+    // in the ability Blueprint's event graph and pre-fills the
+    // `GameplayCueTag` literal pin. Reuses an existing matching call
+    // node when one is already wired for the same tag so the op is
+    // idempotent. The cue invocation exec pin stays unwired by default;
+    // a follow-on bp_wire call can chain it from an event node (e.g.
+    // ActivateAbility) when the caller is ready.
+    const TCHAR* OpToken = TEXT("set_ability_cue_tag");
+
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("ability"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: missing 'asset' / 'ability' parameter"), OpToken));
+    }
+
+    FString CueTagText;
+    if (!Params->TryGetStringField(TEXT("cue_tag"), CueTagText)
+        && !Params->TryGetStringField(TEXT("tag"), CueTagText)
+        && !Params->TryGetStringField(TEXT("gameplay_cue_tag"), CueTagText))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: missing 'cue_tag' parameter (e.g. 'GameplayCue.Combat.Hit')"), OpToken));
+    }
+    CueTagText.TrimStartAndEndInline();
+    if (CueTagText.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: 'cue_tag' parameter is empty"), OpToken));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    UBlueprint* Blueprint = Cast<UBlueprint>(Asset);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: asset at '%s' is not a Blueprint"), OpToken, *AssetPath));
+    }
+    UClass* AssetClass = ResolveAssetClass(Asset);
+    if (!AssetClass || !AssetClass->IsChildOf(UGameplayAbility::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: Blueprint at '%s' is not a UGameplayAbility subclass (resolved class: %s)"),
+                OpToken, *AssetPath, AssetClass ? *AssetClass->GetName() : TEXT("null")));
+    }
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Resolve the gameplay tag. We pass bErrorIfNotFound=false so a
+    // missing-tag case surfaces a clean warning rather than an engine
+    // assert; the pin literal still picks up the requested text so the
+    // node is in shape once the project registers the tag through
+    // tag_registry_edit add_tag.
+    UGameplayTagsManager& TagManager = UGameplayTagsManager::Get();
+    const FGameplayTag ResolvedTag = TagManager.RequestGameplayTag(FName(*CueTagText), /*ErrorIfNotFound=*/false);
+    const bool bTagRegistered = ResolvedTag.IsValid();
+
+    // Resolve the K2_ExecuteGameplayCue UFunction on UGameplayAbility.
+    UFunction* TargetFunction = UGameplayAbility::StaticClass()->FindFunctionByName(FName(TEXT("K2_ExecuteGameplayCue")));
+    if (!TargetFunction)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: UGameplayAbility::K2_ExecuteGameplayCue not found on the engine's UFunction table"), OpToken));
+    }
+
+    UEdGraph* EventGraph = FEpicUnrealMCPCommonUtils::FindOrCreateEventGraph(Blueprint);
+    if (!EventGraph)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: failed to find or create the Blueprint's event graph"), OpToken));
+    }
+
+    // The literal pin's default value string for FGameplayTag uses the
+    // canonical struct ExportText form `(TagName="Foo.Bar")`. We build
+    // it explicitly here so the pin matches what the editor's literal
+    // makes when the user types the tag in the pin picker.
+    const FString TagPinDefault = FString::Printf(TEXT("(TagName=\"%s\")"), *CueTagText);
+
+    // Walk the event graph looking for an existing
+    // K2_ExecuteGameplayCue call node already pre-filled for this tag,
+    // so a second invocation of the op stays idempotent.
+    UK2Node_CallFunction* MatchedNode = nullptr;
+    for (UEdGraphNode* ExistingNode : EventGraph->Nodes)
+    {
+        UK2Node_CallFunction* AsCall = Cast<UK2Node_CallFunction>(ExistingNode);
+        if (!AsCall)
+        {
+            continue;
+        }
+        if (AsCall->GetTargetFunction() != TargetFunction)
+        {
+            continue;
+        }
+        UEdGraphPin* TagPin = AsCall->FindPin(FName(TEXT("GameplayCueTag")), EGPD_Input);
+        if (TagPin && TagPin->DefaultValue == TagPinDefault)
+        {
+            MatchedNode = AsCall;
+            break;
+        }
+    }
+
+    bool bReusedExisting = (MatchedNode != nullptr);
+    UK2Node_CallFunction* CallNode = MatchedNode;
+
+    if (!CallNode)
+    {
+        // Spawn a new K2Node_CallFunction wired to K2_ExecuteGameplayCue
+        // and pre-fill the tag literal pin.
+        CallNode = NewObject<UK2Node_CallFunction>(EventGraph);
+        if (!CallNode)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("%s: failed to construct UK2Node_CallFunction"), OpToken));
+        }
+        CallNode->SetFromFunction(TargetFunction);
+
+        // Lay the node out a little below + right of the graph's
+        // existing nodes so it does not stack on top of an event node.
+        int32 NodeX = 320;
+        int32 NodeY = 64;
+        {
+            int32 BottomMostY = 0;
+            int32 RightMostX = 0;
+            for (UEdGraphNode* Existing : EventGraph->Nodes)
+            {
+                if (Existing)
+                {
+                    BottomMostY = FMath::Max(BottomMostY, Existing->NodePosY);
+                    RightMostX = FMath::Max(RightMostX, Existing->NodePosX);
+                }
+            }
+            NodeX = FMath::Max(NodeX, RightMostX + 320);
+            NodeY = FMath::Max(NodeY, BottomMostY);
+        }
+        CallNode->NodePosX = NodeX;
+        CallNode->NodePosY = NodeY;
+
+        EventGraph->AddNode(CallNode, /*bUserAction=*/true, /*bSelectNewNode=*/false);
+        CallNode->CreateNewGuid();
+        CallNode->PostPlacedNewNode();
+        CallNode->AllocateDefaultPins();
+
+        UEdGraphPin* TagPin = CallNode->FindPin(FName(TEXT("GameplayCueTag")), EGPD_Input);
+        if (!TagPin)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("%s: spawned K2_ExecuteGameplayCue call node has no 'GameplayCueTag' input pin"), OpToken));
+        }
+        TagPin->DefaultValue = TagPinDefault;
+        TagPin->AutogeneratedDefaultValue = TagPinDefault;
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(Blueprint);
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Blueprint->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), OpToken);
+    Out->SetStringField(TEXT("ability"), Blueprint->GetPathName());
+    Out->SetStringField(TEXT("cue_tag"), CueTagText);
+    Out->SetBoolField(TEXT("tag_registered"), bTagRegistered);
+    Out->SetBoolField(TEXT("node_reused"), bReusedExisting);
+    Out->SetStringField(TEXT("graph"), EventGraph->GetName());
+    Out->SetStringField(TEXT("node"), CallNode->GetName());
+    Out->SetStringField(TEXT("node_guid"), CallNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+    Out->SetStringField(TEXT("target_function"), TargetFunction->GetName());
+    Out->SetStringField(TEXT("tag_pin_default"), TagPinDefault);
+    if (!bTagRegistered)
+    {
+        Out->SetStringField(TEXT("cue_tag_warning"),
+            TEXT("Tag is not registered in the project's Gameplay Tag database; the call node is laid down with the requested literal anyway. Run tag_registry_edit add_tag to register it."));
+    }
+    Out->SetBoolField(TEXT("compiled"), bCompile);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
 }

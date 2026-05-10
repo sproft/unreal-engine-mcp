@@ -77,12 +77,12 @@
  *   - tags:            object dict with named tag containers (set_gameplay_tags).
  *   - cue_tag:         FGameplayTag string for create_cue_notify (e.g. `GameplayCue.Combat.Hit`).
  *
- * The `set_ability_cue_tag` op stays on BACKLOG: UGameplayAbility has
- * no canonical UPROPERTY storing a per-ability cue association; cue
- * invocation runs at runtime through the `K2_AddGameplayCue` /
- * `K2_ExecuteGameplayCue` BlueprintCallables, so the "bind a cue tag
- * to an ability" surface needs a graph-side authoring slice instead
- * of a CDO write.
+ * The `set_ability_cue_tag` op ships in this slice as a graph-side
+ * authoring path: we spawn a `UK2Node_CallFunction` for
+ * `UGameplayAbility::K2_ExecuteGameplayCue` in the ability's event
+ * graph and pre-fill the `GameplayCueTag` literal pin. Reuses an
+ * existing matching call node if one is already wired for the
+ * resolved tag so the op is idempotent.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UGameplayAbility property surface (CancelAbilitiesWithTag etc.).
@@ -110,4 +110,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetAttributeDefault(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetAbilityCostOrCooldown(const TSharedPtr<FJsonObject>& Params, bool bIsCost);
     TSharedPtr<FJsonObject> HandleCreateCueNotify(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetAbilityCueTag(const TSharedPtr<FJsonObject>& Params);
 };

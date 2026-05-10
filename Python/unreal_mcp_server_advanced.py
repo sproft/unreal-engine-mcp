@@ -5583,6 +5583,16 @@ def gas_edit(
           notify opens with a tag pre-bound; the tag must already
           live in the project's tag registry (call
           ``tag_registry_edit add_tag`` first if it does not).
+        - ``set_ability_cue_tag``: graph-side authoring slice that
+          spawns a UK2Node_CallFunction for
+          ``UGameplayAbility::K2_ExecuteGameplayCue`` in the ability
+          Blueprint's event graph and pre-fills the
+          ``GameplayCueTag`` literal pin with the requested
+          ``cue_tag``. Reuses an existing matching call node when
+          present so the op is idempotent. Unknown tags surface a
+          ``cue_tag_warning`` and the node still lays down with the
+          literal so the next ``tag_registry_edit add_tag`` makes
+          the binding valid.
 
     Args:
         asset: Required for ``inspect`` / ``set_gameplay_tags`` /
