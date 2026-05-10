@@ -5385,6 +5385,16 @@ def gas_edit(
     duration_policy: Optional[str] = None,
     duration_magnitude: Optional[float] = None,
     tags: Optional[Dict[str, Any]] = None,
+    attribute: Optional[str] = None,
+    attribute_set: Optional[str] = None,
+    attribute_name: Optional[str] = None,
+    modifier_op: Optional[str] = None,
+    magnitude: Optional[float] = None,
+    index: Optional[int] = None,
+    base_value: Optional[float] = None,
+    effect: Optional[str] = None,
+    effect_class: Optional[str] = None,
+    clear: Optional[bool] = None,
     overwrite: Optional[bool] = None,
     compile: Optional[bool] = None,
     save: Optional[bool] = None,
@@ -5407,73 +5417,63 @@ def gas_edit(
           (or a Blueprint with a UAttributeSet CDO) walks the CDO's
           FProperty list filtering on
           ``FGameplayAttribute::IsSupportedProperty``.
-        - ``create_gameplay_ability``: NewObject's a UBlueprint at a
-          ``/Game/...`` path with a UGameplayAbility-derived parent
-          class (default ``/Script/GameplayAbilities.GameplayAbility``).
-          Compiles and saves by default.
-        - ``create_gameplay_effect``: NewObject's a UBlueprint at a
-          ``/Game/...`` path with a UGameplayEffect-derived parent
-          class (default ``/Script/GameplayAbilities.GameplayEffect``).
-          Optional ``duration_policy`` (``instant`` / ``has_duration`` /
-          ``infinite``) plus an optional ``duration_magnitude`` (literal
-          float on a HasDuration effect's ScalableFloat magnitude) write
-          through the CDO before the first compile.
+        - ``create_gameplay_ability`` / ``create_gameplay_effect``:
+          NewObject's a UBlueprint at a ``/Game/...`` path with a
+          parent class derived from UGameplayAbility / UGameplayEffect.
         - ``set_gameplay_tags``: tag-container mutation on either asset
-          shape. UGameplayAbility writes through the reflected
-          ``AbilityTags`` / ``CancelAbilitiesWithTag`` /
-          ``BlockAbilitiesWithTag`` / ``ActivationOwnedTags`` /
-          ``ActivationRequiredTags`` / ``ActivationBlockedTags`` /
-          ``SourceRequiredTags`` / ``SourceBlockedTags`` /
-          ``TargetRequiredTags`` / ``TargetBlockedTags`` UPROPERTY
-          fields. UGameplayEffect routes through
-          ``FindOrAddComponent<UAssetTagsGameplayEffectComponent>`` /
-          ``UTargetTagsGameplayEffectComponent`` /
-          ``UBlockAbilityTagsGameplayEffectComponent`` and calls each
-          component's ``SetAndApplyAssetTagChanges`` /
-          ``SetAndApplyTargetTagChanges`` /
-          ``SetAndApplyBlockedAbilityTagChanges`` mutator so the cached
-          tag-container snapshot on the GE refreshes.
-
-    Heavier ops (modifier add / remove, cost / cooldown rebind,
-    attribute default override, GameplayCue authoring) remain on the
-    backlog.
+          shape, routing through the reflected UPROPERTY fields on
+          UGameplayAbility and the asset / target / blocked-ability GE
+          components on UGameplayEffect.
+        - ``add_modifier`` / ``remove_modifier_at``: append / remove an
+          FGameplayModifierInfo on a UGameplayEffect's ``Modifiers``
+          array.
+        - ``set_attribute_default``: write the base value of an
+          attribute on a UAttributeSet (or its Blueprint CDO).
+        - ``set_ability_cost`` / ``set_ability_cooldown``: rebind a
+          UGameplayAbility's ``CostGameplayEffectClass`` /
+          ``CooldownGameplayEffectClass`` to a chosen UGameplayEffect-
+          derived class. Pass ``effect="none"``, an empty string, or
+          ``clear=true`` to clear the binding. Routes through
+          reflected ``FClassProperty`` writes so the op stays
+          compatible with the 5.7 visibility tightening that demoted
+          these fields from public to protected.
 
     Args:
-        asset: Required for ``inspect`` / ``set_gameplay_tags``. Short
-            asset name or full ``/Game/...`` path.
-        op: One of ``inspect`` (default), ``create_gameplay_ability``,
-            ``create_gameplay_effect``, or ``set_gameplay_tags``.
+        asset: Required for ``inspect`` / ``set_gameplay_tags`` /
+            ``add_modifier`` / ``remove_modifier_at`` /
+            ``set_attribute_default`` / ``set_ability_cost`` /
+            ``set_ability_cooldown``. Short asset name or full
+            ``/Game/...`` path.
+        op: One of the documented op tokens above. Default ``inspect``.
         path: Required for the create ops. Target ``/Game/...`` package
             path for the new Blueprint.
-        parent_class: Optional override for the create ops. Accepts a
-            full ``/Script/Module.ClassName`` path, a ``/Game/...``
-            Blueprint class path (auto-suffixed with ``_C``), or a short
-            class name probed against in-memory classes plus a
-            ``/Script/GameplayAbilities.<Name>`` fallback.
-        duration_policy: ``create_gameplay_effect`` only. One of
-            ``instant`` / ``has_duration`` / ``infinite``.
-        duration_magnitude: ``create_gameplay_effect`` only. Literal
-            float, applied as the ScalableFloat magnitude on a
-            HasDuration effect.
-        tags: ``set_gameplay_tags`` only. Dict whose keys name a tag
-            container on the asset (e.g. ``ability_tags``,
-            ``cancel_abilities_with_tag``, ``asset_tags``,
-            ``granted_tags``, ``blocked_ability_tags``) and whose
-            values are arrays of fully-qualified tag strings.
-        overwrite: Reuse an existing Blueprint at the create-op path
-            instead of erroring. Default False.
-        compile: Compile the Blueprint after the edit. Default True.
-        save: Save the asset after the edit. Default True.
+        parent_class: Optional override for the create ops.
+        duration_policy / duration_magnitude:
+            ``create_gameplay_effect`` only.
+        tags: ``set_gameplay_tags`` only. Dict keyed by container name.
+        attribute / attribute_set / attribute_name:
+            ``add_modifier`` / ``set_attribute_default`` only. Resolves
+            an FGameplayAttribute by short / full / colon-form name.
+        modifier_op: ``add_modifier`` only. ``Add`` / ``Multiply`` /
+            ``Override`` / ``Division`` plus the canonical UE 5.x
+            names case-insensitive.
+        magnitude: ``add_modifier`` only. Literal float wrapped into
+            FScalableFloat.
+        index: ``remove_modifier_at`` only. Integer entry to remove.
+        base_value: ``set_attribute_default`` only. Literal float.
+        effect: ``set_ability_cost`` / ``set_ability_cooldown`` only.
+            Target UGameplayEffect class path (full
+            ``/Script/Module.ClassName`` or ``/Game/...`` BP class).
+            Pass ``"none"`` or empty to clear the binding.
+        effect_class: alias for ``effect`` for ergonomic call sites.
+        clear: explicit clear flag for the cost / cooldown rebind ops.
+        overwrite: Reuse an existing Blueprint at the create-op path.
+        compile / save: Default True.
 
     Returns:
-        For ``inspect`` see the read-only slice's contract. For
-        ``create_*`` returns ``operation`` + ``name`` + ``path`` +
-        ``class`` + ``parent_class`` + ``parent_class_short`` +
-        ``compiled`` + ``saved`` (and ``duration_policy_written`` /
-        ``duration_magnitude_written`` for the effect path). For
-        ``set_gameplay_tags`` returns ``operation`` + ``name`` +
-        ``path`` + ``resolved_class`` + ``applied`` + ``skipped`` +
-        ``compiled`` + ``saved``.
+        Op-specific dict. ``set_ability_cost`` / ``set_ability_cooldown``
+        return ``operation`` + ``path`` + ``cleared`` flag plus the
+        previous and (when set) the new effect class path.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -5494,6 +5494,26 @@ def gas_edit(
         params["duration_magnitude"] = duration_magnitude
     if tags is not None:
         params["tags"] = tags
+    if attribute is not None:
+        params["attribute"] = attribute
+    if attribute_set is not None:
+        params["attribute_set"] = attribute_set
+    if attribute_name is not None:
+        params["attribute_name"] = attribute_name
+    if modifier_op is not None:
+        params["modifier_op"] = modifier_op
+    if magnitude is not None:
+        params["magnitude"] = magnitude
+    if index is not None:
+        params["index"] = index
+    if base_value is not None:
+        params["base_value"] = base_value
+    if effect is not None:
+        params["effect"] = effect
+    if effect_class is not None:
+        params["class"] = effect_class
+    if clear is not None:
+        params["clear"] = clear
     if overwrite is not None:
         params["overwrite"] = overwrite
     if compile is not None:

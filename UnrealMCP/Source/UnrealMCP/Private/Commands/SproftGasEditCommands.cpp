@@ -763,6 +763,14 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCommand(const FString& Com
     {
         return HandleSetAttributeDefault(Params);
     }
+    if (Op == TEXT("set_ability_cost") || Op == TEXT("set_cost"))
+    {
+        return HandleSetAbilityCostOrCooldown(Params, /*bIsCost=*/true);
+    }
+    if (Op == TEXT("set_ability_cooldown") || Op == TEXT("set_cooldown"))
+    {
+        return HandleSetAbilityCostOrCooldown(Params, /*bIsCost=*/false);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("gas_edit: unsupported op '%s'"), *Op));
 }
@@ -1459,6 +1467,175 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleSetAttributeDefault(const 
     Result->SetStringField(TEXT("attribute_name"), AttributeName);
     Result->SetStringField(TEXT("storage"), StorageKind);
     Result->SetNumberField(TEXT("base_value"), NewValue);
+    Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleSetAbilityCostOrCooldown(const TSharedPtr<FJsonObject>& Params, bool bIsCost)
+{
+    const TCHAR* OpToken = bIsCost ? TEXT("set_ability_cost") : TEXT("set_ability_cooldown");
+    const TCHAR* PropName = bIsCost ? TEXT("CostGameplayEffectClass") : TEXT("CooldownGameplayEffectClass");
+    const TCHAR* OutKey   = bIsCost ? TEXT("cost_gameplay_effect_class") : TEXT("cooldown_gameplay_effect_class");
+
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("ability"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: missing 'asset' / 'ability' parameter"), OpToken));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: could not load asset at '%s'"), OpToken, *AssetPath));
+    }
+
+    UClass* AssetClass = ResolveAssetClass(Asset);
+    UObject* CDO = ResolveCDO(Asset);
+    UGameplayAbility* Ability = CDO ? Cast<UGameplayAbility>(CDO) : nullptr;
+    if (!Ability || !AssetClass || !AssetClass->IsChildOf(UGameplayAbility::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: asset at '%s' is not a UGameplayAbility (resolved class: %s)"),
+                OpToken, *AssetPath, AssetClass ? *AssetClass->GetName() : TEXT("null")));
+    }
+
+    // Read the new effect class. Three shapes accepted: an explicit
+    // `clear=true` flag, an empty / null / "none" string in the
+    // `effect` (or class / cost / cooldown) field, or a class path
+    // pointing at a UGameplayEffect-derived UBlueprint or
+    // UBlueprintGeneratedClass. Mirrors the convention shipped on
+    // `behavior_tree set_blackboard` and `ik_retarget set_*_ik_rig`.
+    bool bClear = false;
+    Params->TryGetBoolField(TEXT("clear"), bClear);
+
+    FString EffectInput;
+    Params->TryGetStringField(TEXT("effect"), EffectInput);
+    if (EffectInput.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("class"), EffectInput);
+    }
+    if (EffectInput.IsEmpty())
+    {
+        Params->TryGetStringField(bIsCost ? TEXT("cost") : TEXT("cooldown"), EffectInput);
+    }
+    if (EffectInput.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("path"), EffectInput);
+    }
+
+    const FString Trimmed = EffectInput.TrimStartAndEnd();
+    if (!bClear && (Trimmed.IsEmpty() || Trimmed.Equals(TEXT("none"), ESearchCase::IgnoreCase) || Trimmed.Equals(TEXT("null"), ESearchCase::IgnoreCase)))
+    {
+        bClear = true;
+    }
+
+    UClass* NewEffectClass = nullptr;
+    if (!bClear)
+    {
+        // Resolve the input as a UGameplayEffect-derived UClass. Two
+        // accepted shapes: a full `/Script/Module.ClassName` path and
+        // a `/Game/...` Blueprint class path (auto-suffixed with `_C`
+        // when the caller forgot it).
+        UObject* Loaded = nullptr;
+        if (Trimmed.StartsWith(TEXT("/Script/")))
+        {
+            NewEffectClass = LoadClass<UObject>(nullptr, *Trimmed);
+        }
+        else if (Trimmed.StartsWith(TEXT("/Game/")))
+        {
+            // Try the class path directly first (so `/Game/Foo/BP_Cost.BP_Cost_C`
+            // rounds to a UClass), then fall back to LoadAsset on the
+            // BP and pull GeneratedClass off it.
+            FString ClassPath = Trimmed;
+            if (!ClassPath.EndsWith(TEXT("_C")))
+            {
+                ClassPath += TEXT("_C");
+            }
+            NewEffectClass = LoadClass<UObject>(nullptr, *ClassPath);
+            if (!NewEffectClass)
+            {
+                Loaded = UEditorAssetLibrary::LoadAsset(Trimmed);
+                if (UBlueprint* AsBP = Cast<UBlueprint>(Loaded))
+                {
+                    NewEffectClass = AsBP->GeneratedClass;
+                }
+                else if (UClass* AsClass = Cast<UClass>(Loaded))
+                {
+                    NewEffectClass = AsClass;
+                }
+            }
+        }
+        if (!NewEffectClass)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("%s: could not resolve UGameplayEffect class at '%s'"), OpToken, *Trimmed));
+        }
+        if (!NewEffectClass->IsChildOf(UGameplayEffect::StaticClass()))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("%s: '%s' is not a UGameplayEffect subclass (resolved: %s)"),
+                    OpToken, *Trimmed, *NewEffectClass->GetPathName()));
+        }
+    }
+
+    // 5.7 demoted CostGameplayEffectClass / CooldownGameplayEffectClass
+    // from public to protected. The fields stay reflected, so we go
+    // through FClassProperty + ContainerPtrToValuePtr against the
+    // ability's UClass; this stays clean-room (we read / write through
+    // the public reflection database, not by friending the class).
+    FClassProperty* ClassProp = FindFProperty<FClassProperty>(AssetClass, FName(PropName));
+    if (!ClassProp)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: '%s' has no reflected FClassProperty named '%s'"),
+                OpToken, *AssetClass->GetName(), PropName));
+    }
+    TSubclassOf<UObject>* Slot = ClassProp->ContainerPtrToValuePtr<TSubclassOf<UObject>>(Ability);
+    if (!Slot)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("%s: failed to resolve property slot for '%s'"), OpToken, PropName));
+    }
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    UClass* PreviousClass = Slot->Get();
+    *Slot = bClear ? nullptr : NewEffectClass;
+
+    UBlueprint* OwningBP = Cast<UBlueprint>(Asset);
+    if (OwningBP)
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsModified(OwningBP);
+        if (bCompile)
+        {
+            FKismetEditorUtilities::CompileBlueprint(OwningBP);
+        }
+    }
+    Asset->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), OpToken);
+    Result->SetStringField(TEXT("path"), Asset->GetPathName());
+    Result->SetBoolField(TEXT("cleared"), bClear);
+    if (PreviousClass)
+    {
+        Result->SetStringField(TEXT("previous_class"), PreviousClass->GetPathName());
+    }
+    if (!bClear && NewEffectClass)
+    {
+        Result->SetStringField(OutKey, NewEffectClass->GetPathName());
+    }
     Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;

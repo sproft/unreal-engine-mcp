@@ -49,6 +49,15 @@
  *   - `remove_modifier_at`: remove an FGameplayModifierInfo at index.
  *   - `set_attribute_default`: write the base value of an attribute
  *     on a UAttributeSet (or its Blueprint CDO).
+ *   - `set_ability_cost`: rebind a UGameplayAbility's
+ *     `CostGameplayEffectClass` to a chosen UGameplayEffect-derived
+ *     class (or `none` / empty / explicit `clear=true` to clear the
+ *     binding). Routes through reflection (`FClassProperty` +
+ *     `ContainerPtrToValuePtr<TSubclassOf<UObject>>`) so the write
+ *     stays compatible with the 5.7 visibility tightening that
+ *     demoted the field from public to protected.
+ *   - `set_ability_cooldown`: same shape against
+ *     `CooldownGameplayEffectClass`.
  *
  * Inputs (op-dependent):
  *   - asset:           short asset name or full `/Game/...` path (inspect, set_gameplay_tags).
@@ -58,8 +67,7 @@
  *   - duration_magnitude: literal float (create_gameplay_effect; HasDuration only).
  *   - tags:            object dict with named tag containers (set_gameplay_tags).
  *
- * Heavier ops (modifier add / remove, cost / cooldown rebind, attribute
- * default override, GameplayCue authoring) remain on the backlog.
+ * Heavier ops (GameplayCue authoring) remain on the backlog.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UGameplayAbility property surface (CancelAbilitiesWithTag etc.).
@@ -85,4 +93,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddModifier(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRemoveModifierAt(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetAttributeDefault(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetAbilityCostOrCooldown(const TSharedPtr<FJsonObject>& Params, bool bIsCost);
 };
