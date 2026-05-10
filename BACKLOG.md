@@ -8,7 +8,53 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped three deepening tools plus one
+The most recent pass shipped three deepening edit slices that
+close two persistent skips and add one new edit op surface.
+`landscape_edit` gains `set_height_box`: writes a uniform height
+value across an axis-aligned bounded region of the landscape's
+component grid. The op clamps the rect to the registered
+`ULandscapeInfo::GetLandscapeExtent`, walks the components
+touched through `FLandscapeEditDataInterface::GetComponentsInRegion`,
+and writes through `SetHeightData` with a single-value tightly-
+packed uint16 buffer sized to the rect. The height value lands
+either as a normalised float in `[0, 1]` (mapped to the uint16
+`[0, 65535]` heightmap range) or as a raw uint16 sample
+(`height_uint16`); the proxy is dirtied for save and the
+response carries the touched-component count + samples-written.
+The per-stroke brush surface stays in BACKLOG. `niagara_edit`
+gains `set_emitter_local_parameter`: resolves an existing
+system, walks `UNiagaraSystem::GetEmitterHandles()` for the
+matching emitter handle by name, reaches through
+`FNiagaraEmitterHandle::GetEmitterData()` to the spawn / update
+script (`FVersionedNiagaraEmitterData::SpawnScriptProps.Script`
+/ `UpdateScriptProps.Script`), and writes the parameter into
+the script's `RapidIterationParameters` store via the
+documented `FNiagaraParameterStore::SetParameterData(Buffer,
+Param, bAdd=true)` byte-buffer overload (the parameter is
+added if missing). Type tokens (`float` / `int` / `bool` /
+`vec2` / `vec3` / `vec4` / `color` / `quat`) resolve through
+`FNiagaraTypeDefinition::Get*Def()`; `value` is a JSON literal
+for scalar shapes or a JSON array for vector / color / quat
+shapes (length 2 / 3 / 4). The broader parameter store and
+module-authoring surface stays in BACKLOG. `sequencer_edit`
+gains `move_section`: resolves the same track + binding combo
+the existing `add_section` op uses, indexes into the track's
+`GetAllSections()` array via `section_index`, builds a fresh
+`TRange<FFrameNumber>` from `start_frame` + `duration_frames`,
+and writes it through `UMovieSceneSection::SetRange`; the base
+class's `SetRange` already calls `TryModify()`, so we add a
+`MarkPackageDirty` for save persistence and surface the
+previous range as `previous_start_frame` /
+`previous_duration_frames` in the response. The
+`chaos_edit fracture_box` slice (PlanarCut entry point through
+`CutMultipleWithPlanarCells` plus `FPlanarCells(FBox)`) is the
+fourth target on this run but stays on the BACKLOG; the
+`PlanarCut` plugin is `EnabledByDefault: false` and the cut
+surface needs FInternalSurfaceMaterials authoring plus a
+PostFracture cleanup walk we did not want to land in a small
+slice.
+
+The pass before that shipped three deepening tools plus one
 maintenance fix. `animation_graph_edit` gains two more edit
 ops on the AnimGraph state-machine surface: `add_transition`
 spawns a `UAnimStateTransitionNode` between two existing states
@@ -2141,55 +2187,65 @@ helpers.
 
 ## Suggested next-pass shortlist for a single-player game project
 
-The latest pass shipped one maintenance fix (per-file rename of every
-helper that collided across two or more `Sproft*Commands.cpp` files,
-so the unity-build sweep stops failing) plus three deepening tools:
-`unreal_api` adds `list_classes` / `find_in_subclasses` / `class_diff`
-keyed off the live UE5 reflection database, `pcg_graph_edit` adds
-the per-node `set_node_settings` write that the earlier slice left
-open, and `animation_graph_edit` adds the focused-minimum-cut
-`add_state` op through the public schema-action template
-`FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate`. The
-next set should pick up:
+The latest pass shipped three deepening edit slices:
+`landscape_edit` adds the `set_height_box` op (uniform-height
+write across an axis-aligned bounded region of the landscape's
+component grid through `FLandscapeEditDataInterface::SetHeightData`),
+`niagara_edit` adds `set_emitter_local_parameter` (writes through
+the per-script `RapidIterationParameters` store via the
+documented `FNiagaraParameterStore::SetParameterData` byte-buffer
+overload), and `sequencer_edit` adds `move_section` (resolves a
+section by track + index, writes a fresh `TRange<FFrameNumber>`
+through `UMovieSceneSection::SetRange`). The
+`chaos_edit fracture_box` slice (PlanarCut entry point through
+`CutMultipleWithPlanarCells` plus `FPlanarCells(FBox)`) was the
+fourth target on this run but stayed on the BACKLOG: the
+`PlanarCut` plugin is `EnabledByDefault: false` and the cut
+surface needs `FInternalSurfaceMaterials` authoring plus a
+PostFracture cleanup walk we did not want to land in a small
+slice. The next set should pick up:
 
 1. `landscape_edit` edit slice — per-edit-layer write
    (`SetHeightDataForLayer`), the paint-layer-by-stroke surface
    through the same FLandscapeEditDataInterface (`SetAlphaData`
    per layer), the sculpt brush primitives that `LandscapeEdMode`
    wraps, and a heightmap export counterpart
-   (`GetHeightDataTempl` -> 16-bit grayscale PNG).
+   (`GetHeightDataTempl` -> 16-bit grayscale PNG). The
+   `set_height_box` op shipped in the most recent pass.
 2. `niagara_script_edit` edit slice — Module / DynamicInput script
    creation with a typed `inputs` / `outputs` list off
    `FNiagaraVariable`, plus a `compile` op that drives the script's
    own `RequestCompile`.
-3. `animation_graph_edit` follow-on edit ops — `add_transition`
-   through `UAnimStateTransitionNode` between two existing states,
-   per-transition crossfade / blend mode writes, per-state property
-   writes (always-reset / conduit, state-entered / state-left
-   notify), AnimGraph node add / connect inside a state's
-   `BoundGraph`, and a `link_anim_graph_by_tag` op that writes the
-   LinkedAnimGraph slot for a chosen tag. The `add_state` op
-   shipped in the most recent pass.
+3. `animation_graph_edit` follow-on edit ops — per-transition
+   crossfade / blend mode writes, per-state property writes
+   (always-reset / conduit, state-entered / state-left notify),
+   AnimGraph node add / connect inside a state's `BoundGraph`
+   beyond the player, and a `link_anim_graph_by_tag` op that writes
+   the LinkedAnimGraph slot for a chosen tag. The `add_state` /
+   `add_transition` / `set_state_animation` ops shipped in earlier
+   passes.
 4. `ik_rig_edit` edit slice — rebind preview mesh, append /
-   remove solver via `UIKRigController::AddSolverToStack`, append /
    remove retarget chain through `AddRetargetChain`, rename
    retarget root, override goal transform, and mutate per-solver
    bone settings via `SetBoneSettings`. Pairs with the
    already-shipped `ik_retarget` read side and the IKRig dep we
-   already pulled in.
-5. `chaos_edit` edit slice — set / mutate per-fracture-level
-   damage threshold list, toggle clustering / per-cluster-only
-   damage threshold, write the simulation block (mass, density,
-   removal surface), and the heavier fracture authoring side
-   (driver via the dataflow asset under `DataflowInstance` or the
-   `FFractureToolContext` API).
+   already pulled in. The `add_solver` / `remove_solver_at` /
+   `set_solver_settings` ops shipped in earlier passes.
+5. `chaos_edit` edit slice — `fracture_box` through the
+   `PlanarCut` module's `CutMultipleWithPlanarCells` plus
+   `FPlanarCells(FBox)`, with the `PlanarCut` plugin enabled in
+   the `.uplugin` manifest, plus the heavier dataflow driver
+   under `DataflowInstance` and the per-cluster damage threshold
+   override side that `set_simulation_settings` does not cover.
 6. `niagara_edit` next-cut — emitter add through
-   `FNiagaraEditorUtilities::AddEmitterToSystem`, parameter store
-   write via `UNiagaraSystem::GetExposedParameters()`, per-emitter
+   `FNiagaraEditorUtilities::AddEmitterToSystem`, system-side
+   parameter store write via `UNiagaraSystem::GetExposedParameters()`
+   (the user-redirection store on the system), per-emitter
    sim-target / determinism flag writes, module add through the
    per-emitter spawn / update script source, and a
    `request_compile` op that drives `RequestCompile` after the
-   writes.
+   writes. The `set_emitter_local_parameter` op shipped in the
+   most recent pass.
 7. `ik_retarget` follow-on edit ops — append op / remove op (the
    polymorphic `FInstancedStruct` array on the asset), set chain
    mapping pair on a chosen op, per-pose bone-rotation-offset
@@ -2220,8 +2276,9 @@ next set should pick up:
 12. `behavior_tree` heavier edit ops — Blackboard key rename /
     type-change ops, parent-Blackboard re-bind, and tree-level
     RootDecorator authoring.
-13. `sequencer_edit` remaining edit ops — section move, spawnable
-    creation, and per-row edits.
+13. `sequencer_edit` remaining edit ops — spawnable creation and
+    per-row edits. The `move_section` op shipped in the most
+    recent pass.
 14. `metasound_edit` follow-ons — member-default writes through the
     builder, and a `metasound_inspect` read-only counterpart that
     walks the asset's document and emits the node graph as a JSON
