@@ -9,50 +9,69 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped three deepening edit slices that
-close two persistent skips and add one new edit op surface.
-`landscape_edit` gains `set_height_box`: writes a uniform height
-value across an axis-aligned bounded region of the landscape's
-component grid. The op clamps the rect to the registered
-`ULandscapeInfo::GetLandscapeExtent`, walks the components
-touched through `FLandscapeEditDataInterface::GetComponentsInRegion`,
-and writes through `SetHeightData` with a single-value tightly-
-packed uint16 buffer sized to the rect. The height value lands
-either as a normalised float in `[0, 1]` (mapped to the uint16
-`[0, 65535]` heightmap range) or as a raw uint16 sample
-(`height_uint16`); the proxy is dirtied for save and the
-response carries the touched-component count + samples-written.
-The per-stroke brush surface stays in BACKLOG. `niagara_edit`
-gains `set_emitter_local_parameter`: resolves an existing
-system, walks `UNiagaraSystem::GetEmitterHandles()` for the
-matching emitter handle by name, reaches through
-`FNiagaraEmitterHandle::GetEmitterData()` to the spawn / update
-script (`FVersionedNiagaraEmitterData::SpawnScriptProps.Script`
-/ `UpdateScriptProps.Script`), and writes the parameter into
-the script's `RapidIterationParameters` store via the
-documented `FNiagaraParameterStore::SetParameterData(Buffer,
-Param, bAdd=true)` byte-buffer overload (the parameter is
-added if missing). Type tokens (`float` / `int` / `bool` /
-`vec2` / `vec3` / `vec4` / `color` / `quat`) resolve through
-`FNiagaraTypeDefinition::Get*Def()`; `value` is a JSON literal
-for scalar shapes or a JSON array for vector / color / quat
-shapes (length 2 / 3 / 4). The broader parameter store and
-module-authoring surface stays in BACKLOG. `sequencer_edit`
-gains `move_section`: resolves the same track + binding combo
-the existing `add_section` op uses, indexes into the track's
-`GetAllSections()` array via `section_index`, builds a fresh
-`TRange<FFrameNumber>` from `start_frame` + `duration_frames`,
-and writes it through `UMovieSceneSection::SetRange`; the base
-class's `SetRange` already calls `TryModify()`, so we add a
-`MarkPackageDirty` for save persistence and surface the
-previous range as `previous_start_frame` /
-`previous_duration_frames` in the response. The
-`chaos_edit fracture_box` slice (PlanarCut entry point through
-`CutMultipleWithPlanarCells` plus `FPlanarCells(FBox)`) is the
-fourth target on this run but stays on the BACKLOG; the
-`PlanarCut` plugin is `EnabledByDefault: false` and the cut
-surface needs FInternalSurfaceMaterials authoring plus a
-PostFracture cleanup walk we did not want to land in a small
-slice.
+close one persistent skip and add two new edit op surfaces.
+`foliage_edit` gains `place_foliage_instances`: places N
+foliage instances on the IFA for a chosen level. The op
+resolves (or spawns) the IFA through
+`AInstancedFoliageActor::GetInstancedFoliageActorForLevel(Level,
+/*bCreateIfNone=*/true)`, ensures the type binding through
+`AInstancedFoliageActor::AddFoliageType` (so the caller can
+skip the explicit `add_foliage_type` step), and walks the
+required `locations` array building one `FFoliageInstance` per
+row through `FFoliageInfo::AddInstance(InSettings,
+NewInstance)` (FOLIAGE_API). Optional parallel `rotations`
+(`[pitch, yaw, roll]` triples) and `scales` (`[x, y, z]`
+triples) override the per-instance rotation / scale; missing
+rotations land at zero rotation, missing scales fall back to
+the foliage type's per-axis ScaleX / Y / Z interval midpoint
+so the placement matches the painting density tool's
+defaults. After the inner loop the IFA's owning level is
+dirtied + saved (the IFA is a level actor, not an asset);
+`Refresh(Async=false, Force=true)` runs once at the end so
+the editor viewport sees the new instances without per-add
+ISMC tree rebuilds. The per-stroke painting brush surface
+stays on the BACKLOG. `gas_edit` gains the cost / cooldown
+rebind pair: `set_ability_cost` writes a UGameplayAbility's
+`CostGameplayEffectClass` UPROPERTY and `set_ability_cooldown`
+writes `CooldownGameplayEffectClass`. Both accept an `effect`
+field that is either a `/Script/Module.ClassName` path, a
+`/Game/...` Blueprint class path (auto-suffixed with `_C` if
+missing), or `none` / empty / explicit `clear=true` to clear
+the binding. The writes route through reflected
+`FClassProperty` + `ContainerPtrToValuePtr<TSubclassOf<UObject>>`
+on the ability's UClass; the FProperty path side-steps the
+5.7 visibility tightening that demoted these fields from
+public to protected (the tag-container side of the ability
+already routed through reflection for the same reason). Each
+op recompiles + saves on success unless overridden. With
+this pair landing the `gas_edit` BACKLOG row narrows to
+GameplayCue authoring. `niagara_script_edit` gains
+`add_input_parameter` via the documented workaround. The
+canonical authoring entry point (`UNiagaraGraph::AddParameter`
+in NiagaraGraph.h lines 354 to 356, three overloads) is still
+not exported by NIAGARAEDITOR_API in 5.7, so the new op
+writes the parameter into the script's
+`RapidIterationParameters` store directly through the public
+`FNiagaraParameterStore::AddParameter` (NIAGARA_API) plus a
+follow-up `SetParameterData` for the optional default value.
+Type tokens are the same set niagara_edit accepts (`float` /
+`int` / `bool` / `vec2` / `vec3` / `vec4` / `color` /
+`quat`); missing `value` lands the parameter at type-zero
+default. After the write we run `MarkNotSynchronized` +
+`PostEditChangeProperty` on the script's source so the next
+compile-id machinery refreshes. Limitation noted in the
+response and in the README addition: a graph-driven
+recompile that re-derives the parameter set from the source
+graph alone will not see the addition; designers wanting
+graph-side persistence should re-author through the editor's
+Module Inputs panel. `pie_test_scene` PIE-needed assertion
+kinds (`actor_visible_in_pie`, `var_equals_in_pie`,
+`event_fired_within`) were the fourth target on this run but
+stay on the BACKLOG; the synchronous bridge command callback
+returns inside one editor tick, so any kind that needs the
+PIE world to spin up first cannot resolve in the same
+response cycle without rewiring the bridge to support
+deferred / awaited responses.
 
 The pass before that shipped three deepening tools plus one
 maintenance fix. `animation_graph_edit` gains two more edit
