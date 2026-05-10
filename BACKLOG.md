@@ -9,6 +9,79 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped four deepening edit slices that
+close the Niagara sim-stage / sim-target gap, the GameplayEffect
+magnitude variant gap, the Material Function reuse gap, and the
+full MVVM property-binding row authoring gap. `niagara_edit`
+gains `add_sim_stage` and `set_emitter_sim_target`. `add_sim_stage`
+resolves an existing system + emitter handle, NewObject's a
+`UNiagaraSimulationStageBase` subobject outered to the
+UNiagaraEmitter (default subclass `UNiagaraSimulationStageGeneric`;
+the `generic` short token plus full `/Script/Niagara.X` paths
+and bare class names resolve), and routes through
+`UNiagaraEmitter::AddSimulationStage(stage, EmitterVersion)`
+(NIAGARA_API). Abstract subclasses fail closed. An optional
+`stage_name` lands on `SimulationStageName` before the add so
+the editor's stack viewmodel surfaces a designer-readable label.
+`set_emitter_sim_target` writes
+`FVersionedNiagaraEmitterData::SimTarget` against the four
+documented tokens (`cpu` / `gpu` / `CPUSim` / `GPUComputeSim`).
+The emitter version GUID for AddSimulationStage flows through
+`FNiagaraEmitterHandle::GetInstance().Version` so callers do not
+have to plumb the GUID. `gas_edit` gains
+`set_modifier_magnitude` covering all four documented
+`FGameplayEffectModifierMagnitude` variants. The previous
+`add_modifier` op only emitted the scalable-float variant; this
+op extends the surface to `AttributeBased` (reuses the
+`add_modifier` attribute resolver plus a `FAttributeBasedFloat`
+payload with backing-attribute capture source / snapshot /
+coefficient / pre + post multiply / calculation type),
+`SetByCaller` (`data_name` and / or `data_tag` with a clean
+warning on unknown tags), and `CustomCalculationClass`
+(`UGameplayModMagnitudeCalculation` subclass path; refuses
+non-subclasses). The op assigns the fresh
+`FGameplayEffectModifierMagnitude` through the public
+constructor of each variant so the protected member fields stay
+sealed behind the engine's friend-class contract; recompiles +
+saves on success. `material_edit` gains `add_function_call`:
+adds a `UMaterialExpressionMaterialFunctionCall` to a target
+UMaterial through
+`UMaterialEditingLibrary::CreateMaterialExpression` (same path
+`add_expression` uses for every other subclass), then casts the
+new expression and calls the BlueprintCallable
+`SetMaterialFunction(NewFunction)` (ENGINE_API on
+MaterialExpressionMaterialFunctionCall.h line 157) so the call
+expression's `FunctionInputs` / `FunctionOutputs` arrays
+regenerate from the bound function's declared input / output
+pins; without that step the call node renders without pins and
+a downstream `connect_expressions` call has no input names to
+target. Position cascades through the same
+`DeriveDefaultPosition` helper `add_expression` uses; optional
+`name` renames the spawned expression so a follow-up
+`connect_expressions` call can address the node by FName.
+Recompiles + saves on success. With this op landing the
+`material_edit` BACKLOG row that read "Material Functions
+remain on the backlog" closes — the small `material_edit`
+surface now covers function creation plus the call-site
+authoring needed to reuse a function on a material. `widget_edit`
+gains `add_property_binding` covering the full MVVM
+property-binding row beyond the seeded-empty row that
+`set_viewmodel` leaves behind. The op resolves a UWidgetBlueprint
+plus a viewmodel slot on its `UMVVMBlueprintView` (by FName
+label or by FGuid context id), resolves the source field on the
+viewmodel's class (FProperty or UFunction; the field-variant
+path stores the right kind), resolves the destination widget by
+FName on the WBP's WidgetTree, and resolves the destination
+field on the widget's class. The new FMVVMBlueprintViewBinding
+spawns through `UMVVMBlueprintView::AddDefaultBinding` and the
+returned mutable reference's SourcePath / DestinationPath /
+BindingType / bEnabled / bCompile land in place. Path setup
+goes through the public `FMVVMBlueprintPropertyPath::SetViewModelId`
++ `SetPropertyPath(WBP, FieldVariant)` and `SetWidgetName` +
+`SetPropertyPath(WBP, FieldVariant)` setters. `binding_mode`
+tokens are `one_way` (default) / `two_way` / `one_time`.
+Conversion functions stay on the BACKLOG.
+
+The pass before that shipped four deepening edit slices that
 close the Niagara compile / flag gap, the bp_input trigger gap,
 the MVVM minimum cut on `widget_edit`, and the previously skipped
 graph-side `gas_edit set_ability_cue_tag`. `niagara_edit` gains
@@ -1692,10 +1765,11 @@ ability" alongside `tag_registry_edit`.
   name defaults to the source emitter's `GetName()`; the version
   GUID defaults to the source emitter's currently exposed version
   (`UNiagaraEmitter::GetExposedVersion().VersionGuid`). Saves the
-  system to disk by default unless `save=false`. The broader
-  authoring surface (parameter store mutations, module / sim-stage
-  authoring, sim-target / determinism flag writes, request-compile)
-  stays on this list. Adds `NiagaraEditor` to the editor-only
+  system to disk by default unless `save=false`. With the
+  `add_sim_stage` + `set_emitter_sim_target` ops landing the
+  authoring surface gap narrows to GPU compute-script wiring and
+  the per-stage module attach beyond `add_module_to_stage`. Adds
+  `NiagaraEditor` to the editor-only
   `PrivateDependencyModuleNames` for the `InitializeSystem`
   linkage; we deliberately bypass the
   `bCreateDefaultNodes=true` path so we never have to pull
@@ -2137,9 +2211,16 @@ helpers.
   the expression-graph trio `add_expression` / `connect_expressions`
   / `set_expression_property`, plus the bulk `add_expressions` op
   that lays a small graph down in one call from a list of expression
-  specs and a list of edge specs). Pending: Material Functions and
-  Material Parameter Collections, plus a `set_attribute_blendable`
-  op for the override-surface chain on an instance.
+  specs and a list of edge specs). The Material Parameter
+  Collection slice landed via `create_parameter_collection` +
+  `add_collection_parameter`, the Material Function slice landed
+  via `create_material_function` + `add_function_call` (the call
+  expression spawns through `UMaterialEditingLibrary::CreateMaterialExpression`
+  with `UMaterialExpressionMaterialFunctionCall::StaticClass()` and
+  binds the function via the BlueprintCallable `SetMaterialFunction`
+  so the call node's inputs / outputs populate). Pending:
+  `set_attribute_blendable` op for the override-surface chain on
+  an instance.
 
 ## VFX (large each)
 
@@ -2155,14 +2236,15 @@ helpers.
   `UNiagaraSystemFactoryNew::InitializeSystem(System, /*bCreateDefaultNodes=*/false)`.
   No emitters, no parameter store, no module / sim-stage authoring;
   the asset opens in the Niagara editor with the documented "no
-  emitter" warning. Open follow-ons: emitter add (the
-  `FNiagaraEditorUtilities::AddEmitterToSystem` path that the
-  factory's `EmittersToAddToNewSystem` branch takes), parameter-
-  store mutations (`UNiagaraSystem::GetExposedParameters()` write
-  side), per-emitter sim-target / determinism flag writes, module
-  add through the per-emitter spawn / update script source, and a
-  `request_compile` op that drives `UNiagaraSystem::RequestCompile`
-  after the writes.
+  emitter" warning. The follow-on emitter / parameter / module / sim-
+  stage / sim-target / request-compile ops landed in later passes
+  (see the `add_emitter_from_asset` / `set_emitter_local_parameter`
+  / `add_module_to_stage` / `add_sim_stage` /
+  `set_emitter_sim_target` / `request_compile` / `set_emitter_flag`
+  edit slices summarised above). Remaining open follow-ons:
+  system-side `GetExposedParameters()` parameter-store mutations,
+  GPU compute-script wiring on the per-emitter compute script, and
+  the per-stage module attach beyond `add_module_to_stage`.
 - `niagara_script_edit` (small read-only first slice ships in this
   fork) — inspect a `UNiagaraScript` asset (cached VM compile
   data plus typed parameter sets and the GPU shader parameter
@@ -2265,9 +2347,15 @@ helpers.
 - `widget_edit` — the small variant plus the slot-property surface
   ship in this fork. `set_slot_property` covers UCanvasPanelSlot /
   UVerticalBoxSlot / UHorizontalBoxSlot / UOverlaySlot etc. without
-  spelling out each subclass. The remaining hosted-Flop scope
-  (animations, MVVM bindings, advanced styles, event binding) is
-  still on the table.
+  spelling out each subclass. The animation surface ships through
+  `add_animation` + `add_animation_track` + `add_keyframe`; the
+  MVVM side ships through `set_viewmodel` (viewmodel slot + seeded
+  empty binding) plus `add_property_binding` (full
+  FMVVMBlueprintViewBinding row authoring: source viewmodel field
+  + destination widget field + binding mode tokens). Remaining
+  open follow-ons: conversion functions on the binding side,
+  advanced widget styles, and event binding (UMG button click ->
+  Blueprint event hook).
 
 ## AI & abilities (large each)
 
@@ -2283,18 +2371,19 @@ helpers.
   the Run Behavior Tree -> Make Decision flow. AIModule is already
   pulled in.
 - `gas_edit` (small read + small edit slice ships in this fork) —
-  read-only `inspect` plus three edit ops:
-  `create_gameplay_ability`, `create_gameplay_effect` (with the
-  duration-policy / duration-magnitude shortcut), and
-  `set_gameplay_tags` (UGameplayAbility tag fields directly +
-  UGameplayEffect through `FindOrAddComponent` on the asset /
-  target / block-ability tag GE components plus their
-  `SetAndApply` mutators). Open follow-ons: GE modifier add /
-  remove, ability cost / cooldown class rebind, attribute-default
-  override path that writes through the CDO and recompiles the
-  Blueprint, GameplayCue authoring, and a per-tag dev-comment
-  surface beyond the registry's. Native AbilityTask classes
-  remain unscoped.
+  read-only `inspect` plus the full edit slice landed in later
+  passes: `create_gameplay_ability`, `create_gameplay_effect`
+  (with the duration-policy / duration-magnitude shortcut),
+  `set_gameplay_tags`, `add_modifier`, `remove_modifier_at`,
+  `set_modifier_magnitude` (full FGameplayEffectModifierMagnitude
+  surface: scalable_float / attribute_based / set_by_caller /
+  custom_calculation_class), `set_attribute_default`,
+  `set_ability_cost`, `set_ability_cooldown`, `create_cue_notify`,
+  and `set_ability_cue_tag` (graph-side authoring).
+  Open follow-ons: per-tag dev-comment surface beyond the
+  registry's, GE Executions array authoring beyond the modifier
+  surface, and the AbilityTask side that the existing surface
+  does not cover.
 - `tag_registry_edit` (small variant ships in this fork) — `add_tag`,
   `remove_tag`, `list_tags` through `IGameplayTagsEditorModule`. Open
   follow-ons: rename through `RenameTagInINI`, restricted-tag source
