@@ -47,6 +47,34 @@
  *     `add_final` (case-insensitive). `magnitude` is a literal float
  *     wrapped into an FScalableFloat.
  *   - `remove_modifier_at`: remove an FGameplayModifierInfo at index.
+ *   - `set_modifier_magnitude`: rewrite the magnitude on an existing
+ *     `FGameplayModifierInfo`. The previous `add_modifier` op only
+ *     emitted the scalable-float variant of
+ *     `FGameplayEffectModifierMagnitude`; this op extends the
+ *     magnitude surface to the other documented variants. The
+ *     `magnitude_type` token selects the variant
+ *     (`scalable` / `scalable_float`, `attribute_based`,
+ *     `set_by_caller`, `custom_calculation_class`). Per-variant
+ *     payload fields:
+ *       - scalable_float: `value` (literal float written into
+ *         `FScalableFloat::Value`).
+ *       - attribute_based: `attribute` / `attribute_set` +
+ *         `attribute_name` (same resolver as `add_modifier`),
+ *         optional `source` (`source` / `target`, default
+ *         source), optional `snapshot` (default false), optional
+ *         `coefficient` (literal float, written into
+ *         `Coefficient.Value`), optional `pre_multiply` /
+ *         `post_multiply` (literal floats), optional
+ *         `calculation_type` token
+ *         (`magnitude` / `base_value` / `bonus_magnitude` /
+ *         `magnitude_evaluated_up_to_channel`).
+ *       - set_by_caller: `data_name` (FName for `DataName`) and / or
+ *         `data_tag` (FGameplayTag string for `DataTag`).
+ *       - custom_calculation_class: `calculation_class`
+ *         (`/Script/Module.ClassName` path or `/Game/...` BP class
+ *         path for a `UGameplayModMagnitudeCalculation` subclass),
+ *         optional `coefficient` / `pre_multiply` / `post_multiply`
+ *         literal floats.
  *   - `set_attribute_default`: write the base value of an attribute
  *     on a UAttributeSet (or its Blueprint CDO).
  *   - `set_ability_cost`: rebind a UGameplayAbility's
@@ -107,6 +135,7 @@ private:
     TSharedPtr<FJsonObject> HandleSetGameplayTags(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddModifier(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRemoveModifierAt(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetModifierMagnitude(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetAttributeDefault(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetAbilityCostOrCooldown(const TSharedPtr<FJsonObject>& Params, bool bIsCost);
     TSharedPtr<FJsonObject> HandleCreateCueNotify(const TSharedPtr<FJsonObject>& Params);

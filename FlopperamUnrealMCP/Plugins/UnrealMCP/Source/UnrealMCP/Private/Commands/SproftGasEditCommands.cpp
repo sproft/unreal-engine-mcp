@@ -11,6 +11,7 @@
 #include "GameplayCueNotify_Static.h"
 #include "GameplayEffect.h"
 #include "GameplayEffectExecutionCalculation.h"
+#include "GameplayModMagnitudeCalculation.h"
 #include "GameplayEffectComponent.h"
 #include "GameplayEffectComponents/AssetTagsGameplayEffectComponent.h"
 #include "GameplayEffectComponents/BlockAbilityTagsGameplayEffectComponent.h"
@@ -764,6 +765,10 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCommand(const FString& Com
     if (Op == TEXT("remove_modifier_at") || Op == TEXT("remove_modifier"))
     {
         return HandleRemoveModifierAt(Params);
+    }
+    if (Op == TEXT("set_modifier_magnitude") || Op == TEXT("set_magnitude"))
+    {
+        return HandleSetModifierMagnitude(Params);
     }
     if (Op == TEXT("set_attribute_default"))
     {
@@ -2028,4 +2033,297 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleSetAbilityCueTag(const TSh
     Out->SetBoolField(TEXT("compiled"), bCompile);
     Out->SetBoolField(TEXT("saved"), bSave);
     return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleSetModifierMagnitude(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("effect"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset' / 'effect' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not load asset at '%s'"), *AssetPath));
+    }
+    UClass* AssetClass = ResolveAssetClass(Asset);
+    UObject* CDO = ResolveCDO(Asset);
+    UGameplayEffect* Effect = CDO ? Cast<UGameplayEffect>(CDO) : nullptr;
+    if (!Effect)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UGameplayEffect (resolved class: %s)"),
+                *AssetPath, AssetClass ? *AssetClass->GetName() : TEXT("null")));
+    }
+
+    int32 Index = INDEX_NONE;
+    if (!Params->TryGetNumberField(TEXT("index"), Index)
+        && !Params->TryGetNumberField(TEXT("modifier_index"), Index))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'index' (integer; the entry in the GE's Modifiers array)"));
+    }
+    if (!Effect->Modifiers.IsValidIndex(Index))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Index %d out of bounds (GE has %d modifiers)"),
+                Index, Effect->Modifiers.Num()));
+    }
+
+    FString MagnitudeTypeToken;
+    if (!Params->TryGetStringField(TEXT("magnitude_type"), MagnitudeTypeToken)
+        && !Params->TryGetStringField(TEXT("type"), MagnitudeTypeToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'magnitude_type' (try scalable_float / attribute_based / set_by_caller / custom_calculation_class)"));
+    }
+    const FString TypeLower = MagnitudeTypeToken.ToLower();
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    auto ReadFloatField = [&Params](const TCHAR* Field, float Default) -> float
+    {
+        double Out = static_cast<double>(Default);
+        Params->TryGetNumberField(Field, Out);
+        return static_cast<float>(Out);
+    };
+
+    FGameplayEffectModifierMagnitude NewMagnitude;
+    FString CanonicalType;
+    TSharedPtr<FJsonObject> VariantOut = MakeShared<FJsonObject>();
+
+    if (TypeLower == TEXT("scalable_float") || TypeLower == TEXT("scalable")
+        || TypeLower == TEXT("float") || TypeLower == TEXT("literal"))
+    {
+        double ValueRaw = 0.0;
+        if (!Params->TryGetNumberField(TEXT("value"), ValueRaw)
+            && !Params->TryGetNumberField(TEXT("magnitude"), ValueRaw))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Missing 'value' (literal float for the FScalableFloat magnitude)"));
+        }
+        FScalableFloat Scale;
+        Scale.Value = static_cast<float>(ValueRaw);
+        NewMagnitude = FGameplayEffectModifierMagnitude(Scale);
+        CanonicalType = TEXT("ScalableFloat");
+        VariantOut->SetNumberField(TEXT("value"), ValueRaw);
+    }
+    else if (TypeLower == TEXT("attribute_based") || TypeLower == TEXT("attribute")
+        || TypeLower == TEXT("attribute_capture"))
+    {
+        FString AttributeToken;
+        Params->TryGetStringField(TEXT("attribute"), AttributeToken);
+        FString AttributeSetToken;
+        Params->TryGetStringField(TEXT("attribute_set"), AttributeSetToken);
+        FString AttributeNameToken;
+        Params->TryGetStringField(TEXT("attribute_name"), AttributeNameToken);
+
+        FGameplayAttribute BackingAttr;
+        FString ResolveError;
+        if (!ResolveAttribute(AttributeToken, AttributeSetToken, AttributeNameToken, BackingAttr, ResolveError))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+        }
+
+        FString SourceToken;
+        Params->TryGetStringField(TEXT("source"), SourceToken);
+        EGameplayEffectAttributeCaptureSource CaptureSource = EGameplayEffectAttributeCaptureSource::Source;
+        const FString SourceLower = SourceToken.ToLower();
+        if (SourceLower == TEXT("target"))
+        {
+            CaptureSource = EGameplayEffectAttributeCaptureSource::Target;
+        }
+        else if (!SourceLower.IsEmpty() && SourceLower != TEXT("source"))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unrecognised 'source' '%s' (use source / target)"), *SourceToken));
+        }
+
+        bool bSnapshot = false;
+        Params->TryGetBoolField(TEXT("snapshot"), bSnapshot);
+
+        FAttributeBasedFloat Payload;
+        Payload.BackingAttribute = FGameplayEffectAttributeCaptureDefinition(BackingAttr, CaptureSource, bSnapshot);
+        Payload.Coefficient.Value = ReadFloatField(TEXT("coefficient"), 1.0f);
+        Payload.PreMultiplyAdditiveValue.Value = ReadFloatField(TEXT("pre_multiply"), 0.0f);
+        Payload.PostMultiplyAdditiveValue.Value = ReadFloatField(TEXT("post_multiply"), 0.0f);
+
+        FString CalcTypeToken;
+        Params->TryGetStringField(TEXT("calculation_type"), CalcTypeToken);
+        if (!CalcTypeToken.IsEmpty())
+        {
+            const FString CT = CalcTypeToken.ToLower();
+            if (CT == TEXT("magnitude") || CT == TEXT("attribute_magnitude"))
+            {
+                Payload.AttributeCalculationType = EAttributeBasedFloatCalculationType::AttributeMagnitude;
+            }
+            else if (CT == TEXT("base_value") || CT == TEXT("attribute_base_value"))
+            {
+                Payload.AttributeCalculationType = EAttributeBasedFloatCalculationType::AttributeBaseValue;
+            }
+            else if (CT == TEXT("bonus_magnitude") || CT == TEXT("attribute_bonus_magnitude"))
+            {
+                Payload.AttributeCalculationType = EAttributeBasedFloatCalculationType::AttributeBonusMagnitude;
+            }
+            else if (CT == TEXT("magnitude_evaluated_up_to_channel")
+                || CT == TEXT("attribute_magnitude_evaluated_up_to_channel"))
+            {
+                Payload.AttributeCalculationType = EAttributeBasedFloatCalculationType::AttributeMagnitudeEvaluatedUpToChannel;
+            }
+            else
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Unrecognised 'calculation_type' '%s' (magnitude / base_value / bonus_magnitude / magnitude_evaluated_up_to_channel)"),
+                        *CalcTypeToken));
+            }
+        }
+
+        NewMagnitude = FGameplayEffectModifierMagnitude(Payload);
+        CanonicalType = TEXT("AttributeBased");
+        VariantOut->SetStringField(TEXT("attribute_name"), BackingAttr.GetName());
+        if (UClass* OwnerClass = BackingAttr.IsValid() ? BackingAttr.GetAttributeSetClass() : nullptr)
+        {
+            VariantOut->SetStringField(TEXT("attribute_set_class"), OwnerClass->GetPathName());
+        }
+        VariantOut->SetStringField(TEXT("source"),
+            (CaptureSource == EGameplayEffectAttributeCaptureSource::Target) ? TEXT("target") : TEXT("source"));
+        VariantOut->SetBoolField(TEXT("snapshot"), bSnapshot);
+        VariantOut->SetNumberField(TEXT("coefficient"), Payload.Coefficient.Value);
+        VariantOut->SetNumberField(TEXT("pre_multiply"), Payload.PreMultiplyAdditiveValue.Value);
+        VariantOut->SetNumberField(TEXT("post_multiply"), Payload.PostMultiplyAdditiveValue.Value);
+    }
+    else if (TypeLower == TEXT("set_by_caller") || TypeLower == TEXT("setbycaller")
+        || TypeLower == TEXT("caller"))
+    {
+        FSetByCallerFloat Payload;
+        FString DataNameStr;
+        if (Params->TryGetStringField(TEXT("data_name"), DataNameStr) && !DataNameStr.IsEmpty())
+        {
+            Payload.DataName = FName(*DataNameStr);
+        }
+
+        FString DataTagStr;
+        if (Params->TryGetStringField(TEXT("data_tag"), DataTagStr) && !DataTagStr.IsEmpty())
+        {
+            const FGameplayTag Tag = UGameplayTagsManager::Get().RequestGameplayTag(FName(*DataTagStr),
+                /*ErrorIfNotFound=*/false);
+            if (Tag.IsValid())
+            {
+                Payload.DataTag = Tag;
+                VariantOut->SetBoolField(TEXT("data_tag_registered"), true);
+            }
+            else
+            {
+                // Unknown tags surface a clean warning; the runtime still
+                // resolves the magnitude through DataName when DataTag
+                // misses, matching the engine's fallback path.
+                VariantOut->SetBoolField(TEXT("data_tag_registered"), false);
+                VariantOut->SetStringField(TEXT("data_tag_warning"),
+                    TEXT("Tag is not registered in the project's Gameplay Tag database; the runtime will fall back to DataName when the tag misses."));
+            }
+            VariantOut->SetStringField(TEXT("data_tag"), DataTagStr);
+        }
+
+        if (Payload.DataName.IsNone() && !Payload.DataTag.IsValid())
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("set_by_caller magnitude needs at least one of 'data_name' / 'data_tag'"));
+        }
+
+        NewMagnitude = FGameplayEffectModifierMagnitude(Payload);
+        CanonicalType = TEXT("SetByCaller");
+        VariantOut->SetStringField(TEXT("data_name"), Payload.DataName.ToString());
+    }
+    else if (TypeLower == TEXT("custom_calculation_class") || TypeLower == TEXT("custom")
+        || TypeLower == TEXT("custom_calculation") || TypeLower == TEXT("calculation_class"))
+    {
+        FString CalculationClassToken;
+        if (!Params->TryGetStringField(TEXT("calculation_class"), CalculationClassToken)
+            && !Params->TryGetStringField(TEXT("class"), CalculationClassToken)
+            && !Params->TryGetStringField(TEXT("magnitude_class"), CalculationClassToken))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Missing 'calculation_class' (UGameplayModMagnitudeCalculation subclass path)"));
+        }
+        UClass* Resolved = ResolveCreateParentClass(CalculationClassToken, nullptr);
+        if (!Resolved)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Could not resolve calculation class '%s'"), *CalculationClassToken));
+        }
+        if (!Resolved->IsChildOf(UGameplayModMagnitudeCalculation::StaticClass()))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Class '%s' is not a UGameplayModMagnitudeCalculation subclass"),
+                    *Resolved->GetPathName()));
+        }
+
+        FCustomCalculationBasedFloat Payload;
+        Payload.CalculationClassMagnitude = Resolved;
+        Payload.Coefficient.Value = ReadFloatField(TEXT("coefficient"), 1.0f);
+        Payload.PreMultiplyAdditiveValue.Value = ReadFloatField(TEXT("pre_multiply"), 0.0f);
+        Payload.PostMultiplyAdditiveValue.Value = ReadFloatField(TEXT("post_multiply"), 0.0f);
+
+        NewMagnitude = FGameplayEffectModifierMagnitude(Payload);
+        CanonicalType = TEXT("CustomCalculationClass");
+        VariantOut->SetStringField(TEXT("calculation_class"), Resolved->GetPathName());
+        VariantOut->SetNumberField(TEXT("coefficient"), Payload.Coefficient.Value);
+        VariantOut->SetNumberField(TEXT("pre_multiply"), Payload.PreMultiplyAdditiveValue.Value);
+        VariantOut->SetNumberField(TEXT("post_multiply"), Payload.PostMultiplyAdditiveValue.Value);
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unrecognised 'magnitude_type' '%s' (scalable_float / attribute_based / set_by_caller / custom_calculation_class)"),
+                *MagnitudeTypeToken));
+    }
+
+    // Capture the previous magnitude's calculation type so the caller
+    // sees what the rewrite replaced.
+    const EGameplayEffectMagnitudeCalculation PrevCalc = Effect->Modifiers[Index].ModifierMagnitude.GetMagnitudeCalculationType();
+    FString PrevCanonical;
+    switch (PrevCalc)
+    {
+    case EGameplayEffectMagnitudeCalculation::ScalableFloat:          PrevCanonical = TEXT("ScalableFloat"); break;
+    case EGameplayEffectMagnitudeCalculation::AttributeBased:         PrevCanonical = TEXT("AttributeBased"); break;
+    case EGameplayEffectMagnitudeCalculation::CustomCalculationClass: PrevCanonical = TEXT("CustomCalculationClass"); break;
+    case EGameplayEffectMagnitudeCalculation::SetByCaller:            PrevCanonical = TEXT("SetByCaller"); break;
+    default: PrevCanonical = TEXT("Unknown"); break;
+    }
+
+    Effect->Modifiers[Index].ModifierMagnitude = NewMagnitude;
+
+    UBlueprint* OwningBP = Cast<UBlueprint>(Asset);
+    if (OwningBP)
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsModified(OwningBP);
+        if (bCompile)
+        {
+            FKismetEditorUtilities::CompileBlueprint(OwningBP);
+        }
+    }
+    Effect->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("set_modifier_magnitude"));
+    Result->SetStringField(TEXT("path"), Asset->GetPathName());
+    Result->SetNumberField(TEXT("modifier_index"), Index);
+    Result->SetNumberField(TEXT("modifier_count"), Effect->Modifiers.Num());
+    Result->SetStringField(TEXT("magnitude_type"), CanonicalType);
+    Result->SetStringField(TEXT("previous_magnitude_type"), PrevCanonical);
+    Result->SetObjectField(TEXT("payload"), VariantOut);
+    Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
 }

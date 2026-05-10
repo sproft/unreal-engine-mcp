@@ -5535,6 +5535,17 @@ def gas_edit(
     overwrite: Optional[bool] = None,
     compile: Optional[bool] = None,
     save: Optional[bool] = None,
+    magnitude_type: Optional[str] = None,
+    value: Optional[float] = None,
+    source: Optional[str] = None,
+    snapshot: Optional[bool] = None,
+    coefficient: Optional[float] = None,
+    pre_multiply: Optional[float] = None,
+    post_multiply: Optional[float] = None,
+    calculation_type: Optional[str] = None,
+    data_name: Optional[str] = None,
+    data_tag: Optional[str] = None,
+    calculation_class: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over Gameplay Ability System assets.
@@ -5593,6 +5604,31 @@ def gas_edit(
           ``cue_tag_warning`` and the node still lays down with the
           literal so the next ``tag_registry_edit add_tag`` makes
           the binding valid.
+        - ``set_modifier_magnitude``: rewrite the magnitude on an
+          existing FGameplayModifierInfo entry on a UGameplayEffect.
+          The previous ``add_modifier`` op only emitted the
+          scalable-float variant; this op extends the magnitude
+          surface to the other documented variants. The
+          ``magnitude_type`` token selects the variant
+          (``scalable_float`` / ``attribute_based`` /
+          ``set_by_caller`` / ``custom_calculation_class``).
+          ``scalable_float`` takes a literal ``value`` (float).
+          ``attribute_based`` reuses the ``add_modifier`` attribute
+          resolver (``attribute`` colon-form or
+          ``attribute_set`` + ``attribute_name``), accepts
+          optional ``source`` (``source`` / ``target``, default
+          source), optional ``snapshot``, optional
+          ``coefficient`` / ``pre_multiply`` / ``post_multiply``
+          (literal floats), and optional ``calculation_type``
+          (``magnitude`` / ``base_value`` / ``bonus_magnitude`` /
+          ``magnitude_evaluated_up_to_channel``).
+          ``set_by_caller`` takes ``data_name`` (FName) and / or
+          ``data_tag`` (FGameplayTag string; unknown tags surface a
+          warning and the runtime falls back to DataName).
+          ``custom_calculation_class`` takes ``calculation_class``
+          (UGameplayModMagnitudeCalculation subclass path) plus
+          optional ``coefficient`` / ``pre_multiply`` /
+          ``post_multiply`` floats.
 
     Args:
         asset: Required for ``inspect`` / ``set_gameplay_tags`` /
@@ -5678,6 +5714,28 @@ def gas_edit(
         params["compile"] = compile
     if save is not None:
         params["save"] = save
+    if magnitude_type is not None:
+        params["magnitude_type"] = magnitude_type
+    if value is not None:
+        params["value"] = value
+    if source is not None:
+        params["source"] = source
+    if snapshot is not None:
+        params["snapshot"] = snapshot
+    if coefficient is not None:
+        params["coefficient"] = coefficient
+    if pre_multiply is not None:
+        params["pre_multiply"] = pre_multiply
+    if post_multiply is not None:
+        params["post_multiply"] = post_multiply
+    if calculation_type is not None:
+        params["calculation_type"] = calculation_type
+    if data_name is not None:
+        params["data_name"] = data_name
+    if data_tag is not None:
+        params["data_tag"] = data_tag
+    if calculation_class is not None:
+        params["calculation_class"] = calculation_class
 
     try:
         response = unreal.send_command("gas_edit", params)
