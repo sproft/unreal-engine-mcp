@@ -5662,6 +5662,13 @@ def sequencer_edit(
     binding_name: Optional[str] = None,
     overwrite: Optional[bool] = None,
     save: Optional[bool] = None,
+    track_class: Optional[str] = None,
+    binding: Optional[str] = None,
+    possessable: Optional[str] = None,
+    track: Optional[str] = None,
+    start_frame: Optional[int] = None,
+    duration_frames: Optional[int] = None,
+    section_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over a ULevelSequence asset.
@@ -5679,29 +5686,48 @@ def sequencer_edit(
           existing ULevelSequence. Wraps UMovieScene::AddPossessable +
           UMovieSceneSequence::BindPossessableObject so the Sequencer
           UI picks the binding up the next time the asset opens.
-
-    Edit-slice future work (track add, section add, section move,
-    spawnable creation, camera-cut creation) stays on the backlog.
+        - ``add_track``: add a UMovieSceneTrack of a chosen subclass.
+          Master tracks attach via ``UMovieScene::AddMasterTrack``;
+          binding-scoped tracks attach via ``UMovieScene::AddTrack``.
+        - ``add_section``: append a section to a chosen track at an
+          explicit start frame + duration through
+          ``UMovieSceneTrack::CreateNewSection`` plus ``AddSection``.
+        - ``move_section``: move an existing section on a chosen
+          track to a new (start frame, duration) pair through
+          ``UMovieSceneSection::SetRange``. The target section is
+          resolved through the ``track`` plus a ``section_index``.
 
     Args:
-        sequence: For ``inspect`` / ``add_possessable`` the existing
-            Level Sequence asset path or short name. For
-            ``create_level_sequence`` the target ``/Game/...`` package
-            path.
-        op: One of ``inspect`` (default), ``create_level_sequence``,
-            or ``add_possessable``.
+        sequence: For inspect / add_possessable / add_track /
+            add_section / move_section the existing Level Sequence
+            asset path or short name. For create_level_sequence the
+            target ``/Game/...`` package path.
+        op: One of ``inspect`` (default) / ``create_level_sequence``
+            / ``add_possessable`` / ``add_track`` / ``add_section``
+            / ``move_section``.
         include_tracks / include_camera_cut_track / include_sections /
             include_possessables / include_spawnables /
-            max_sections_per_track: ``inspect``-only flags.
-        actor: ``add_possessable``-only target actor name (matched
-            against GetName() first and Outliner label second).
-        binding_name: ``add_possessable``-only friendly name for the
+            max_sections_per_track: inspect-only flags.
+        actor: add_possessable-only target actor name. add_track
+            optional binding resolver.
+        binding_name: add_possessable-only friendly name for the
             FMovieScenePossessable. Optional; falls back to the
             actor's GetActorLabel().
-        overwrite: ``create_level_sequence``-only flag. Replace an
-            existing asset at the path. Default False.
-        save: Save the asset after the edit. Default True for both
-            edit ops.
+        overwrite: create_level_sequence-only flag.
+        save: Save the asset after the edit. Default True for the
+            mutating ops.
+        track_class: add_track. UMovieSceneTrack subclass token.
+        binding: add_track / add_section / move_section optional
+            binding GUID (string).
+        possessable: add_track optional possessable name.
+        track: add_section / move_section. Track FName / display
+            name (case-insensitive substring match).
+        start_frame: add_section / move_section. Integer tick-
+            resolution start frame.
+        duration_frames: add_section / move_section. Integer tick-
+            resolution duration.
+        section_index: move_section. Integer index into the track's
+            sections array.
 
     Returns:
         For ``inspect`` see the read-only slice's contract. For
@@ -5710,7 +5736,14 @@ def sequencer_edit(
         ``display_rate`` / ``saved``. For ``add_possessable`` a dict
         with ``operation`` / ``sequence`` / ``guid`` /
         ``binding_name`` / ``actor`` / ``actor_label`` /
-        ``actor_class`` / ``actor_class_path`` / ``saved``.
+        ``actor_class`` / ``actor_class_path`` / ``saved``. For
+        ``move_section`` a dict with ``operation`` / ``sequence`` /
+        ``track_name`` / ``track_class`` / ``section_class`` /
+        ``section_class_path`` / ``section_index`` / ``start_frame``
+        / ``end_frame_exclusive`` / ``duration_frames`` /
+        ``had_previous_start_frame`` / ``had_previous_end_frame`` /
+        optional ``previous_start_frame`` / ``previous_duration_frames``
+        / optional ``binding_guid`` / ``saved``.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -5739,6 +5772,20 @@ def sequencer_edit(
         params["overwrite"] = overwrite
     if save is not None:
         params["save"] = save
+    if track_class is not None:
+        params["track_class"] = track_class
+    if binding is not None:
+        params["binding"] = binding
+    if possessable is not None:
+        params["possessable"] = possessable
+    if track is not None:
+        params["track"] = track
+    if start_frame is not None:
+        params["start_frame"] = start_frame
+    if duration_frames is not None:
+        params["duration_frames"] = duration_frames
+    if section_index is not None:
+        params["section_index"] = section_index
 
     try:
         response = unreal.send_command("sequencer_edit", params)

@@ -391,6 +391,10 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCommand(const FStrin
     {
         return HandleAddSection(Params);
     }
+    if (Op == TEXT("move_section"))
+    {
+        return HandleMoveSection(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("sequencer_edit: unsupported op '%s'"), *Op));
 }
@@ -953,6 +957,160 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddSection(const TSh
     Result->SetNumberField(TEXT("start_frame"), StartFrame);
     Result->SetNumberField(TEXT("end_frame_exclusive"), StartFrame + DurationFrames);
     Result->SetNumberField(TEXT("duration_frames"), DurationFrames);
+    if (BindingGuid.IsValid())
+    {
+        Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleMoveSection(const TSharedPtr<FJsonObject>& Params)
+{
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    UMovieSceneSequence* Sequence = Cast<UMovieSceneSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMovieSceneSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    FString TrackName;
+    if (!Params->TryGetStringField(TEXT("track"), TrackName)
+        && !Params->TryGetStringField(TEXT("track_name"), TrackName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'track' parameter (FName / display name / class substring)"));
+    }
+
+    FGuid BindingGuid;
+    FString BindingGuidString;
+    if (Params->TryGetStringField(TEXT("binding"), BindingGuidString)
+        || Params->TryGetStringField(TEXT("binding_guid"), BindingGuidString))
+    {
+        if (!FGuid::Parse(BindingGuidString, BindingGuid))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Invalid binding GUID '%s'"), *BindingGuidString));
+        }
+    }
+
+    UMovieSceneTrack* Track = FindTrackByName(MovieScene, TrackName, BindingGuid);
+    if (!Track)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No track matching '%s' on sequence '%s'%s"),
+                *TrackName, *Sequence->GetName(),
+                BindingGuid.IsValid() ? *FString::Printf(TEXT(" (binding %s)"), *BindingGuid.ToString())
+                                       : TEXT("")));
+    }
+
+    int32 SectionIndex = INDEX_NONE;
+    if (!Params->TryGetNumberField(TEXT("section_index"), SectionIndex))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'section_index' (integer index into the track's sections array)"));
+    }
+
+    int32 StartFrame = 0;
+    int32 DurationFrames = 0;
+    if (!Params->TryGetNumberField(TEXT("start_frame"), StartFrame))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'start_frame' (integer, tick-resolution frame)"));
+    }
+    if (!Params->TryGetNumberField(TEXT("duration_frames"), DurationFrames))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'duration_frames' (integer, tick-resolution frames)"));
+    }
+    if (DurationFrames <= 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("'duration_frames' must be positive"));
+    }
+
+    const TArray<UMovieSceneSection*>& Sections = Track->GetAllSections();
+    if (SectionIndex < 0 || SectionIndex >= Sections.Num())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'section_index' %d out of range [0, %d) for track '%s'"),
+                SectionIndex, Sections.Num(), *TrackName));
+    }
+    UMovieSceneSection* Section = Sections[SectionIndex];
+    if (!Section)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Section at index %d on track '%s' is null"),
+                SectionIndex, *TrackName));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Capture the previous range so the response can mirror it back.
+    const TRange<FFrameNumber> PreviousRange = Section->GetRange();
+    int32 PreviousStart = 0;
+    int32 PreviousDuration = 0;
+    const bool bHadStart = PreviousRange.GetLowerBound().IsClosed();
+    const bool bHadEnd = PreviousRange.GetUpperBound().IsClosed();
+    if (bHadStart)
+    {
+        PreviousStart = PreviousRange.GetLowerBoundValue().Value;
+    }
+    if (bHadStart && bHadEnd)
+    {
+        PreviousDuration = PreviousRange.GetUpperBoundValue().Value - PreviousRange.GetLowerBoundValue().Value;
+    }
+
+    const TRange<FFrameNumber> NewRange = TRange<FFrameNumber>(
+        TRangeBound<FFrameNumber>::Inclusive(FFrameNumber(StartFrame)),
+        TRangeBound<FFrameNumber>::Exclusive(FFrameNumber(StartFrame + DurationFrames)));
+    // SetRange already calls TryModify(); we still dirty the package
+    // so the next save lands. The base class has no separate
+    // MarkAsChanged in 5.7, so this is the documented pattern.
+    Section->SetRange(NewRange);
+    Section->MarkPackageDirty();
+
+    Sequence->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("move_section"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("track_name"), Track->GetFName().ToString());
+    Result->SetStringField(TEXT("track_class"), Track->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class"), Section->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class_path"), Section->GetClass()->GetPathName());
+    Result->SetNumberField(TEXT("section_index"), SectionIndex);
+    Result->SetNumberField(TEXT("start_frame"), StartFrame);
+    Result->SetNumberField(TEXT("end_frame_exclusive"), StartFrame + DurationFrames);
+    Result->SetNumberField(TEXT("duration_frames"), DurationFrames);
+    Result->SetBoolField(TEXT("had_previous_start_frame"), bHadStart);
+    Result->SetBoolField(TEXT("had_previous_end_frame"), bHadEnd);
+    if (bHadStart)
+    {
+        Result->SetNumberField(TEXT("previous_start_frame"), PreviousStart);
+    }
+    if (bHadStart && bHadEnd)
+    {
+        Result->SetNumberField(TEXT("previous_duration_frames"), PreviousDuration);
+    }
     if (BindingGuid.IsValid())
     {
         Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());

@@ -24,6 +24,11 @@
  *   - `add_section`: append a section to a chosen track at an explicit
  *     start frame + duration. Uses `UMovieSceneTrack::CreateNewSection` +
  *     `AddSection` so the track decides its native section subclass.
+ *   - `move_section`: move an existing section on a chosen track to a
+ *     new (start frame, duration) pair through `UMovieSceneSection::SetRange`
+ *     plus `MarkAsChanged`. The target section is resolved either by
+ *     `section_index` (into the track's `GetAllSections()` array) or
+ *     by track / binding scoping plus the index.
  *
  * Inputs (inspect):
  *   - sequence: short asset name or full `/Game/...` Level Sequence
@@ -77,6 +82,16 @@
  *   - duration_frames: integer tick-resolution duration. Required.
  *   - save: save the asset after the edit. Default True.
  *
+ * Inputs (move_section):
+ *   - sequence: required.
+ *   - track: required. Same matching rules as `add_section`.
+ *   - binding: optional binding GUID disambiguator.
+ *   - section_index: integer index into the track's
+ *     `GetAllSections()` array. Required.
+ *   - start_frame: integer tick-resolution start frame. Required.
+ *   - duration_frames: integer tick-resolution duration. Required.
+ *   - save: save the asset after the edit. Default True.
+ *
  * Read-only `inspect` does not mutate the asset; the two edit ops
  * touch the package and dirty it for save.
  *
@@ -114,4 +129,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddPossessable(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddTrack(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddSection(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleMoveSection(const TSharedPtr<FJsonObject>& Params);
 };
