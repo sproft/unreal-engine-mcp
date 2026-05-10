@@ -6,7 +6,7 @@
 /**
  * Sproft fork addition: foliage_edit (small variant)
  *
- * Two ops on AInstancedFoliageActor / UFoliageType, keyed by `op`:
+ * Three ops on AInstancedFoliageActor / UFoliageType, keyed by `op`:
  *
  *   - `add_foliage_type`: register a UFoliageType asset on the
  *     AInstancedFoliageActor for a chosen level. Resolves (or
@@ -21,11 +21,20 @@
  *     `ScaleX` / `ScaleY` / `ScaleZ` FFloatInterval pairs on a
  *     UFoliageType asset. All fields are optional; only the ones
  *     present in the call are written. Saves the asset by default.
- *
- * The "place N instances at locations" op stays on the backlog;
- * this slice covers the two ops a designer reaches for first when
- * building a foliage pass: bind the type to a level so the foliage
- * tool sees it, then dial the painting density / radius.
+ *   - `place_foliage_instances`: place N foliage instances at the
+ *     given world-space `[x, y, z]` locations. Resolves (or spawns)
+ *     the IFA for the chosen level, registers the foliage type
+ *     when missing, and then walks the locations array building
+ *     one `FFoliageInstance` per row through
+ *     `FFoliageInfo::AddInstance(InSettings, NewInstance)`. Each
+ *     instance picks up the foliage type's per-axis ScaleX / Y / Z
+ *     interval midpoint as its DrawScale3D when no per-row
+ *     override is supplied. Optional `rotations` (parallel array
+ *     of `[pitch, yaw, roll]` triples) applies a per-instance
+ *     rotation; when omitted every instance lands at zero rotation.
+ *     Optional `scales` (parallel array of `[x, y, z]` triples)
+ *     overrides the DrawScale3D per row. The IFA's owning level
+ *     is dirtied + saved on success unless `save=false`.
  *
  * Inputs (add_foliage_type):
  *   - foliage_type: short asset name or `/Game/...` UFoliageType
@@ -49,6 +58,23 @@
  *     shape for Y / Z.
  *   - save: persist the asset on success. Default True.
  *
+ * Inputs (place_foliage_instances):
+ *   - foliage_type: short asset name or `/Game/...` UFoliageType
+ *     path. Required.
+ *   - level: optional substring on owning ULevel name. Defaults to
+ *     the persistent level.
+ *   - locations: required, non-empty array of `[x, y, z]` world-
+ *     space location triples (or `{x, y, z}` objects). One
+ *     instance is placed per entry.
+ *   - rotations: optional, parallel array of `[pitch, yaw, roll]`
+ *     triples. When shorter than `locations`, the missing rows
+ *     fall back to zero rotation.
+ *   - scales: optional, parallel array of `[x, y, z]` triples.
+ *     When shorter than `locations`, the missing rows fall back to
+ *     the foliage type's per-axis scale interval midpoint.
+ *   - save: persist the IFA's owning level on success. Default
+ *     True.
+ *
  * Returns op-specific dicts. `add_foliage_type` reports the
  * resolved actor name + path + level + foliage type count + a
  * `created_actor` flag when the IFA was spawned for this call;
@@ -64,6 +90,8 @@
  *     bound" probe.
  *   - UFoliageType::Density / DensityAdjustmentFactor / Radius /
  *     ScaleX / ScaleY / ScaleZ direct UPROPERTY writes.
+ *   - FFoliageInstance struct + FFoliageInfo::AddInstance for
+ *     per-instance placement (FOLIAGE_API).
  *   - UEditorAssetLibrary::LoadAsset / SaveAsset for the asset
  *     resolve / persist cycle.
  *
@@ -79,4 +107,5 @@ public:
 private:
     TSharedPtr<FJsonObject> HandleAddFoliageType(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetFoliageDensity(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandlePlaceFoliageInstances(const TSharedPtr<FJsonObject>& Params);
 };

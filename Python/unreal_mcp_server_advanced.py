@@ -6237,12 +6237,15 @@ def foliage_edit(
     scale_y_max: Optional[float] = None,
     scale_z_min: Optional[float] = None,
     scale_z_max: Optional[float] = None,
+    locations: Optional[List[Any]] = None,
+    rotations: Optional[List[Any]] = None,
+    scales: Optional[List[Any]] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Foliage authoring (small variant).
 
-    Two ops on AInstancedFoliageActor / UFoliageType, keyed by ``op``:
+    Three ops on AInstancedFoliageActor / UFoliageType, keyed by ``op``:
 
         - ``add_foliage_type``: register a UFoliageType asset on the
           AInstancedFoliageActor for a chosen level. Resolves (or
@@ -6255,31 +6258,50 @@ def foliage_edit(
           ``ScaleX`` / ``ScaleY`` / ``ScaleZ`` FFloatInterval pairs
           on a UFoliageType asset. All fields are optional; only
           the ones present in the call are written.
+        - ``place_foliage_instances``: place N foliage instances on
+          the IFA for the chosen level. ``locations`` is a required
+          list of ``[x, y, z]`` world-space triples; ``rotations``
+          and ``scales`` are optional parallel lists. Missing
+          rotations land at ``[0, 0, 0]``; missing scales fall back
+          to the foliage type's per-axis ScaleX / Y / Z interval
+          midpoint. Wraps ``FFoliageInfo::AddInstance`` directly.
 
     Args:
-        op: One of ``add_foliage_type`` / ``set_foliage_density``.
-            Required.
+        op: One of ``add_foliage_type`` / ``set_foliage_density`` /
+            ``place_foliage_instances``. Required.
         foliage_type: Short asset name or ``/Game/...`` UFoliageType
             path. Required.
         level: Optional substring on owning ULevel name. Used by
-            ``add_foliage_type`` to pick a sublevel; defaults to
-            the persistent level when omitted.
+            ``add_foliage_type`` and ``place_foliage_instances`` to
+            pick a sublevel; defaults to the persistent level when
+            omitted.
         density / density_adjustment_factor / radius: Optional floats
             for ``set_foliage_density``.
         scale_x_min / scale_x_max / scale_y_min / scale_y_max /
         scale_z_min / scale_z_max: Optional floats for
             ``set_foliage_density``. Each axis interval requires both
             min and max to be present together.
+        locations: Required list of ``[x, y, z]`` triples (or
+            ``{x, y, z}`` dicts) for ``place_foliage_instances``.
+        rotations: Optional list of ``[pitch, yaw, roll]`` triples
+            for ``place_foliage_instances``.
+        scales: Optional list of ``[x, y, z]`` triples for
+            ``place_foliage_instances``.
         save: Persist on success. Default True for
-            ``set_foliage_density``; False for ``add_foliage_type``
-            (the IFA is a level actor, not an asset).
+            ``set_foliage_density`` and ``place_foliage_instances``;
+            False for ``add_foliage_type`` (the IFA is a level
+            actor, not an asset).
 
     Returns:
         Op-specific dict. ``add_foliage_type`` reports the IFA's
         ``actor_path``, ``level``, ``created_actor``, and
         ``type_already_bound`` flags;
         ``set_foliage_density`` reports the previous and new values
-        for every field actually written.
+        for every field actually written;
+        ``place_foliage_instances`` reports ``placed_count`` /
+        ``skipped_count`` / ``requested_count`` /
+        ``placed_instance_total`` plus a ``skipped`` array carrying
+        each row whose location did not parse.
     """
     unreal = get_unreal_connection()
     if not unreal:
@@ -6306,6 +6328,12 @@ def foliage_edit(
         params["scale_z_min"] = scale_z_min
     if scale_z_max is not None:
         params["scale_z_max"] = scale_z_max
+    if locations is not None:
+        params["locations"] = locations
+    if rotations is not None:
+        params["rotations"] = rotations
+    if scales is not None:
+        params["scales"] = scales
     if save is not None:
         params["save"] = save
 
