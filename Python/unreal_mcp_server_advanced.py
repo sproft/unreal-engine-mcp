@@ -3058,6 +3058,13 @@ def widget_edit(
     mirroring: Optional[str] = None,
     rule: Optional[str] = None,
     target: Optional[str] = None,
+    anchors_min: Optional[Any] = None,
+    anchors_max: Optional[Any] = None,
+    anchors: Optional[Any] = None,
+    offsets: Optional[Any] = None,
+    pivot: Optional[Any] = None,
+    z_order: Optional[int] = None,
+    auto_size: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3209,6 +3216,32 @@ def widget_edit(
           ``{Left,Top,Right,Bottom}``. After the writes
           ``PostEditChangeProperty`` fires on the widget so the
           UMG editor preview refreshes.
+        - "set_canvas_slot": single-call sugar over
+          ``set_slot_property`` for the UCanvasPanelSlot surface.
+          ``widget`` is the FName of the target child widget on
+          the WBP's WidgetTree; the child's slot must be a
+          UCanvasPanelSlot (i.e. the parent panel is a
+          UCanvasPanel). Any of the canonical canvas knobs are
+          optional: ``anchors_min`` / ``anchors_max`` accept
+          ``[x, y]`` / ``{x, y}``; ``anchors`` is the box-form
+          shorthand (``[minx, miny, maxx, maxy]`` or
+          ``{min:[x,y], max:[x,y]}``). ``offsets`` accepts
+          ``[left, top, right, bottom]`` / ``[horizontal,
+          vertical]`` / a uniform number / ``{Left, Top, Right,
+          Bottom}``. ``position`` ``[x, y]`` and ``size`` ``[x, y]``
+          are shorthand for writing the Left/Top and Right/Bottom
+          halves of the offsets margin (the canvas layout contract
+          uses Right/Bottom as width/height when anchors collapse
+          onto a point). ``alignment`` / ``pivot`` accept the
+          ``[x, y]`` / ``{x, y}`` shape or a scalar that
+          broadcasts onto both axes. ``z_order`` is the int draw
+          order under the panel; ``auto_size`` is a bool that
+          drives ``UCanvasPanelSlot::bAutoSize``. After the
+          writes ``PostEditChange`` fires on the slot and the
+          parent panel reflows so an open UMG editor refresh
+          picks the slot change up. Useful for canvas-anchored
+          UMG layouts without manual UPROPERTY-by-UPROPERTY
+          tweaks.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3377,6 +3410,20 @@ def widget_edit(
         params["rule"] = rule
     if target is not None:
         params["target"] = target
+    if anchors_min is not None:
+        params["anchors_min"] = anchors_min
+    if anchors_max is not None:
+        params["anchors_max"] = anchors_max
+    if anchors is not None:
+        params["anchors"] = anchors
+    if offsets is not None:
+        params["offsets"] = offsets
+    if pivot is not None:
+        params["pivot"] = pivot
+    if z_order is not None:
+        params["z_order"] = z_order
+    if auto_size is not None:
+        params["auto_size"] = auto_size
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite

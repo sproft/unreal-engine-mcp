@@ -133,6 +133,25 @@
  *      `{Left,Top,Right,Bottom}`. After the writes
  *      `PostEditChangeProperty` fires on the widget so the UMG
  *      editor's preview refreshes.
+ *   - "set_canvas_slot": single-call sugar over `set_slot_property`
+ *      for the UCanvasPanelSlot surface. Takes the widget blueprint
+ *      plus a target child widget FName plus any of the canonical
+ *      canvas slot knobs: `anchors_min` `[x, y]` / `anchors_max`
+ *      `[x, y]` (the anchor box; equal min == max collapses the
+ *      anchor onto a point), `offsets` `[left, top, right, bottom]`
+ *      (the FAnchorData::Offsets margin: with auto-size off it
+ *      doubles as width / height when min == max, otherwise it stays
+ *      a margin only), `alignment` `[x, y]` (the per-axis pivot the
+ *      offsets resolve against), `z_order` (int draw-order under the
+ *      panel), and `auto_size` (bool, drives
+ *      `UCanvasPanelSlot::bAutoSize` so the slot sizes to the child's
+ *      preferred size). Refuses children whose parent is not a
+ *      UCanvasPanel since the slot class on a vertical box / overlay
+ *      child does not carry these fields. After the writes
+ *      `PostEditChange` fires on the slot and the parent panel
+ *      reflows so an open UMG editor refresh picks the slot change
+ *      up. Useful for canvas-anchored UMG layouts without manual
+ *      UPROPERTY-by-UPROPERTY tweaks.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - FKismetEditorUtilities::CreateBlueprint for asset creation
@@ -171,4 +190,5 @@ private:
     TSharedPtr<FJsonObject> SetWidgetStyle(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetWidgetBrush(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetWidgetNavigation(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetCanvasSlot(const TSharedPtr<FJsonObject>& Params);
 };

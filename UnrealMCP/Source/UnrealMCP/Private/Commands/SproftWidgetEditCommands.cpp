@@ -11,6 +11,7 @@
 #include "Components/Border.h"
 #include "Components/Button.h"
 #include "Components/CanvasPanel.h"
+#include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBox.h"
 #include "Components/Image.h"
 #include "Components/Overlay.h"
@@ -359,9 +360,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetWidgetNavigation(Params);
     }
+    if (Operation == TEXT("set_canvas_slot") || Operation == TEXT("set_canvas_panel_slot")
+        || Operation == TEXT("canvas_slot") || Operation == TEXT("set_anchored_slot"))
+    {
+        return SetCanvasSlot(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation, set_canvas_slot"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -3607,6 +3613,483 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWidgetNavigation(const TSh
         ResultObj->SetStringField(TEXT("previous_target"), PrevWidgetToFocus.ToString());
     }
     ResultObj->SetBoolField(TEXT("spawned_navigation_instance"), bSpawnedNavigation);
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Parse a JSON [x, y] / {X, Y} value into FVector2D. Returns true
+     *  on success. Leaves OutVec untouched on failure so the caller can
+     *  hold the prior value when the field is absent. */
+    bool CanvasSlot_ParseVec2(const TSharedPtr<FJsonValue>& Value, FVector2D& OutVec)
+    {
+        if (!Value.IsValid())
+        {
+            return false;
+        }
+        if (Value->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = Value->AsArray();
+            if (Arr.Num() >= 2 && Arr[0].IsValid() && Arr[1].IsValid())
+            {
+                OutVec.X = Arr[0]->AsNumber();
+                OutVec.Y = Arr[1]->AsNumber();
+                return true;
+            }
+            return false;
+        }
+        if (Value->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject>& Obj = Value->AsObject();
+            double X = 0.0, Y = 0.0;
+            if (Obj.IsValid()
+                && (Obj->TryGetNumberField(TEXT("x"), X) || Obj->TryGetNumberField(TEXT("X"), X))
+                && (Obj->TryGetNumberField(TEXT("y"), Y) || Obj->TryGetNumberField(TEXT("Y"), Y)))
+            {
+                OutVec.X = X;
+                OutVec.Y = Y;
+                return true;
+            }
+            return false;
+        }
+        if (Value->Type == EJson::Number)
+        {
+            // A scalar broadcasts onto both axes. The "1.0" pivot case
+            // for `alignment` is the typical caller.
+            OutVec.X = Value->AsNumber();
+            OutVec.Y = Value->AsNumber();
+            return true;
+        }
+        return false;
+    }
+
+    /** Parse a JSON [left, top, right, bottom] / {Left, Top, Right,
+     *  Bottom} (case-insensitive) value into FMargin. Returns true on
+     *  success. */
+    bool CanvasSlot_ParseMargin(const TSharedPtr<FJsonValue>& Value, FMargin& OutMargin)
+    {
+        if (!Value.IsValid())
+        {
+            return false;
+        }
+        if (Value->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = Value->AsArray();
+            if (Arr.Num() == 4)
+            {
+                OutMargin.Left   = Arr[0]->AsNumber();
+                OutMargin.Top    = Arr[1]->AsNumber();
+                OutMargin.Right  = Arr[2]->AsNumber();
+                OutMargin.Bottom = Arr[3]->AsNumber();
+                return true;
+            }
+            if (Arr.Num() == 2)
+            {
+                // Horizontal / vertical broadcast.
+                OutMargin.Left = OutMargin.Right = Arr[0]->AsNumber();
+                OutMargin.Top = OutMargin.Bottom = Arr[1]->AsNumber();
+                return true;
+            }
+            return false;
+        }
+        if (Value->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject>& Obj = Value->AsObject();
+            double L = OutMargin.Left, T = OutMargin.Top, R = OutMargin.Right, B = OutMargin.Bottom;
+            Obj->TryGetNumberField(TEXT("left"), L);   Obj->TryGetNumberField(TEXT("Left"), L);
+            Obj->TryGetNumberField(TEXT("top"), T);    Obj->TryGetNumberField(TEXT("Top"), T);
+            Obj->TryGetNumberField(TEXT("right"), R);  Obj->TryGetNumberField(TEXT("Right"), R);
+            Obj->TryGetNumberField(TEXT("bottom"), B); Obj->TryGetNumberField(TEXT("Bottom"), B);
+            OutMargin.Left = L; OutMargin.Top = T; OutMargin.Right = R; OutMargin.Bottom = B;
+            return true;
+        }
+        if (Value->Type == EJson::Number)
+        {
+            const double N = Value->AsNumber();
+            OutMargin.Left = OutMargin.Top = OutMargin.Right = OutMargin.Bottom = N;
+            return true;
+        }
+        return false;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetCanvasSlot(const TSharedPtr<FJsonObject>& Params)
+{
+    // Sugar over set_slot_property for the UCanvasPanelSlot surface.
+    // The canvas slot stores its layout under an FAnchorData field
+    // (`LayoutData.Anchors` for the anchor box, `LayoutData.Offsets`
+    // for the offset margin, `LayoutData.Alignment` for the per-axis
+    // pivot) plus `ZOrder` (int draw order) and `bAutoSize` (sizes the
+    // slot to the child's preferred size when set). The engine exposes
+    // setters on UCanvasPanelSlot for each field; we route through
+    // those so any open editor and the cached SBox slot picker stay
+    // in sync.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_canvas_slot: missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_canvas_slot: asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+    if (!WBP->WidgetTree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_canvas_slot: WidgetBlueprint has no WidgetTree"));
+    }
+
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_canvas_slot: missing 'widget' parameter (target child widget FName)"));
+    }
+    UWidget* TargetWidget = WBP->WidgetTree->FindWidget(FName(*WidgetNameStr));
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_canvas_slot: could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    UCanvasPanelSlot* Slot = Cast<UCanvasPanelSlot>(TargetWidget->Slot);
+    if (!Slot)
+    {
+        // The slot class is decided by the parent panel when the child
+        // attaches. If the child's parent is not a UCanvasPanel, the
+        // slot class is something else (UVerticalBoxSlot,
+        // UOverlaySlot, etc.) and the canvas-specific knobs do not
+        // apply. Surface a clear error so the caller knows to either
+        // reparent the child or use the generic `set_slot_property`.
+        UClass* SlotClass = TargetWidget->Slot ? TargetWidget->Slot->GetClass() : nullptr;
+        const FString SlotClassName = SlotClass ? SlotClass->GetName() : FString(TEXT("<null>"));
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_canvas_slot: widget '%s' is not parented to a UCanvasPanel (slot class is '%s'). Reparent the child to a canvas panel or use 'set_slot_property' for non-canvas slots."),
+                *WidgetNameStr, *SlotClassName));
+    }
+
+    // Capture the previous values for the diff payload. We use the
+    // raw LayoutData snapshot so the caller can read every changed
+    // field on a single round trip.
+    const FAnchorData PrevLayout = Slot->GetLayout();
+    const int32 PrevZOrder = Slot->GetZOrder();
+    const bool bPrevAutoSize = Slot->GetAutoSize();
+
+    // The new values start from the previous so a partial update
+    // preserves untouched fields. We walk each optional knob, parse
+    // any present value, and route through the setter so the engine
+    // signals layout invalidation correctly.
+    FVector2D AnchorsMin = PrevLayout.Anchors.Minimum;
+    FVector2D AnchorsMax = PrevLayout.Anchors.Maximum;
+    FMargin Offsets = PrevLayout.Offsets;
+    FVector2D Alignment = PrevLayout.Alignment;
+    int32 ZOrder = PrevZOrder;
+    bool bAutoSize = bPrevAutoSize;
+
+    TArray<FString> Applied;
+
+    bool bWroteAnchors = false;
+    {
+        const TSharedPtr<FJsonValue> MinVal = Params->TryGetField(TEXT("anchors_min"));
+        const TSharedPtr<FJsonValue> MaxVal = Params->TryGetField(TEXT("anchors_max"));
+        if (MinVal.IsValid())
+        {
+            if (!CanvasSlot_ParseVec2(MinVal, AnchorsMin))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_canvas_slot: 'anchors_min' must be [x, y] or {x, y}"));
+            }
+            bWroteAnchors = true;
+            Applied.Add(TEXT("anchors_min"));
+        }
+        if (MaxVal.IsValid())
+        {
+            if (!CanvasSlot_ParseVec2(MaxVal, AnchorsMax))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_canvas_slot: 'anchors_max' must be [x, y] or {x, y}"));
+            }
+            bWroteAnchors = true;
+            Applied.Add(TEXT("anchors_max"));
+        }
+        // `anchors` accepts an object form {min:[x,y], max:[x,y]} for
+        // callers who want to set the whole box in one shot, or an
+        // array `[minx, miny, maxx, maxy]`. Both spellings broadcast
+        // onto the AnchorsMin / AnchorsMax pair.
+        const TSharedPtr<FJsonValue> AnchorsVal = Params->TryGetField(TEXT("anchors"));
+        if (AnchorsVal.IsValid())
+        {
+            if (AnchorsVal->Type == EJson::Array)
+            {
+                const TArray<TSharedPtr<FJsonValue>>& Arr = AnchorsVal->AsArray();
+                if (Arr.Num() == 4)
+                {
+                    AnchorsMin.X = Arr[0]->AsNumber();
+                    AnchorsMin.Y = Arr[1]->AsNumber();
+                    AnchorsMax.X = Arr[2]->AsNumber();
+                    AnchorsMax.Y = Arr[3]->AsNumber();
+                    bWroteAnchors = true;
+                    Applied.Add(TEXT("anchors"));
+                }
+                else if (Arr.Num() == 2)
+                {
+                    AnchorsMin.X = AnchorsMax.X = Arr[0]->AsNumber();
+                    AnchorsMin.Y = AnchorsMax.Y = Arr[1]->AsNumber();
+                    bWroteAnchors = true;
+                    Applied.Add(TEXT("anchors"));
+                }
+                else
+                {
+                    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                        TEXT("set_canvas_slot: 'anchors' array must be [minx, miny, maxx, maxy] or [x, y]"));
+                }
+            }
+            else if (AnchorsVal->Type == EJson::Object)
+            {
+                const TSharedPtr<FJsonObject>& Obj = AnchorsVal->AsObject();
+                const TSharedPtr<FJsonValue> Min = Obj->TryGetField(TEXT("min"));
+                const TSharedPtr<FJsonValue> Max = Obj->TryGetField(TEXT("max"));
+                bool bRead = false;
+                if (Min.IsValid())
+                {
+                    bRead = CanvasSlot_ParseVec2(Min, AnchorsMin) || bRead;
+                }
+                if (Max.IsValid())
+                {
+                    bRead = CanvasSlot_ParseVec2(Max, AnchorsMax) || bRead;
+                }
+                if (bRead)
+                {
+                    bWroteAnchors = true;
+                    Applied.Add(TEXT("anchors"));
+                }
+            }
+        }
+    }
+
+    bool bWroteOffsets = false;
+    {
+        const TSharedPtr<FJsonValue> Val = Params->TryGetField(TEXT("offsets"));
+        if (Val.IsValid())
+        {
+            if (!CanvasSlot_ParseMargin(Val, Offsets))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_canvas_slot: 'offsets' must be [left, top, right, bottom] or {left, top, right, bottom}"));
+            }
+            bWroteOffsets = true;
+            Applied.Add(TEXT("offsets"));
+        }
+        // Allow `position` + `size` shorthand for the canonical
+        // "place an absolutely positioned widget" caller. Position
+        // and size both write into the Offsets margin under the
+        // canvas layout contract (Left / Top hold the position,
+        // Right / Bottom hold the size when the anchors collapse
+        // onto a point).
+        const TSharedPtr<FJsonValue> PosVal = Params->TryGetField(TEXT("position"));
+        if (PosVal.IsValid())
+        {
+            FVector2D Position(Offsets.Left, Offsets.Top);
+            if (!CanvasSlot_ParseVec2(PosVal, Position))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_canvas_slot: 'position' must be [x, y] or {x, y}"));
+            }
+            Offsets.Left = Position.X;
+            Offsets.Top = Position.Y;
+            bWroteOffsets = true;
+            Applied.Add(TEXT("position"));
+        }
+        const TSharedPtr<FJsonValue> SizeVal = Params->TryGetField(TEXT("size"));
+        if (SizeVal.IsValid())
+        {
+            FVector2D Size(Offsets.Right, Offsets.Bottom);
+            if (!CanvasSlot_ParseVec2(SizeVal, Size))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_canvas_slot: 'size' must be [x, y] or {x, y}"));
+            }
+            Offsets.Right = Size.X;
+            Offsets.Bottom = Size.Y;
+            bWroteOffsets = true;
+            Applied.Add(TEXT("size"));
+        }
+    }
+
+    bool bWroteAlignment = false;
+    {
+        const TSharedPtr<FJsonValue> Val = Params->TryGetField(TEXT("alignment"));
+        if (!Val.IsValid())
+        {
+            // The editor exposes the alignment field as "Alignment"; we
+            // also accept "pivot" since that is the role the field plays.
+            const TSharedPtr<FJsonValue> Pivot = Params->TryGetField(TEXT("pivot"));
+            if (Pivot.IsValid())
+            {
+                if (!CanvasSlot_ParseVec2(Pivot, Alignment))
+                {
+                    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                        TEXT("set_canvas_slot: 'pivot' must be [x, y] or {x, y}"));
+                }
+                bWroteAlignment = true;
+                Applied.Add(TEXT("pivot"));
+            }
+        }
+        else
+        {
+            if (!CanvasSlot_ParseVec2(Val, Alignment))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_canvas_slot: 'alignment' must be [x, y] or {x, y}"));
+            }
+            bWroteAlignment = true;
+            Applied.Add(TEXT("alignment"));
+        }
+    }
+
+    bool bWroteZOrder = false;
+    {
+        int32 ZRead = ZOrder;
+        if (Params->TryGetNumberField(TEXT("z_order"), ZRead)
+            || Params->TryGetNumberField(TEXT("zorder"), ZRead)
+            || Params->TryGetNumberField(TEXT("z"), ZRead))
+        {
+            ZOrder = ZRead;
+            bWroteZOrder = true;
+            Applied.Add(TEXT("z_order"));
+        }
+    }
+
+    bool bWroteAutoSize = false;
+    {
+        bool BRead = bAutoSize;
+        if (Params->TryGetBoolField(TEXT("auto_size"), BRead)
+            || Params->TryGetBoolField(TEXT("autosize"), BRead)
+            || Params->TryGetBoolField(TEXT("size_to_content"), BRead))
+        {
+            bAutoSize = BRead;
+            bWroteAutoSize = true;
+            Applied.Add(TEXT("auto_size"));
+        }
+    }
+
+    if (Applied.Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_canvas_slot: pass at least one of 'anchors_min' / 'anchors_max' / 'anchors' / 'offsets' / 'position' / 'size' / 'alignment' / 'pivot' / 'z_order' / 'auto_size'"));
+    }
+
+    // Route writes through the UCanvasPanelSlot setters so the
+    // engine's layout-invalidate path fires. The setters tickle the
+    // parent UCanvasPanel's cached slate widget so a live PIE session
+    // picks the change up.
+    Slot->Modify();
+    if (bWroteAnchors)
+    {
+        Slot->SetAnchors(FAnchors(AnchorsMin.X, AnchorsMin.Y, AnchorsMax.X, AnchorsMax.Y));
+    }
+    if (bWroteOffsets)
+    {
+        Slot->SetOffsets(Offsets);
+    }
+    if (bWroteAlignment)
+    {
+        Slot->SetAlignment(Alignment);
+    }
+    if (bWroteZOrder)
+    {
+        Slot->SetZOrder(ZOrder);
+    }
+    if (bWroteAutoSize)
+    {
+        Slot->SetAutoSize(bAutoSize);
+    }
+
+#if WITH_EDITOR
+    Slot->PostEditChange();
+    TargetWidget->PostEditChange();
+#endif
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+    bool bCompile = false;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (UPackage* Package = WBP->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    auto Vec2ToArray = [](const FVector2D& V)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        Arr.Add(MakeShared<FJsonValueNumber>(V.X));
+        Arr.Add(MakeShared<FJsonValueNumber>(V.Y));
+        return Arr;
+    };
+    auto MarginToArray = [](const FMargin& M)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Left));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Top));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Right));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Bottom));
+        return Arr;
+    };
+
+    const FAnchorData NewLayout = Slot->GetLayout();
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    for (const FString& Name : Applied)
+    {
+        AppliedJson.Add(MakeShared<FJsonValueString>(Name));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_canvas_slot"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("widget"), WidgetNameStr);
+    ResultObj->SetStringField(TEXT("widget_class"), TargetWidget->GetClass()->GetPathName());
+    ResultObj->SetStringField(TEXT("slot_class"), Slot->GetClass()->GetName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetNumberField(TEXT("applied_count"), Applied.Num());
+
+    ResultObj->SetArrayField(TEXT("anchors_min"), Vec2ToArray(NewLayout.Anchors.Minimum));
+    ResultObj->SetArrayField(TEXT("anchors_max"), Vec2ToArray(NewLayout.Anchors.Maximum));
+    ResultObj->SetArrayField(TEXT("offsets"), MarginToArray(NewLayout.Offsets));
+    ResultObj->SetArrayField(TEXT("alignment"), Vec2ToArray(NewLayout.Alignment));
+    ResultObj->SetNumberField(TEXT("z_order"), Slot->GetZOrder());
+    ResultObj->SetBoolField(TEXT("auto_size"), Slot->GetAutoSize());
+
+    ResultObj->SetArrayField(TEXT("previous_anchors_min"), Vec2ToArray(PrevLayout.Anchors.Minimum));
+    ResultObj->SetArrayField(TEXT("previous_anchors_max"), Vec2ToArray(PrevLayout.Anchors.Maximum));
+    ResultObj->SetArrayField(TEXT("previous_offsets"), MarginToArray(PrevLayout.Offsets));
+    ResultObj->SetArrayField(TEXT("previous_alignment"), Vec2ToArray(PrevLayout.Alignment));
+    ResultObj->SetNumberField(TEXT("previous_z_order"), PrevZOrder);
+    ResultObj->SetBoolField(TEXT("previous_auto_size"), bPrevAutoSize);
+
     ResultObj->SetBoolField(TEXT("compiled"), bCompile);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
