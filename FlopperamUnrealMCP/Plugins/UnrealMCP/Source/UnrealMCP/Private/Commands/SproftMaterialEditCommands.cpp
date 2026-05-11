@@ -547,9 +547,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return SetBlendMode(Params);
     }
+    if (Operation == TEXT("set_material_flags") || Operation == TEXT("set_flags")
+        || Operation == TEXT("material_flags") || Operation == TEXT("set_material_bools"))
+    {
+        return SetMaterialFlags(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter, add_fresnel, set_blend_mode"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter, add_fresnel, set_blend_mode, set_material_flags"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -5239,6 +5244,259 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetBlendMode(const TSharedP
     ResultObj->SetNumberField(TEXT("previous_opacity_mask_clip_value"), PreviousClipValue);
     ResultObj->SetBoolField(TEXT("clip_value_written"), bClipProvided);
     ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Parse a JSON value as a bool. Accepts true / false, numeric 0 / 1,
+     *  and the common string tokens. Returns false (with bOk=false) when
+     *  the value is not a recognisable bool shape. */
+    bool MaterialFlags_ParseBool(const TSharedPtr<FJsonValue>& Value, bool& OutBool)
+    {
+        if (!Value.IsValid())
+        {
+            return false;
+        }
+        if (Value->Type == EJson::Boolean)
+        {
+            OutBool = Value->AsBool();
+            return true;
+        }
+        if (Value->Type == EJson::Number)
+        {
+            OutBool = (Value->AsNumber() != 0.0);
+            return true;
+        }
+        if (Value->Type == EJson::String)
+        {
+            FString T = Value->AsString().TrimStartAndEnd().ToLower();
+            if (T == TEXT("true") || T == TEXT("1") || T == TEXT("on")
+                || T == TEXT("yes") || T == TEXT("enable") || T == TEXT("enabled"))
+            {
+                OutBool = true;
+                return true;
+            }
+            if (T == TEXT("false") || T == TEXT("0") || T == TEXT("off")
+                || T == TEXT("no") || T == TEXT("disable") || T == TEXT("disabled"))
+            {
+                OutBool = false;
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    /** A small allow-list of canonical UMaterial bool UPROPERTY names plus
+     *  their casual aliases. The reflection lookup is case-sensitive, so
+     *  we keep the canonical names from the engine header (e.g. UMaterial
+     *  in `Engine/Classes/Materials/Material.h`) and map common shortcuts
+     *  to them. Entries that resolve to a missing UPROPERTY (the field
+     *  got renamed in a future engine version) land on the response's
+     *  `skipped` array rather than aborting the whole call. */
+    bool MaterialFlags_ResolveFieldName(const FString& InName, FString& OutCanonical)
+    {
+        const FString T = InName.TrimStartAndEnd();
+
+        struct FFieldAlias
+        {
+            const TCHAR* Alias;
+            const TCHAR* Canonical;
+        };
+        static const FFieldAlias Aliases[] =
+        {
+            { TEXT("TwoSided"),                       TEXT("TwoSided") },
+            { TEXT("two_sided"),                      TEXT("TwoSided") },
+            { TEXT("twosided"),                       TEXT("TwoSided") },
+
+            { TEXT("DitheredLODTransition"),          TEXT("DitheredLODTransition") },
+            { TEXT("dithered_lod_transition"),        TEXT("DitheredLODTransition") },
+            { TEXT("dithered_lod"),                   TEXT("DitheredLODTransition") },
+            { TEXT("dither_lod"),                     TEXT("DitheredLODTransition") },
+
+            { TEXT("bUseMaterialAttributes"),         TEXT("bUseMaterialAttributes") },
+            { TEXT("use_material_attributes"),        TEXT("bUseMaterialAttributes") },
+            { TEXT("UseMaterialAttributes"),          TEXT("bUseMaterialAttributes") },
+
+            { TEXT("bCastDynamicShadowAsMasked"),     TEXT("bCastDynamicShadowAsMasked") },
+            { TEXT("cast_dynamic_shadow_as_masked"),  TEXT("bCastDynamicShadowAsMasked") },
+            { TEXT("CastDynamicShadowAsMasked"),      TEXT("bCastDynamicShadowAsMasked") },
+
+            { TEXT("bOutputTranslucentVelocity"),     TEXT("bOutputTranslucentVelocity") },
+            { TEXT("output_translucent_velocity"),    TEXT("bOutputTranslucentVelocity") },
+            { TEXT("OutputTranslucentVelocity"),      TEXT("bOutputTranslucentVelocity") },
+
+            { TEXT("bUsedWithStaticLighting"),        TEXT("bUsedWithStaticLighting") },
+            { TEXT("used_with_static_lighting"),      TEXT("bUsedWithStaticLighting") },
+            { TEXT("UsedWithStaticLighting"),         TEXT("bUsedWithStaticLighting") },
+
+            { TEXT("bUsedWithSkeletalMesh"),          TEXT("bUsedWithSkeletalMesh") },
+            { TEXT("used_with_skeletal_mesh"),        TEXT("bUsedWithSkeletalMesh") },
+            { TEXT("UsedWithSkeletalMesh"),           TEXT("bUsedWithSkeletalMesh") },
+        };
+
+        for (const FFieldAlias& Entry : Aliases)
+        {
+            if (T.Equals(Entry.Alias, ESearchCase::IgnoreCase))
+            {
+                OutCanonical = Entry.Canonical;
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetMaterialFlags(const TSharedPtr<FJsonObject>& Params)
+{
+    // Reflection-driven UMaterial bool flag writer. Mirrors the rest of
+    // the hosted material_edit family by exposing a single round-trip for
+    // the long tail of bool knobs on UMaterial (TwoSided, DitheredLOD,
+    // bUseMaterialAttributes, etc.). Each entry routes through
+    // FindPropertyByName + FBoolProperty::SetPropertyValue_InContainer
+    // so the op stays compatible with the visibility tightening UE has
+    // done across recent versions. Failures land on the response's
+    // `skipped` array rather than aborting the whole call. Runs
+    // PostEditChangeProperty against each touched UPROPERTY so the
+    // static permutation recompiles when the engine cares about it
+    // (the TwoSided / bUseMaterialAttributes / bCastDynamicShadowAsMasked
+    // flags all invalidate the shader permutation map).
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(MaterialPath);
+    UMaterial* Material = Cast<UMaterial>(Asset);
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial (Material Instances do not expose these flags directly; route through set_attribute_blendable)"), *MaterialPath));
+    }
+
+    // The flat dict lives under any of these aliases so callers can mix
+    // the documented `flags` shape with the shorter `bools` or generic
+    // `properties` shape we use elsewhere.
+    const TSharedPtr<FJsonObject>* FlagsObjPtr = nullptr;
+    if (!Params->TryGetObjectField(TEXT("flags"), FlagsObjPtr)
+        && !Params->TryGetObjectField(TEXT("bools"), FlagsObjPtr)
+        && !Params->TryGetObjectField(TEXT("properties"), FlagsObjPtr)
+        && !Params->TryGetObjectField(TEXT("values"), FlagsObjPtr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_material_flags: missing 'flags' object (map of bool UPROPERTY names to true/false). Supported: TwoSided, DitheredLODTransition, bUseMaterialAttributes, bCastDynamicShadowAsMasked, bOutputTranslucentVelocity, bUsedWithStaticLighting, bUsedWithSkeletalMesh"));
+    }
+    const TSharedPtr<FJsonObject>& FlagsObj = *FlagsObjPtr;
+    if (!FlagsObj.IsValid() || FlagsObj->Values.Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_material_flags: 'flags' object is empty"));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> AppliedArr;
+    TArray<TSharedPtr<FJsonValue>> SkippedArr;
+
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : FlagsObj->Values)
+    {
+        const FString& InName = Entry.Key;
+
+        FString Canonical;
+        if (!MaterialFlags_ResolveFieldName(InName, Canonical))
+        {
+            TSharedPtr<FJsonObject> SkipEntry = MakeShared<FJsonObject>();
+            SkipEntry->SetStringField(TEXT("name"), InName);
+            SkipEntry->SetStringField(TEXT("reason"), TEXT("unknown_field"));
+            SkipEntry->SetStringField(TEXT("hint"), TEXT("Supported: TwoSided, DitheredLODTransition, bUseMaterialAttributes, bCastDynamicShadowAsMasked, bOutputTranslucentVelocity, bUsedWithStaticLighting, bUsedWithSkeletalMesh"));
+            SkippedArr.Add(MakeShared<FJsonValueObject>(SkipEntry));
+            continue;
+        }
+
+        bool NewBool = false;
+        if (!MaterialFlags_ParseBool(Entry.Value, NewBool))
+        {
+            TSharedPtr<FJsonObject> SkipEntry = MakeShared<FJsonObject>();
+            SkipEntry->SetStringField(TEXT("name"), InName);
+            SkipEntry->SetStringField(TEXT("canonical"), Canonical);
+            SkipEntry->SetStringField(TEXT("reason"), TEXT("not_a_bool"));
+            SkippedArr.Add(MakeShared<FJsonValueObject>(SkipEntry));
+            continue;
+        }
+
+        FProperty* Prop = Material->GetClass()->FindPropertyByName(FName(*Canonical));
+        if (!Prop)
+        {
+            TSharedPtr<FJsonObject> SkipEntry = MakeShared<FJsonObject>();
+            SkipEntry->SetStringField(TEXT("name"), InName);
+            SkipEntry->SetStringField(TEXT("canonical"), Canonical);
+            SkipEntry->SetStringField(TEXT("reason"), TEXT("uproperty_not_found"));
+            SkippedArr.Add(MakeShared<FJsonValueObject>(SkipEntry));
+            continue;
+        }
+        FBoolProperty* BoolProp = CastField<FBoolProperty>(Prop);
+        if (!BoolProp)
+        {
+            TSharedPtr<FJsonObject> SkipEntry = MakeShared<FJsonObject>();
+            SkipEntry->SetStringField(TEXT("name"), InName);
+            SkipEntry->SetStringField(TEXT("canonical"), Canonical);
+            SkipEntry->SetStringField(TEXT("reason"), TEXT("not_a_boolproperty"));
+            SkipEntry->SetStringField(TEXT("cpp_type"), Prop->GetCPPType());
+            SkippedArr.Add(MakeShared<FJsonValueObject>(SkipEntry));
+            continue;
+        }
+
+        const bool PreviousBool = BoolProp->GetPropertyValue_InContainer(Material);
+
+        // Route the write through PreEditChange / SetPropertyValue /
+        // PostEditChangeProperty so the engine treats the change like the
+        // editor would. The flags in this list all sit on the shader
+        // permutation key, so the PostEditChange call invalidates the
+        // cached permutation map and queues a recompile.
+        Material->PreEditChange(BoolProp);
+        BoolProp->SetPropertyValue_InContainer(Material, NewBool);
+        FPropertyChangedEvent ChangeEvent(BoolProp, EPropertyChangeType::ValueSet);
+        Material->PostEditChangeProperty(ChangeEvent);
+
+        TSharedPtr<FJsonObject> AppliedEntry = MakeShared<FJsonObject>();
+        AppliedEntry->SetStringField(TEXT("name"), InName);
+        AppliedEntry->SetStringField(TEXT("canonical"), Canonical);
+        AppliedEntry->SetBoolField(TEXT("previous"), PreviousBool);
+        AppliedEntry->SetBoolField(TEXT("value"), NewBool);
+        AppliedArr.Add(MakeShared<FJsonValueObject>(AppliedEntry));
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    // Only recompile when we actually wrote something, otherwise we burn
+    // shader compile time on a no-op.
+    if (bRecompile && AppliedArr.Num() > 0)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_material_flags"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedArr);
+    ResultObj->SetArrayField(TEXT("skipped"), SkippedArr);
+    ResultObj->SetNumberField(TEXT("applied_count"), AppliedArr.Num());
+    ResultObj->SetNumberField(TEXT("skipped_count"), SkippedArr.Num());
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile && AppliedArr.Num() > 0);
     ResultObj->SetBoolField(TEXT("saved"), bSave);
     return ResultObj;
 }

@@ -3958,6 +3958,7 @@ def material_edit(
     camera_vector: Optional[str] = None,
     blend_mode: Optional[str] = None,
     opacity_mask_clip_value: Optional[float] = None,
+    flags: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -4195,6 +4196,32 @@ def material_edit(
           ``set_attribute_blendable`` instead since the override
           surface is on the FMaterialInstanceBasePropertyOverrides
           struct, not on the MIC's UPROPERTY directly).
+        - "set_material_flags": reflection-driven UMaterial bool
+          flag writer for the long tail of shader-permutation
+          toggles. ``flags`` (alias ``bools`` / ``properties`` /
+          ``values``) is a flat dict from field name to bool. The
+          op resolves each name against a canonical UMaterial
+          UPROPERTY list (``TwoSided`` / ``DitheredLODTransition``
+          / ``bUseMaterialAttributes`` /
+          ``bCastDynamicShadowAsMasked`` /
+          ``bOutputTranslucentVelocity`` /
+          ``bUsedWithStaticLighting`` /
+          ``bUsedWithSkeletalMesh``) plus the casual aliases for
+          each (``two_sided``, ``dithered_lod``,
+          ``use_material_attributes``, etc., case-insensitive).
+          Routes the writes through FindPropertyByName plus
+          ``FBoolProperty::SetPropertyValue_InContainer`` so the op
+          stays compatible with the visibility tightening UE has
+          done across recent engine versions. Each touched flag
+          fires PreEditChange + PostEditChangeProperty so the
+          static permutation recompiles when the engine cares
+          about it. Failures (unknown field, non-bool value, or
+          missing UPROPERTY) land on the response's ``skipped``
+          array with a reason rather than aborting the whole call.
+          The op recompiles once after the writes when at least
+          one flag landed (controlled by ``recompile`` / default
+          true) and saves the asset when ``save`` is true (the
+          default).
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.
@@ -4379,6 +4406,8 @@ def material_edit(
         params["blend_mode"] = blend_mode
     if opacity_mask_clip_value is not None:
         params["opacity_mask_clip_value"] = opacity_mask_clip_value
+    if flags is not None:
+        params["flags"] = flags
 
     try:
         response = unreal.send_command("material_edit", params)
