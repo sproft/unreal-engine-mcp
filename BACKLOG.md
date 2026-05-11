@@ -8,7 +8,94 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped three deepening additions across
+The most recent pass shipped four deepening additions across
+existing tools: `widget_edit` gains `set_uniform_grid_slot`
+(single-call sugar over `set_slot_property` for the UUniformGridSlot
+surface; mirrors `set_grid_slot` but targets the uniform grid where
+every cell shares the same size; takes the widget blueprint plus a
+target child widget FName plus any of `row` / `column` (int cell
+coordinates, `>= 0`; the parent UUniformGridPanel reads them when
+it lays out the child) plus the familiar `horizontal_alignment` /
+`vertical_alignment` tokens (`Fill` / `Left` / `Center` / `Right`
+and `Fill` / `Top` / `Center` / `Bottom`); UUniformGridSlot does
+not carry per-cell span or padding (every entry occupies exactly
+one cell on a uniform grid; the parent's SlotPadding reads once
+for the whole grid) so the op refuses `row_span` / `column_span` /
+`padding` at parse time and surfaces a clear error so the caller
+knows to route through `set_grid_slot` when a regular UGridPanel
+with span / padding is wanted; routes through the concrete
+`UUniformGridSlot::SetRow` / `SetColumn` /
+`SetHorizontalAlignment` / `SetVerticalAlignment` setters so the
+parent UUniformGridPanel's cached slate widget invalidates;
+refuses children whose parent is not a UUniformGridPanel; completes
+the uniform-grid layout gap on the widget_edit side parallel to
+`set_grid_slot` for the regular grid panel case),
+`widget_edit` also gains `set_wrap_box_slot` (single-call sugar
+over `set_slot_property` for the UWrapBoxSlot surface; UWrapBox
+stacks children along a primary axis and breaks the stack onto
+the next row / column when the total measured children exceed the
+panel size; takes the widget blueprint plus a target child widget
+FName plus any of `padding` (the `[L, T, R, B]` / `[H, V]` /
+uniform / object margin shape), `fill_empty_space` (bool, drives
+the wrap-box's "fill leftover space along the wrap axis"
+behaviour), `fill_span` (float, the per-slot weight the wrap box
+reads when balancing remaining space), and the familiar
+`horizontal_alignment` / `vertical_alignment` tokens; routes
+through the concrete `UWrapBoxSlot::SetPadding` /
+`SetFillEmptySpace` / `SetFillSpan` / `SetHorizontalAlignment` /
+`SetVerticalAlignment` setters so the parent UWrapBox's cached
+slate widget invalidates; refuses children whose parent is not a
+UWrapBox; completes the wrap-box layout gap on the widget_edit
+side alongside `set_box_slot` (one-dimensional stack) and
+`set_grid_slot` / `set_uniform_grid_slot` (two-dimensional grids)),
+`material_edit` gains `set_translucency_settings`
+(reflection-driven writer for the translucency block on a
+UMaterial; the engine carries a long set of translucency knobs
+in scattered UPROPERTYs across UMaterial; this op covers the
+high-traffic subset; `settings` (alias `translucency` /
+`properties` / `values`) is a flat dict from field name to value
+covering `TranslucencyLightingMode` (enum token; accepts
+`VolumetricNonDirectional` / `VolumetricDirectional` /
+`VolumetricPerVertexNonDirectional` /
+`VolumetricPerVertexDirectional` / `Surface` /
+`SurfacePerPixelLighting` / `SurfaceForwardShading`,
+case-insensitive, with or without the `TLM_` prefix),
+`TranslucentShadowDensityScale` (float),
+`TranslucentSelfShadowDensityScale` (float),
+`TranslucentBackscatteringExponent` (float),
+`bScreenSpaceReflections` (bool), and `bUseTranslucencyVertexFog`
+(bool); each entry resolves through a small alias table plus
+FindPropertyByName plus the matching FBoolProperty / FByteProperty
+(the TEnumAsByte<ETranslucencyLightingMode>) / FFloatProperty
+setter routed through PreEditChange + SetPropertyValue_InContainer
++ PostEditChangeProperty; failures land on the response's
+`skipped` array with a reason rather than aborting the whole call;
+recompiles the material once after the writes when at least one
+knob landed; refuses Material Instances since the translucency
+block does not surface a paired override struct on the MIC), and
+`niagara_edit` gains `set_emitter_local_space` (dedicated
+convenience op for the headline `bLocalSpace` boolean on
+`FVersionedNiagaraEmitterData`; equivalent to calling
+`set_emitter_flag flag=bLocalSpace value=<bool>` but with a single
+dedicated knob (`local_space`) so the op stays readable for the
+common case (Niagara systems frequently flip local space on a
+per-emitter basis as an authoring step, attaching / detaching the
+emitter from the owning component's transform); the write routes
+through the engine's reflection database against the `bLocalSpace`
+FBoolProperty on the FVersionedNiagaraEmitterData UScriptStruct
+so the bitfield / plain-bool split that UE has shipped across
+recent versions stays compatible without us hard-coding a specific
+representation; matches the emitter handle by display name or
+source-emitter name through the same matcher `set_emitter_flag`
+uses; the response carries the previous + new local-space
+booleans plus a `changed` flag; sits next to the broader
+`set_emitter_flag` for the dedicated one-knob case). The four
+additions together close the uniform-grid layout gap on the
+widget_edit side, the wrap-box layout gap on the widget_edit side,
+the translucency-block authoring gap on the material_edit side,
+and the local-space convenience gap on the niagara_edit side.
+
+The pass before that shipped three deepening additions across
 existing tools: `widget_edit` gains `set_grid_slot` (single-call
 sugar over `set_slot_property` for the UGridSlot surface; takes
 the widget blueprint plus a target child widget FName plus any of
@@ -76,7 +163,7 @@ placement). The three additions together close the
 two-dimensional grid layout gap on the widget_edit side, the
 shading-model authoring gap on the material_edit side, and the
 montage section authoring gap on the animation_edit side. The
-fourth slot of this batch (`gas_edit grant_ability_on_actor_default`)
+fourth slot of that batch (`gas_edit grant_ability_on_actor_default`)
 landed on the dropped list since the engine's UAbilitySystemComponent
 does not surface a canonical `DefaultAbilities` slot. The grant
 surface lives on per-project ASC subclasses (Lyra's
@@ -1697,6 +1784,139 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `widget_edit set_uniform_grid_slot` (small) — single-call sugar
+  over `set_slot_property` for the UUniformGridSlot surface.
+  Mirrors `set_grid_slot` but targets the uniform grid panel where
+  every cell shares the same size. Takes the widget blueprint plus
+  a target child widget FName plus any of the uniform-grid slot
+  knobs: `row` / `column` (int cell coordinates, `>= 0`; the parent
+  UUniformGridPanel reads them when it lays out the child) plus
+  the familiar `horizontal_alignment` / `vertical_alignment`
+  tokens (the same vocabulary the box / overlay / grid slot ops
+  use: `Fill` / `Left` / `Center` / `Right` and `Fill` / `Top` /
+  `Center` / `Bottom`, case-insensitive). UUniformGridSlot does
+  not carry per-cell span or padding (every entry occupies
+  exactly one cell on a uniform grid; the parent's SlotPadding
+  reads once for the whole grid). The op refuses `row_span` /
+  `column_span` / `padding` at parse time so the caller knows to
+  route through `set_grid_slot` for a regular UGridPanel when
+  span / padding is wanted. Routes the writes through the concrete
+  `UUniformGridSlot::SetRow` / `SetColumn` /
+  `SetHorizontalAlignment` / `SetVerticalAlignment` setters so
+  the parent UUniformGridPanel's cached slate widget invalidates.
+  PostEditChange fires on the slot + child so an open UMG
+  designer refreshes. Refuses children whose parent is not a
+  UUniformGridPanel since the uniform-grid-only fields do not live
+  on UGridSlot or UCanvasPanelSlot. `MarkBlueprintAsModified` +
+  optional `compile=true` + `save=true` close the edit. The
+  response carries the previous + new value for every touched
+  field so callers can see the diff. Aliases:
+  `set_uniform_grid_slot` / `uniform_grid_slot` /
+  `set_uniform_grid_panel_slot`. Completes the uniform-grid layout
+  gap parallel to `set_grid_slot` for the regular grid panel case.
+- `widget_edit set_wrap_box_slot` (small) — single-call sugar over
+  `set_slot_property` for the UWrapBoxSlot surface. UWrapBox stacks
+  children along a primary axis and breaks the stack onto the next
+  row / column when the total measured children exceed the panel
+  size. Each entry's slot carries the familiar
+  HorizontalAlignment / VerticalAlignment / Padding triple plus
+  two wrap-box specific knobs: bFillEmptySpace and FillSpan. Takes
+  the widget blueprint plus a target child widget FName plus any
+  of `padding` (the canonical `[L, T, R, B]` / `[H, V]` / uniform
+  / object margin shape we use across the slot ops),
+  `fill_empty_space` (bool; drives the wrap-box's "fill leftover
+  space along the wrap axis" behaviour), `fill_span` (float; the
+  per-slot weight the wrap box reads when balancing remaining
+  space), and the `horizontal_alignment` / `vertical_alignment`
+  tokens (`Fill` / `Left` / `Center` / `Right` and `Fill` /
+  `Top` / `Center` / `Bottom`). Routes the writes through the
+  concrete `UWrapBoxSlot::SetPadding` / `SetFillEmptySpace` /
+  `SetFillSpan` / `SetHorizontalAlignment` /
+  `SetVerticalAlignment` setters so the parent UWrapBox's cached
+  slate widget invalidates. PostEditChange fires on the slot +
+  child so an open UMG designer refreshes. Refuses children whose
+  parent is not a UWrapBox since the wrap-box-only fields do not
+  live on UCanvasPanelSlot or UHorizontalBoxSlot.
+  `MarkBlueprintAsModified` + optional `compile=true` +
+  `save=true` close the edit. The response carries the previous
+  + new value for every touched field so callers can see the
+  diff. Aliases: `set_wrap_box_slot` / `wrap_box_slot` /
+  `set_wrapbox_slot`. Completes the wrap-box layout gap on the
+  widget_edit side alongside `set_box_slot` (one-dimensional
+  stack) and `set_grid_slot` / `set_uniform_grid_slot`
+  (two-dimensional grids).
+- `material_edit set_translucency_settings` (medium) —
+  reflection-driven writer for the translucency block on a
+  UMaterial. The engine carries a long set of translucency knobs
+  in scattered UPROPERTYs across UMaterial; the typical authoring
+  workflow opens the material editor's Translucency category and
+  lands a small subset by hand. This op covers the high-traffic
+  subset. `settings` (alias `translucency` / `properties` /
+  `values`) is a flat dict from field name to value covering
+  `TranslucencyLightingMode` (enum token; accepts the engine
+  spellings `VolumetricNonDirectional` / `VolumetricDirectional`
+  / `VolumetricPerVertexNonDirectional` /
+  `VolumetricPerVertexDirectional` / `Surface` /
+  `SurfacePerPixelLighting` / `SurfaceForwardShading`,
+  case-insensitive, with or without the `TLM_` prefix, with
+  casual snake_case mapped onto the engine spelling through a
+  token normaliser; routes through FByteProperty on the
+  TEnumAsByte<ETranslucencyLightingMode> UPROPERTY),
+  `TranslucentShadowDensityScale` (float),
+  `TranslucentSelfShadowDensityScale` (float),
+  `TranslucentBackscatteringExponent` (float),
+  `bScreenSpaceReflections` (bool), and
+  `bUseTranslucencyVertexFog` (bool). Each entry resolves through
+  a small alias map (case-insensitive, casual snake_case mapped
+  back to the canonical engine name) plus FindPropertyByName plus
+  the matching FBoolProperty / FByteProperty / FFloatProperty
+  setter routed through PreEditChange +
+  SetPropertyValue_InContainer + PostEditChangeProperty. The
+  TranslucencyLightingMode write invalidates the basepass shader
+  permutation for translucent passes; the float / bool knobs
+  only invalidate when the engine cares about them on the
+  permutation key. Failures (unknown field, type mismatch,
+  missing UPROPERTY, unknown lighting-mode token) land on the
+  response's `skipped` array with a reason rather than aborting
+  the whole call. Recompiles the material once after the writes
+  when at least one knob landed (override with
+  `recompile=false`). Saves on success unless `save=false`.
+  Refuses Material Instances since the override surface lives on
+  FMaterialInstanceBasePropertyOverrides and routes through
+  `set_attribute_blendable` for the blend-mode side; the
+  translucency block does not surface a paired override struct on
+  the MIC. Aliases: `set_translucency_settings` /
+  `set_translucency` / `translucency_settings` /
+  `set_material_translucency`.
+- `niagara_edit set_emitter_local_space` (small) — dedicated
+  convenience op for the headline `bLocalSpace` boolean on
+  FVersionedNiagaraEmitterData. Equivalent to calling
+  `set_emitter_flag flag=bLocalSpace value=<bool>` but with a
+  single dedicated knob (`local_space`) so the op stays readable
+  for the common authoring case. Niagara systems frequently flip
+  local space on a per-emitter basis (the emitter attaches /
+  detaches from the owning component's transform), so the
+  dedicated op cuts the noise of building a generic flag-style
+  payload. Resolves the target system through the same
+  short-name / path shape every other niagara_edit op uses;
+  matches the emitter handle by display name (case-insensitive)
+  or by the source emitter's `GetName()` so handles that have not
+  been renamed still resolve (same matcher `set_emitter_flag`
+  uses). The write routes through the engine's reflection
+  database against the `bLocalSpace` FBoolProperty on the
+  FVersionedNiagaraEmitterData UScriptStruct so the bitfield /
+  plain-bool split that UE has shipped across recent versions
+  stays compatible without us hard-coding a specific
+  representation. The `local_space` knob accepts the bool shape
+  directly plus a number / string fallback (so 0 / 1 / "true" /
+  "false" all resolve); generic `value` / `enabled` aliases are
+  accepted for callers that already build a generic flag-style
+  payload. The response carries the previous + new local-space
+  booleans, the handle name + index on the system, and a
+  `changed` flag so the caller gets a before / after pair on a
+  single round trip. Saves on success unless `save=false`.
+  Aliases: `set_emitter_local_space` / `set_local_space` /
+  `set_emitter_localspace` / `local_space`.
 - `widget_edit set_grid_slot` (small) — single-call sugar over
   `set_slot_property` for the UGridSlot surface. Takes the widget
   blueprint plus a target child widget FName plus any of the
