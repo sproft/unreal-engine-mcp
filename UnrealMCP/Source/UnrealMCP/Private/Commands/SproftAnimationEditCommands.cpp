@@ -4,6 +4,8 @@
 #include "Animation/AnimBoneCompressionCodec.h"
 #include "Animation/AnimBoneCompressionSettings.h"
 #include "Animation/AnimCompressionTypes.h"
+#include "Animation/AnimCurveCompressionCodec.h"
+#include "Animation/AnimCurveCompressionSettings.h"
 #include "Animation/AnimCurveTypes.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
@@ -293,8 +295,13 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleSetCompressionScheme(Params);
     }
+    if (Op == TEXT("set_curve_compression") || Op == TEXT("set_curve_compression_scheme")
+        || Op == TEXT("set_curve_compression_codec") || Op == TEXT("set_curve_compression_settings"))
+    {
+        return HandleSetCurveCompression(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion', 'set_compression_scheme'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion', 'set_compression_scheme', 'set_curve_compression'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -2155,6 +2162,216 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetCompressionScheme
         Result->SetStringField(TEXT("codec_class"), ResolvedCodecClassName);
         Result->SetStringField(TEXT("codec_class_path"), ResolvedCodecClassPath);
         Result->SetNumberField(TEXT("codec_count"), NewSettings->Codecs.Num());
+    }
+    if (!PreviousSettingsPath.IsEmpty())
+    {
+        Result->SetStringField(TEXT("previous_settings_path"), PreviousSettingsPath);
+    }
+    Result->SetBoolField(TEXT("requested_compile"), bRequestedCompile);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetCurveCompression(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writes the per-sequence curve compression slot. Complement to
+    // HandleSetCompressionScheme which covers the bone-track side.
+    // UE5 routes float-curve compression through
+    // `UAnimSequence::CurveCompressionSettings` (a
+    // UAnimCurveCompressionSettings DataAsset whose `Codec` slot holds
+    // a UAnimCurveCompressionCodec subclass instance).
+    //
+    // The engine ships several curve codec subclasses
+    // (UAnimCurveCompressionCodec_CompressedRichCurve,
+    // UAnimCurveCompressionCodec_UniformIndexable,
+    // UAnimCurveCompressionCodec_UniformlySampled). Callers pass one
+    // of two shapes: (1) a `/Game/...` UAnimCurveCompressionSettings
+    // DataAsset path written into the slot directly, or (2) a codec
+    // class which we wrap into a per-sequence settings subobject
+    // before assigning. Per-sequence isolation mirrors the bone-side
+    // op's "Convert to Custom" pattern.
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        if (!Params->TryGetStringField(TEXT("sequence"), AssetParam)
+            && !Params->TryGetStringField(TEXT("path"), AssetParam))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("set_curve_compression: missing 'asset' parameter"));
+        }
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    UAnimSequence* Seq = Cast<UAnimSequence>(Asset);
+    if (!Seq)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_curve_compression: '%s' is not a UAnimSequence (curve compression settings live on UAnimSequence)"), *AssetParam));
+    }
+
+    // Capture the previous slot for the diff field on the response.
+    UAnimCurveCompressionSettings* PreviousSettings = Seq->CurveCompressionSettings;
+    FString PreviousSettingsPath;
+    if (PreviousSettings)
+    {
+        PreviousSettingsPath = PreviousSettings->GetPathName();
+    }
+
+    UAnimCurveCompressionSettings* NewSettings = nullptr;
+    FString ResolvedCodecClassPath;
+    FString ResolvedCodecClassName;
+    bool bCodecAuthored = false;
+
+    // Path 1: caller supplied a `/Game/...`
+    // UAnimCurveCompressionSettings DataAsset path directly. Resolve
+    // through UEditorAssetLibrary and refuse anything that is not the
+    // expected class.
+    FString SettingsPath;
+    if (Params->TryGetStringField(TEXT("compression_settings"), SettingsPath)
+        || Params->TryGetStringField(TEXT("curve_compression_settings"), SettingsPath)
+        || Params->TryGetStringField(TEXT("settings"), SettingsPath)
+        || Params->TryGetStringField(TEXT("settings_path"), SettingsPath))
+    {
+        if (!SettingsPath.IsEmpty())
+        {
+            UObject* SettingsAsset = UEditorAssetLibrary::LoadAsset(SettingsPath);
+            NewSettings = Cast<UAnimCurveCompressionSettings>(SettingsAsset);
+            if (!NewSettings)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_curve_compression: 'compression_settings' path '%s' is not a UAnimCurveCompressionSettings DataAsset"), *SettingsPath));
+            }
+        }
+    }
+
+    // Path 2: caller supplied a codec class name / path. NewObject a
+    // per-sequence UAnimCurveCompressionSettings, outered to the
+    // sequence so the new subobject saves alongside the sequence
+    // package, and assign one fresh codec subobject of the requested
+    // class into the Codec slot. Per-sequence settings isolate the
+    // choice from any other sequence on the project, mirroring
+    // HandleSetCompressionScheme's bone-side "Convert to Custom"
+    // shape.
+    FString CodecToken;
+    if (!NewSettings)
+    {
+        if (Params->TryGetStringField(TEXT("compression_codec"), CodecToken)
+            || Params->TryGetStringField(TEXT("curve_compression_codec"), CodecToken)
+            || Params->TryGetStringField(TEXT("curve_compression_scheme"), CodecToken)
+            || Params->TryGetStringField(TEXT("compression_scheme"), CodecToken)
+            || Params->TryGetStringField(TEXT("compression_class"), CodecToken)
+            || Params->TryGetStringField(TEXT("scheme"), CodecToken)
+            || Params->TryGetStringField(TEXT("codec"), CodecToken))
+        {
+            if (CodecToken.IsEmpty())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_curve_compression: 'compression_codec' / 'scheme' must not be empty"));
+            }
+            UClass* CodecClass = ResolveNotifyClass(CodecToken, UAnimCurveCompressionCodec::StaticClass());
+            if (!CodecClass)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_curve_compression: could not resolve UAnimCurveCompressionCodec subclass from '%s' (try UAnimCurveCompressionCodec_CompressedRichCurve / UAnimCurveCompressionCodec_UniformIndexable / UAnimCurveCompressionCodec_UniformlySampled)"), *CodecToken));
+            }
+            if (CodecClass->HasAnyClassFlags(CLASS_Abstract))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_curve_compression: codec class '%s' is abstract"), *CodecClass->GetName()));
+            }
+
+            UAnimCurveCompressionSettings* Authored = NewObject<UAnimCurveCompressionSettings>(
+                Seq->GetOutermost(), MakeUniqueObjectName(Seq->GetOutermost(), UAnimCurveCompressionSettings::StaticClass(), TEXT("CurveCompressionSettings_Custom")),
+                RF_Public | RF_Standalone | RF_Transactional);
+            if (!Authored)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_curve_compression: NewObject<UAnimCurveCompressionSettings> failed"));
+            }
+            UAnimCurveCompressionCodec* CodecInstance = NewObject<UAnimCurveCompressionCodec>(
+                Authored, CodecClass, NAME_None,
+                RF_Public | RF_Transactional);
+            if (!CodecInstance)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_curve_compression: NewObject<%s> failed"), *CodecClass->GetName()));
+            }
+            Authored->Codec = CodecInstance;
+            NewSettings = Authored;
+            ResolvedCodecClassPath = CodecClass->GetPathName();
+            ResolvedCodecClassName = CodecClass->GetName();
+            bCodecAuthored = true;
+        }
+    }
+
+    if (!NewSettings)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_curve_compression: pass either 'compression_settings' (DataAsset path) or 'compression_codec' (codec class)"));
+    }
+
+    // Modify before the write so any open editor undo records the
+    // change, then assign the slot. PostEditChangeProperty fires on
+    // the sequence so a Persona-side viewmodel listener picks the
+    // swap up.
+    Seq->Modify();
+    Seq->CurveCompressionSettings = NewSettings;
+#if WITH_EDITOR
+    if (FProperty* CCSProp = FindFProperty<FProperty>(UAnimSequence::StaticClass(), TEXT("CurveCompressionSettings")))
+    {
+        FPropertyChangedEvent Event(CCSProp, EPropertyChangeType::ValueSet);
+        Seq->PostEditChangeProperty(Event);
+    }
+#endif
+
+    // Optional sync compression refresh. RequestAnimCompression on
+    // UAnimSequence reruns both the bone and curve compression
+    // pipelines through the DDC so the saved asset reflects the new
+    // codec.
+    bool bRequestCompile = false;
+    Params->TryGetBoolField(TEXT("request_compile"), bRequestCompile);
+    if (!bRequestCompile)
+    {
+        Params->TryGetBoolField(TEXT("recompile"), bRequestCompile);
+    }
+    if (!bRequestCompile)
+    {
+        Params->TryGetBoolField(TEXT("request_compression"), bRequestCompile);
+    }
+    bool bRequestedCompile = false;
+#if WITH_EDITOR
+    if (bRequestCompile)
+    {
+        FRequestAnimCompressionParams CompressionParams(Seq);
+        Seq->RequestAnimCompression(CompressionParams);
+        bRequestedCompile = true;
+    }
+#endif
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    Seq->MarkPackageDirty();
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(Seq->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("set_curve_compression"));
+    Result->SetStringField(TEXT("asset"), AssetParam);
+    Result->SetStringField(TEXT("path"), Seq->GetPathName());
+    Result->SetStringField(TEXT("class"), Seq->GetClass()->GetName());
+    Result->SetStringField(TEXT("settings_path"), NewSettings->GetPathName());
+    Result->SetStringField(TEXT("settings_class"), NewSettings->GetClass()->GetName());
+    Result->SetBoolField(TEXT("settings_authored"), bCodecAuthored);
+    if (!ResolvedCodecClassPath.IsEmpty())
+    {
+        Result->SetStringField(TEXT("codec_class"), ResolvedCodecClassName);
+        Result->SetStringField(TEXT("codec_class_path"), ResolvedCodecClassPath);
+        if (NewSettings->Codec)
+        {
+            Result->SetStringField(TEXT("codec_instance_class"), NewSettings->Codec->GetClass()->GetName());
+        }
     }
     if (!PreviousSettingsPath.IsEmpty())
     {

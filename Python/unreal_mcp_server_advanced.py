@@ -7898,6 +7898,8 @@ def animation_edit(
     compression_codec: Optional[str] = None,
     compression_settings: Optional[str] = None,
     request_compile: Optional[bool] = None,
+    curve_compression_codec: Optional[str] = None,
+    curve_compression_settings: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Targeted UAnimSequence / UAnimMontage edits (small variant).
@@ -8017,6 +8019,30 @@ def animation_edit(
           ``recompile``) triggers
           ``UAnimSequence::RequestAnimCompression`` so the saved
           asset reflects the new scheme.
+        - ``set_curve_compression``: writes the per-sequence curve
+          compression slot. Complement to ``set_compression_scheme``
+          which covers the bone-track side. UE5 routes float-curve
+          compression through
+          ``UAnimSequence::CurveCompressionSettings`` (a
+          UAnimCurveCompressionSettings DataAsset whose ``Codec``
+          slot holds the UAnimCurveCompressionCodec subclass
+          instance the engine runs). Pass one of two shapes:
+          ``curve_compression_settings`` (alias
+          ``compression_settings``) for a ``/Game/...``
+          UAnimCurveCompressionSettings DataAsset path written
+          into the slot directly, or ``curve_compression_codec``
+          (alias ``compression_codec`` / ``compression_scheme`` /
+          ``scheme``) for a codec class path or short class name
+          (e.g. ``UAnimCurveCompressionCodec_CompressedRichCurve``
+          / ``UAnimCurveCompressionCodec_UniformIndexable`` /
+          ``UAnimCurveCompressionCodec_UniformlySampled``).
+          Codec-class shape NewObject's a per-sequence
+          UAnimCurveCompressionSettings outered to the sequence so
+          the codec choice does not bleed into other sequences.
+          The optional ``request_compile`` flag (alias
+          ``recompile``) triggers
+          ``UAnimSequence::RequestAnimCompression`` so the saved
+          asset reflects the new curve codec.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -8143,6 +8169,10 @@ def animation_edit(
         params["compression_settings"] = compression_settings
     if request_compile is not None:
         params["request_compile"] = request_compile
+    if curve_compression_codec is not None:
+        params["curve_compression_codec"] = curve_compression_codec
+    if curve_compression_settings is not None:
+        params["curve_compression_settings"] = curve_compression_settings
 
     try:
         response = unreal.send_command("animation_edit", params)

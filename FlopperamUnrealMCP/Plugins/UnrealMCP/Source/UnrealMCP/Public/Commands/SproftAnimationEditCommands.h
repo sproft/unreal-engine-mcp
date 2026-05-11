@@ -112,6 +112,32 @@
  *     saved asset reflects the new scheme; without it the engine
  *     resamples lazily through the derived data cache. Saves the
  *     sequence on success unless `save=false`.
+ *   - `set_curve_compression`: writes the per-sequence curve
+ *     compression slot. Complement to `set_compression_scheme`
+ *     which covers the bone-track side. UE5 routes float-curve
+ *     compression through `UAnimSequence::CurveCompressionSettings`
+ *     (a UAnimCurveCompressionSettings DataAsset whose `Codec`
+ *     slot holds the UAnimCurveCompressionCodec subclass instance
+ *     the engine runs). Two input shapes share the op:
+ *     `compression_settings` (alias `curve_compression_settings` /
+ *     `settings_path`) for a `/Game/...` UAnimCurveCompressionSettings
+ *     DataAsset path written into the slot directly, or
+ *     `compression_codec` (alias `curve_compression_codec` /
+ *     `curve_compression_scheme` / `scheme` / `codec`) for a codec
+ *     class path or short class name (e.g.
+ *     `UAnimCurveCompressionCodec_CompressedRichCurve` /
+ *     `UAnimCurveCompressionCodec_UniformIndexable` /
+ *     `UAnimCurveCompressionCodec_UniformlySampled`). The codec-
+ *     class shape NewObject's a per-sequence
+ *     UAnimCurveCompressionSettings outered to the sequence so the
+ *     codec choice does not bleed into any other sequence on the
+ *     project; assigns one codec subobject of the requested class
+ *     into the settings's `Codec` slot. The optional
+ *     `request_compile` flag (alias `recompile`) triggers
+ *     `UAnimSequence::RequestAnimCompression` with the default
+ *     FRequestAnimCompressionParams so the DDC bake reruns with
+ *     the new curve codec before save. Saves the sequence on
+ *     success unless `save=false`.
  *
  * Inputs (set_rate_scale):
  *   - asset: short asset name or `/Game/...` UAnimSequenceBase path.
@@ -195,4 +221,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetRootMotion(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddNotifyState(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetCompressionScheme(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetCurveCompression(const TSharedPtr<FJsonObject>& Params);
 };
