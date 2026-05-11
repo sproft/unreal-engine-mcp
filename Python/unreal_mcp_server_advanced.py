@@ -6908,6 +6908,8 @@ def sequencer_edit(
     start_frame: Optional[int] = None,
     duration_frames: Optional[int] = None,
     section_index: Optional[int] = None,
+    sound: Optional[str] = None,
+    force_new_track: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over a ULevelSequence asset.
@@ -6935,6 +6937,20 @@ def sequencer_edit(
           track to a new (start frame, duration) pair through
           ``UMovieSceneSection::SetRange``. The target section is
           resolved through the ``track`` plus a ``section_index``.
+        - ``add_audio_track``: declarative one-call wrapper that
+          spawns (or reuses) a ``UMovieSceneAudioTrack`` and adds
+          a ``UMovieSceneAudioSection`` for a chosen
+          ``USoundBase``. ``sound`` accepts a ``/Game/...`` path
+          or a unique short asset name (USoundWave / USoundCue
+          subclass). Pass ``binding`` (GUID string) or
+          ``actor`` / ``possessable`` to scope the track under a
+          binding; omit them for a master audio track.
+          ``start_frame`` defaults to the playback range start
+          when omitted; ``duration_frames`` defaults to the
+          sound's intrinsic length converted through the
+          MovieScene's tick resolution. Pass
+          ``force_new_track=True`` to bypass the reuse-existing
+          path so each call spawns a fresh track.
 
     Args:
         sequence: For inspect / add_possessable / add_track /
@@ -7025,6 +7041,10 @@ def sequencer_edit(
         params["duration_frames"] = duration_frames
     if section_index is not None:
         params["section_index"] = section_index
+    if sound is not None:
+        params["sound"] = sound
+    if force_new_track is not None:
+        params["force_new_track"] = force_new_track
 
     try:
         response = unreal.send_command("sequencer_edit", params)

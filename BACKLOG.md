@@ -2695,18 +2695,33 @@ helpers.
 ## Cinematics & audio (large each)
 
 - `sequencer_edit` (small read + edit slice ships in this fork) —
-  read-only `inspect` plus the two edit ops `create_level_sequence`
+  read-only `inspect` plus the edit ops `create_level_sequence`
   (NewObject + `ULevelSequence::Initialize` for a fresh empty
-  asset) and `add_possessable` (`UMovieScene::AddPossessable` +
-  `BindPossessableObject` for actor-world binding). Open follow-
-  ons: per-track row dump for multi-row tracks
-  (UMovieSceneNameableTrack subclasses), per-channel key dump for
-  the standard transform / float / bool / enum tracks through
-  `UMovieSceneSection::GetChannelProxy`, asset-bound resolution
-  for possessables (which actor in the current editor world is
-  bound to a possessable GUID), and the heavier edit ops (track
-  add, section add with explicit frame range, section move,
-  spawnable creation, camera-cut creation).
+  asset), `add_possessable` (`UMovieScene::AddPossessable` +
+  `BindPossessableObject` for actor-world binding), `add_track`
+  (UMovieSceneTrack subclass attachment, master and binding-
+  scoped both supported), `add_section` (UMovieSceneTrack::
+  CreateNewSection + AddSection with an explicit frame range),
+  `move_section` (UMovieSceneSection::SetRange with a captured
+  previous-range snapshot), and `add_audio_track` (declarative
+  one-call wrapper: resolves a USoundBase by path / short name,
+  finds or creates a UMovieSceneAudioTrack scoped to a binding
+  or master, routes through `UMovieSceneAudioTrack::AddNewSound`
+  to land a UMovieSceneAudioSection, sets the section range
+  from start_frame plus duration_frames or the sound's
+  intrinsic length via `USoundBase::GetDuration` converted
+  through the MovieScene's tick resolution; an optional
+  `force_new_track=true` bypasses the reuse-existing path).
+  Open follow-ons: per-track row dump for multi-row tracks
+  (UMovieSceneNameableTrack subclasses), per-channel key dump
+  for the standard transform / float / bool / enum tracks
+  through `UMovieSceneSection::GetChannelProxy`, asset-bound
+  resolution for possessables (which actor in the current
+  editor world is bound to a possessable GUID), spawnable
+  creation, camera-cut creation as a single-call wrapper, and
+  per-section audio-asset editing (start offset / pitch / volume
+  channel writes through the section's MovieScene float
+  channels).
 - `metasound_edit` (small variant ships in this fork) — two ops on
   MetaSound assets keyed by `op`: `create_metasound_source`
   (UMetaSoundSource at a `/Game/...` path; optional `output_format`

@@ -15,6 +15,9 @@
 #include "MovieSceneSequence.h"
 #include "MovieSceneSpawnable.h"
 #include "MovieSceneTrack.h"
+#include "Sections/MovieSceneAudioSection.h"
+#include "Sound/SoundBase.h"
+#include "Tracks/MovieSceneAudioTrack.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
 
@@ -394,6 +397,11 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCommand(const FStrin
     if (Op == TEXT("move_section"))
     {
         return HandleMoveSection(Params);
+    }
+    if (Op == TEXT("add_audio_track") || Op == TEXT("add_audio")
+        || Op == TEXT("audio_track"))
+    {
+        return HandleAddAudioTrack(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("sequencer_edit: unsupported op '%s'"), *Op));
@@ -1114,6 +1122,252 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleMoveSection(const TS
     if (BindingGuid.IsValid())
     {
         Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddAudioTrack(const TSharedPtr<FJsonObject>& Params)
+{
+    // Declarative one-call wrapper that lays a UMovieSceneAudioTrack
+    // plus a UMovieSceneAudioSection down in a single pass.
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    UMovieSceneSequence* Sequence = Cast<UMovieSceneSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMovieSceneSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    // Resolve the sound asset. Accepts a /Game/... path or a short
+    // name; the asset registry fallback handles "BGM_Loop" -> the
+    // first USoundBase match.
+    FString SoundPath;
+    if (!Params->TryGetStringField(TEXT("sound"), SoundPath)
+        && !Params->TryGetStringField(TEXT("sound_path"), SoundPath)
+        && !Params->TryGetStringField(TEXT("sound_asset"), SoundPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sound' parameter (USoundBase path or short name)"));
+    }
+    USoundBase* Sound = nullptr;
+    if (SoundPath.StartsWith(TEXT("/")))
+    {
+        Sound = Cast<USoundBase>(UEditorAssetLibrary::LoadAsset(SoundPath));
+    }
+    else
+    {
+        FAssetRegistryModule& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        TArray<FAssetData> Found;
+        AssetRegistry.Get().GetAssetsByClass(USoundBase::StaticClass()->GetClassPathName(), Found, /*bSearchSubClasses=*/true);
+        for (const FAssetData& Data : Found)
+        {
+            if (Data.AssetName.ToString().Equals(SoundPath, ESearchCase::IgnoreCase))
+            {
+                Sound = Cast<USoundBase>(Data.GetAsset());
+                if (Sound) break;
+            }
+        }
+    }
+    if (!Sound)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve USoundBase '%s' (pass a /Game/... path or a unique short name)"), *SoundPath));
+    }
+
+    // Optional binding (binding-scoped audio track sits under an
+    // FMovieScenePossessable / FMovieSceneSpawnable). Empty binding
+    // means a master audio track.
+    FGuid BindingGuid;
+    FString BindingGuidString;
+    if (Params->TryGetStringField(TEXT("binding"), BindingGuidString)
+        || Params->TryGetStringField(TEXT("binding_guid"), BindingGuidString))
+    {
+        if (!FGuid::Parse(BindingGuidString, BindingGuid))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Invalid binding GUID '%s'"), *BindingGuidString));
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        FString PossessableName;
+        if (Params->TryGetStringField(TEXT("possessable"), PossessableName)
+            || Params->TryGetStringField(TEXT("actor"), PossessableName))
+        {
+            BindingGuid = FindBindingByName(MovieScene, PossessableName);
+            if (!BindingGuid.IsValid())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("No binding matching '%s' on sequence '%s'"),
+                        *PossessableName, *Sequence->GetName()));
+            }
+        }
+    }
+
+    // Find an existing audio track on the matching scope. The
+    // master-track lookup walks UMovieScene::GetTracks(); the
+    // binding scope walks UMovieScene::FindTrack on the binding.
+    UMovieSceneAudioTrack* AudioTrack = nullptr;
+    bool bReusedExisting = false;
+    if (BindingGuid.IsValid())
+    {
+        if (UMovieSceneTrack* Existing = MovieScene->FindTrack(UMovieSceneAudioTrack::StaticClass(), BindingGuid))
+        {
+            AudioTrack = Cast<UMovieSceneAudioTrack>(Existing);
+            bReusedExisting = (AudioTrack != nullptr);
+        }
+    }
+    else
+    {
+        for (UMovieSceneTrack* T : MovieScene->GetTracks())
+        {
+            if (UMovieSceneAudioTrack* Cand = Cast<UMovieSceneAudioTrack>(T))
+            {
+                AudioTrack = Cand;
+                bReusedExisting = true;
+                break;
+            }
+        }
+    }
+
+    // Optional `force_new_track` knob bypasses the reuse path.
+    bool bForceNewTrack = false;
+    Params->TryGetBoolField(TEXT("force_new_track"), bForceNewTrack);
+    if (bForceNewTrack)
+    {
+        AudioTrack = nullptr;
+        bReusedExisting = false;
+    }
+
+    if (!AudioTrack)
+    {
+        UMovieSceneTrack* NewTrack = nullptr;
+        if (BindingGuid.IsValid())
+        {
+            NewTrack = MovieScene->AddTrack(UMovieSceneAudioTrack::StaticClass(), BindingGuid);
+        }
+        else
+        {
+            NewTrack = MovieScene->AddTrack(UMovieSceneAudioTrack::StaticClass());
+        }
+        AudioTrack = Cast<UMovieSceneAudioTrack>(NewTrack);
+        if (!AudioTrack)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Failed to add a UMovieSceneAudioTrack"));
+        }
+    }
+
+    // Start frame defaults to the MovieScene's playback range start
+    // when omitted. The asset's intrinsic duration drives the
+    // section length when `duration_frames` is missing.
+    int32 StartFrameInt = 0;
+    if (!Params->TryGetNumberField(TEXT("start_frame"), StartFrameInt))
+    {
+        // Default to the playback range's start when callers omit
+        // the field. Falls back to 0 when the MovieScene has no
+        // closed start bound.
+        const TRange<FFrameNumber> Playback = MovieScene->GetPlaybackRange();
+        if (Playback.GetLowerBound().IsClosed())
+        {
+            StartFrameInt = Playback.GetLowerBoundValue().Value;
+        }
+    }
+    const FFrameNumber StartFrame(StartFrameInt);
+
+    // The track's AddNewSound picks the canonical AudioSection
+    // subclass and seeds the section ranges. The returned section
+    // is what we range-update from `duration_frames` (or the
+    // sound's intrinsic length when missing).
+    UMovieSceneSection* NewSection = AudioTrack->AddNewSound(Sound, StartFrame);
+    if (!NewSection)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("UMovieSceneAudioTrack::AddNewSound returned null for sound '%s'"),
+                *Sound->GetPathName()));
+    }
+    UMovieSceneAudioSection* AudioSection = Cast<UMovieSceneAudioSection>(NewSection);
+
+    int32 DurationFramesInt = 0;
+    bool bDurationFromCaller = Params->TryGetNumberField(TEXT("duration_frames"), DurationFramesInt);
+    if (!bDurationFromCaller)
+    {
+        Params->TryGetNumberField(TEXT("duration"), DurationFramesInt);
+        if (DurationFramesInt != 0) bDurationFromCaller = true;
+    }
+    if (!bDurationFromCaller)
+    {
+        // Pull the sound's intrinsic length and convert through the
+        // MovieScene's tick resolution. USoundBase::GetDuration
+        // returns INDEFINITELY_LOOPING_DURATION (1e6f) for looping
+        // cues; clamp to a single second so the section still has a
+        // sensible default range when the caller forgot to set one.
+        const float DurationSeconds = Sound->GetDuration();
+        const FFrameRate TickRate = MovieScene->GetTickResolution();
+        const float SafeDurationSeconds = (DurationSeconds > 0.0f && DurationSeconds < 1e5f)
+            ? DurationSeconds
+            : 1.0f;
+        DurationFramesInt = static_cast<int32>(SafeDurationSeconds * TickRate.AsDecimal());
+        if (DurationFramesInt <= 0) DurationFramesInt = 1;
+    }
+
+    const FFrameNumber EndFrame(StartFrame.Value + DurationFramesInt);
+    const TRange<FFrameNumber> NewRange = TRange<FFrameNumber>(
+        TRangeBound<FFrameNumber>::Inclusive(StartFrame),
+        TRangeBound<FFrameNumber>::Exclusive(EndFrame));
+    NewSection->SetRange(NewRange);
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    Sequence->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_audio_track"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("sound"), Sound->GetPathName());
+    Result->SetStringField(TEXT("sound_class"), Sound->GetClass()->GetName());
+    Result->SetStringField(TEXT("track_name"), AudioTrack->GetFName().ToString());
+    Result->SetStringField(TEXT("track_class"), AudioTrack->GetClass()->GetName());
+    Result->SetStringField(TEXT("track_class_path"), AudioTrack->GetClass()->GetPathName());
+    Result->SetBoolField(TEXT("reused_existing_track"), bReusedExisting);
+    if (BindingGuid.IsValid())
+    {
+        Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());
+    }
+    Result->SetStringField(TEXT("section_class"), NewSection->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class_path"), NewSection->GetClass()->GetPathName());
+    Result->SetBoolField(TEXT("section_is_audio_section"), AudioSection != nullptr);
+    Result->SetNumberField(TEXT("section_index"),
+        AudioTrack->GetAllSections().IndexOfByKey(NewSection));
+    Result->SetNumberField(TEXT("start_frame"), StartFrame.Value);
+    Result->SetNumberField(TEXT("end_frame"), EndFrame.Value);
+    Result->SetNumberField(TEXT("duration_frames"), DurationFramesInt);
+    Result->SetBoolField(TEXT("duration_from_caller"), bDurationFromCaller);
+    {
+        // Also surface the intrinsic length (in seconds) for caller
+        // diagnostics. Sound->GetDuration returns 1e6f for looping
+        // cues; the bool flag tells the caller whether the length
+        // is meaningful.
+        const float Seconds = Sound->GetDuration();
+        Result->SetNumberField(TEXT("sound_duration_seconds"), Seconds);
+        Result->SetBoolField(TEXT("sound_duration_finite"), (Seconds > 0.0f && Seconds < 1e5f));
     }
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;

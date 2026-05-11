@@ -29,6 +29,21 @@
  *     plus `MarkAsChanged`. The target section is resolved either by
  *     `section_index` (into the track's `GetAllSections()` array) or
  *     by track / binding scoping plus the index.
+ *   - `add_audio_track`: declarative one-call wrapper that lays a
+ *     `UMovieSceneAudioTrack` plus a `UMovieSceneAudioSection` down
+ *     in a single pass. Resolves the target `USoundBase` (any
+ *     USoundWave / USoundCue / USoundClass derived from the
+ *     USoundBase shape; accepts a `/Game/...` path or short name),
+ *     finds or creates the track (binding-scoped when `binding` /
+ *     `actor` / `possessable` is set, master track otherwise; an
+ *     existing master audio track on the sequence wins so the op
+ *     is idempotent for follow-up adds), and routes through
+ *     `UMovieSceneAudioTrack::AddNewSound(USoundBase*, FFrameNumber)`
+ *     so the engine picks the canonical AudioSection subclass and
+ *     ranges. The section's range is `[start_frame, start_frame +
+ *     duration_frames]`, where `duration_frames` falls back to the
+ *     sound's intrinsic length converted through the MovieScene's
+ *     tick resolution when the caller omits an explicit duration.
  *
  * Inputs (inspect):
  *   - sequence: short asset name or full `/Game/...` Level Sequence
@@ -130,4 +145,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddTrack(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddSection(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleMoveSection(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddAudioTrack(const TSharedPtr<FJsonObject>& Params);
 };
