@@ -138,6 +138,26 @@
  *     `true` / `false`, number -> int or float literal, string
  *     -> passthrough, array / object -> JSON re-serialisation so
  *     struct / array UPROPERTYs land too).
+ *   - `add_user_parameter`: declares a new user-tunable parameter
+ *     on `UNiagaraSystem::GetExposedParameters()`, the `User.`
+ *     namespace `FNiagaraUserRedirectionParameterStore`. Distinct
+ *     from `set_system_exposed_parameter` (which writes an
+ *     existing parameter's bytes through `SetParameterData`):
+ *     this op routes through the documented
+ *     `FNiagaraParameterStore::AddParameter` (NIAGARA_API) so a
+ *     caller can declare a new system-tunable through MCP even
+ *     when they have no value to land yet. `parameter_type`
+ *     accepts the same scalar / vector / color / quat tokens the
+ *     parameter ops already use plus `position` (LWC vector 3
+ *     backed by `FNiagaraTypeDefinition::GetPositionDef`) and
+ *     `transform` (the FTransform UScriptStruct wrapped as a
+ *     Niagara struct type). Optional `value` (or `default`)
+ *     lands a default through `SetParameterData` after the add
+ *     so consumers see the canonical bytes rather than a zeroed
+ *     slot; without a default the AddParameter path writes the
+ *     type's zero. The `User.` namespace prefix is added
+ *     automatically when missing per the redirection store's
+ *     contract. Save the system on success.
  *
  * Inputs (create_niagara_system):
  *   - path: `/Game/...` package path. Required.
@@ -217,4 +237,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetEmitterLoop(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterRenderer(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddUserParameter(const TSharedPtr<FJsonObject>& Params);
 };

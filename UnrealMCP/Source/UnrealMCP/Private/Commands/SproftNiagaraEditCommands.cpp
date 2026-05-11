@@ -165,8 +165,14 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleSetEmitterRenderer(Params);
     }
+    if (Op.Equals(TEXT("add_user_parameter"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("add_exposed_parameter"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("declare_user_parameter"), ESearchCase::IgnoreCase))
+    {
+        return HandleAddUserParameter(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup, set_emitter_loop, set_emitter_property, set_emitter_renderer"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup, set_emitter_loop, set_emitter_property, set_emitter_renderer, add_user_parameter"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -395,6 +401,30 @@ namespace
         {
             OutType = FNiagaraTypeDefinition::GetQuatDef();
             OutCanonical = TEXT("quat");
+            return true;
+        }
+        if (T == TEXT("position") || T == TEXT("fniagara_position") || T == TEXT("position_vector"))
+        {
+            // FNiagaraTypeDefinition::GetPositionDef() returns the LWC-
+            // aware Position type. The runtime stores it as three floats
+            // (vec3-sized) but Niagara routes it through the
+            // double-precision world-origin pipeline. The struct path is
+            // /Script/Niagara.NiagaraPosition.
+            OutType = FNiagaraTypeDefinition::GetPositionDef();
+            OutCanonical = TEXT("position");
+            return true;
+        }
+        if (T == TEXT("transform") || T == TEXT("ftransform"))
+        {
+            // FTransform is not exposed by a Niagara accessor; we wrap
+            // its UScriptStruct through the explicit FNiagaraTypeDefinition
+            // constructor. The runtime size matches FTransform's
+            // structure size (40 bytes on float / 56 on LWC double).
+            // Designers expose this for transform-driven data interfaces
+            // (e.g. SetTransform on a Mesh DI).
+            UScriptStruct* TransformStruct = TBaseStructure<FTransform>::Get();
+            OutType = FNiagaraTypeDefinition(TransformStruct);
+            OutCanonical = TEXT("transform");
             return true;
         }
         return false;
@@ -2594,5 +2624,266 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterRenderer(con
 #else
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         TEXT("niagara_edit set_emitter_renderer requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleAddUserParameter(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    // Declares a new user-tunable parameter on
+    // UNiagaraSystem::GetExposedParameters(), the system's `User.`
+    // namespace store. The store inherits from FNiagaraParameterStore
+    // and overrides AddParameter so a bare token (`MyFloat`) lands
+    // under the canonical `User.MyFloat` entry plus a redirection
+    // entry that maps the bare form back to the qualified one. Sister
+    // op to `set_system_exposed_parameter` which writes an existing
+    // parameter's bytes; this op routes through the documented
+    // `FNiagaraParameterStore::AddParameter` (NIAGARA_API) for the
+    // "declare a brand-new parameter even with no value to write yet"
+    // shape.
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString ParameterName;
+    if (!Params->TryGetStringField(TEXT("parameter_name"), ParameterName)
+        && !Params->TryGetStringField(TEXT("parameter"), ParameterName)
+        && !Params->TryGetStringField(TEXT("name"), ParameterName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'parameter_name' parameter"));
+    }
+    if (ParameterName.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'parameter_name' must not be empty"));
+    }
+
+    FString TypeToken;
+    if (!Params->TryGetStringField(TEXT("parameter_type"), TypeToken)
+        && !Params->TryGetStringField(TEXT("type"), TypeToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'parameter_type' parameter"));
+    }
+
+    FNiagaraTypeDefinition TypeDef;
+    FString CanonicalType;
+    if (!ResolveNiagaraTypeToken(TypeToken, TypeDef, CanonicalType))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unsupported 'parameter_type' '%s' (try float / int / bool / vec2 / vec3 / vec4 / color / quat / position / transform)"), *TypeToken));
+    }
+
+    const int32 TypeSize = TypeDef.GetSize();
+    if (TypeSize <= 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Resolved Niagara type '%s' has size %d; refusing AddParameter"),
+                *CanonicalType, TypeSize));
+    }
+
+    // The redirection store accepts both `User.MyName` and a bare
+    // `MyName`; its AddParameter override normalises the bare form
+    // into `User.MyName` and updates the redirection map. We pass
+    // through whatever the caller gave so the response surfaces the
+    // exact FName the store landed.
+    const FName ParameterFName(*ParameterName);
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    System->Modify();
+    FNiagaraUserRedirectionParameterStore& Store = System->GetExposedParameters();
+
+    FNiagaraVariable Variable(TypeDef, ParameterFName);
+    const bool bAlreadyPresent = (Store.IndexOf(Variable) != INDEX_NONE);
+
+    int32 ParamOffset = INDEX_NONE;
+    // FNiagaraParameterStore::AddParameter signature
+    //   (FNiagaraVariable&, bool bInitialize, bool bTriggerRebind, int32* OutOffset)
+    // declared NIAGARA_API. The redirection-store override updates the
+    // bare <-> qualified map after adding the qualified entry.
+    const bool bAdded = Store.AddParameter(Variable, /*bInitialize=*/true, /*bTriggerRebind=*/true, &ParamOffset);
+
+    // Optional default value: the caller may pass `value` or `default`
+    // matching the type's channel count. Without one we leave the
+    // AddParameter-installed zero in place.
+    TSharedPtr<FJsonValue> ValueJson = Params->TryGetField(TEXT("value"));
+    if (!ValueJson.IsValid())
+    {
+        ValueJson = Params->TryGetField(TEXT("default"));
+    }
+    bool bWroteDefault = false;
+    if (ValueJson.IsValid())
+    {
+        TArray<uint8> Buffer;
+        Buffer.SetNumZeroed(TypeSize);
+
+        if (CanonicalType == TEXT("bool"))
+        {
+            if (ValueJson->Type != EJson::Boolean && ValueJson->Type != EJson::Number)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("Expected boolean / number for 'value' on bool parameter"));
+            }
+            const bool bVal = (ValueJson->Type == EJson::Boolean) ? ValueJson->AsBool() : (ValueJson->AsNumber() != 0.0);
+            const int32 EncodedBool = bVal ? -1 : 0;
+            if (TypeSize != static_cast<int32>(sizeof(int32)))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Unexpected bool TypeDef size %d"), TypeSize));
+            }
+            FMemory::Memcpy(Buffer.GetData(), &EncodedBool, sizeof(int32));
+        }
+        else if (CanonicalType == TEXT("int"))
+        {
+            if (ValueJson->Type != EJson::Number && ValueJson->Type != EJson::Boolean)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("Expected number for 'value' on int parameter"));
+            }
+            const int32 IntVal = static_cast<int32>(FMath::RoundToDouble(ValueJson->AsNumber()));
+            if (TypeSize != static_cast<int32>(sizeof(int32)))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Unexpected int TypeDef size %d"), TypeSize));
+            }
+            FMemory::Memcpy(Buffer.GetData(), &IntVal, sizeof(int32));
+        }
+        else if (CanonicalType == TEXT("transform"))
+        {
+            // FTransform values can ride either an object shape
+            // (location / rotation / scale) or a 10-channel flat array
+            // ([Lx,Ly,Lz, Rx,Ry,Rz,Rw, Sx,Sy,Sz]).  Default to identity
+            // if a JSON object is empty; treat the array form as already
+            // canonical and re-emit through ImportText to flow through
+            // the engine's struct serializer.
+            UScriptStruct* TransformStruct = TBaseStructure<FTransform>::Get();
+            if (!TransformStruct)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Could not resolve FTransform UScriptStruct"));
+            }
+            FTransform Defaulted = FTransform::Identity;
+            if (ValueJson->Type == EJson::Object)
+            {
+                const TSharedPtr<FJsonObject>& Obj = ValueJson->AsObject();
+                const TArray<TSharedPtr<FJsonValue>>* LocArr = nullptr;
+                if (Obj->TryGetArrayField(TEXT("location"), LocArr) && LocArr && LocArr->Num() >= 3)
+                {
+                    Defaulted.SetLocation(FVector((*LocArr)[0]->AsNumber(), (*LocArr)[1]->AsNumber(), (*LocArr)[2]->AsNumber()));
+                }
+                const TArray<TSharedPtr<FJsonValue>>* RotArr = nullptr;
+                if (Obj->TryGetArrayField(TEXT("rotation"), RotArr) && RotArr && RotArr->Num() >= 3)
+                {
+                    if (RotArr->Num() >= 4)
+                    {
+                        Defaulted.SetRotation(FQuat((*RotArr)[0]->AsNumber(), (*RotArr)[1]->AsNumber(), (*RotArr)[2]->AsNumber(), (*RotArr)[3]->AsNumber()));
+                    }
+                    else
+                    {
+                        const FRotator Rot((*RotArr)[0]->AsNumber(), (*RotArr)[1]->AsNumber(), (*RotArr)[2]->AsNumber());
+                        Defaulted.SetRotation(Rot.Quaternion());
+                    }
+                }
+                const TArray<TSharedPtr<FJsonValue>>* ScaleArr = nullptr;
+                if (Obj->TryGetArrayField(TEXT("scale"), ScaleArr) && ScaleArr && ScaleArr->Num() >= 3)
+                {
+                    Defaulted.SetScale3D(FVector((*ScaleArr)[0]->AsNumber(), (*ScaleArr)[1]->AsNumber(), (*ScaleArr)[2]->AsNumber()));
+                }
+            }
+            else if (ValueJson->Type == EJson::Array)
+            {
+                const TArray<TSharedPtr<FJsonValue>>& Arr = ValueJson->AsArray();
+                if (Arr.Num() >= 3)
+                {
+                    Defaulted.SetLocation(FVector(Arr[0]->AsNumber(), Arr[1]->AsNumber(), Arr[2]->AsNumber()));
+                }
+                if (Arr.Num() >= 7)
+                {
+                    Defaulted.SetRotation(FQuat(Arr[3]->AsNumber(), Arr[4]->AsNumber(), Arr[5]->AsNumber(), Arr[6]->AsNumber()));
+                }
+                if (Arr.Num() >= 10)
+                {
+                    Defaulted.SetScale3D(FVector(Arr[7]->AsNumber(), Arr[8]->AsNumber(), Arr[9]->AsNumber()));
+                }
+            }
+            if (TypeSize >= static_cast<int32>(TransformStruct->GetStructureSize()))
+            {
+                TransformStruct->InitializeStruct(Buffer.GetData());
+                FMemory::Memcpy(Buffer.GetData(), &Defaulted, TransformStruct->GetStructureSize());
+            }
+            else
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Transform TypeDef size %d smaller than FTransform structure size"), TypeSize));
+            }
+        }
+        else
+        {
+            // Float-channel family: scalar / vec2 / vec3 / vec4 / color
+            // / quat / position. Position is a Niagara struct sized to
+            // three floats so it shares the vec3 channel layout for
+            // default values.
+            int32 ExpectedFloats = 1;
+            if (CanonicalType == TEXT("vec2")) ExpectedFloats = 2;
+            else if (CanonicalType == TEXT("vec3") || CanonicalType == TEXT("position")) ExpectedFloats = 3;
+            else if (CanonicalType == TEXT("vec4") || CanonicalType == TEXT("color") || CanonicalType == TEXT("quat"))
+            {
+                ExpectedFloats = 4;
+            }
+            const int32 ExpectedSize = ExpectedFloats * static_cast<int32>(sizeof(float));
+            if (ExpectedSize != TypeSize)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Channel count %d (size %d) does not match type size %d"),
+                        ExpectedFloats, ExpectedSize, TypeSize));
+            }
+            TArray<float> Channels;
+            FString ReadErr;
+            if (!ReadFloatChannels(ValueJson, ExpectedFloats, Channels, ReadErr))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ReadErr);
+            }
+            FMemory::Memcpy(Buffer.GetData(), Channels.GetData(), TypeSize);
+        }
+
+        // SetParameterData with bAdd=false: AddParameter already installed
+        // the entry, this just writes the bytes onto the existing slot.
+        bWroteDefault = Store.SetParameterData(Buffer.GetData(), Variable, /*bAdd=*/false);
+    }
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("add_user_parameter"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("parameter_name"), ParameterName);
+    Out->SetStringField(TEXT("parameter_type"), CanonicalType);
+    Out->SetNumberField(TEXT("parameter_size"), TypeSize);
+    Out->SetBoolField(TEXT("added"), bAdded);
+    Out->SetBoolField(TEXT("already_present"), bAlreadyPresent);
+    if (ParamOffset != INDEX_NONE)
+    {
+        Out->SetNumberField(TEXT("parameter_offset"), ParamOffset);
+    }
+    Out->SetBoolField(TEXT("wrote_default"), bWroteDefault);
+    Out->SetStringField(TEXT("store"), TEXT("exposed_parameters"));
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit add_user_parameter requires WITH_EDITORONLY_DATA"));
 #endif
 }

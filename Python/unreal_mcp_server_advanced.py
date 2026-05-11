@@ -9086,6 +9086,7 @@ def niagara_edit(
     name: Optional[str] = None,
     renderer_class: Optional[str] = None,
     replace: Optional[bool] = None,
+    default: Optional[Union[bool, int, float, str, List[float], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
@@ -9209,6 +9210,27 @@ def niagara_edit(
           etc.). Supply either a ``properties`` dict or a
           single ``name`` + ``value`` pair for one-field
           convenience.
+        - ``add_user_parameter``: declares a new user-tunable
+          parameter on
+          ``UNiagaraSystem::GetExposedParameters()``, the
+          ``User.`` namespace
+          ``FNiagaraUserRedirectionParameterStore``. Routes
+          through the public
+          ``FNiagaraParameterStore::AddParameter`` (NIAGARA_API)
+          so a caller can declare a new system-tunable through
+          MCP even when no default value is supplied; sister op
+          to ``set_system_exposed_parameter`` which writes an
+          existing parameter's bytes. ``parameter_type``
+          extends the parameter-op type set with ``position``
+          (LWC vector 3, ``FNiagaraTypeDefinition::GetPositionDef``)
+          and ``transform`` (the ``FTransform`` UScriptStruct
+          wrapped as a Niagara struct type). Optional ``value`` /
+          ``default`` lands an initial value through
+          ``SetParameterData(bAdd=False)`` after the add; the
+          Transform shape also accepts an object form
+          ``{"location": [x, y, z], "rotation": [pitch, yaw,
+          roll] or [x, y, z, w], "scale": [x, y, z]}``. Save
+          the system on success.
 
     The broader authoring surface beyond exposed-parameter writes
     stays in BACKLOG.md.
@@ -9327,6 +9349,8 @@ def niagara_edit(
         params["renderer_class"] = renderer_class
     if replace is not None:
         params["replace"] = replace
+    if default is not None:
+        params["default"] = default
 
     try:
         response = unreal.send_command("niagara_edit", params)
