@@ -5664,6 +5664,7 @@ def gas_edit(
     calculation_class: Optional[str] = None,
     execution_class: Optional[str] = None,
     passed_in_tags: Optional[List[str]] = None,
+    execution_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over Gameplay Ability System assets.
@@ -5761,6 +5762,20 @@ def gas_edit(
           ``unknown_tags`` response field rather than abort the
           op). Recompiles + saves on success unless
           ``compile=False`` / ``save=False`` is passed.
+        - ``add_calculation_modifier``: append an
+          ``FGameplayEffectExecutionScopedModifierInfo`` to the
+          chosen execution's ``CalculationModifiers`` array.
+          ``execution_index`` picks the entry into the GE's
+          ``Executions`` list (run ``add_execution`` first). The
+          captured attribute resolves through the same
+          ``attribute`` colon-form (or ``attribute_set`` +
+          ``attribute_name`` pair) the ``add_modifier`` op uses;
+          ``source`` (``source`` / ``target``, default source) +
+          ``snapshot`` (default False) round out the
+          ``FGameplayEffectAttributeCaptureDefinition``. Optional
+          ``modifier_op`` (default Additive) lands on ``ModifierOp``;
+          optional ``magnitude`` wraps into the scoped modifier's
+          scalable-float magnitude.
 
     Args:
         asset: Required for ``inspect`` / ``set_gameplay_tags`` /
@@ -5872,6 +5887,8 @@ def gas_edit(
         params["execution_class"] = execution_class
     if passed_in_tags is not None:
         params["passed_in_tags"] = passed_in_tags
+    if execution_index is not None:
+        params["execution_index"] = execution_index
 
     try:
         response = unreal.send_command("gas_edit", params)

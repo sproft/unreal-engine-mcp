@@ -123,6 +123,23 @@
  * tags surface a warning and skip rather than crash). Recompiles +
  * saves on success.
  *
+ * The `add_calculation_modifier` op appends an
+ * `FGameplayEffectExecutionScopedModifierInfo` to a named
+ * execution's `CalculationModifiers` array. The target execution
+ * resolves through `execution_index` (int into the GE's `Executions`
+ * array). The captured attribute resolves through the same
+ * `attribute` / `attribute_set` + `attribute_name` resolver
+ * `add_modifier` uses, lands on
+ * `CapturedAttribute.AttributeToCapture` along with the parallel
+ * `source` (`Source` / `Target`, default Source) + `snapshot`
+ * (default false) tokens that build the
+ * `FGameplayEffectAttributeCaptureDefinition`. Optional
+ * `modifier_op` (same resolver `add_modifier` uses; default
+ * Additive) lands on `ModifierOp`. Optional `magnitude` literal
+ * float wraps into the scalable-float variant of
+ * `FGameplayEffectModifierMagnitude` so the scoped modifier carries
+ * a baseline magnitude. Recompiles + saves on success.
+ *
  * Clean-room implementation derived from the public UE5 API:
  *   - UGameplayAbility property surface (CancelAbilitiesWithTag etc.).
  *   - UGameplayEffect public AddComponent / FindOrAddComponent template
@@ -152,4 +169,5 @@ private:
     TSharedPtr<FJsonObject> HandleCreateCueNotify(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetAbilityCueTag(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddExecution(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddCalculationModifier(const TSharedPtr<FJsonObject>& Params);
 };

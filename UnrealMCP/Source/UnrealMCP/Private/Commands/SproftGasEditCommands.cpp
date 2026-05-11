@@ -10,6 +10,7 @@
 #include "GameplayCueNotify_Actor.h"
 #include "GameplayCueNotify_Static.h"
 #include "GameplayEffect.h"
+#include "GameplayEffectAttributeCaptureDefinition.h"
 #include "GameplayEffectExecutionCalculation.h"
 #include "GameplayModMagnitudeCalculation.h"
 #include "GameplayEffectComponent.h"
@@ -796,6 +797,11 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCommand(const FString& Com
         || Op == TEXT("add_exec"))
     {
         return HandleAddExecution(Params);
+    }
+    if (Op == TEXT("add_calculation_modifier") || Op == TEXT("add_scoped_modifier")
+        || Op == TEXT("add_calc_mod"))
+    {
+        return HandleAddCalculationModifier(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("gas_edit: unsupported op '%s'"), *Op));
@@ -2520,6 +2526,178 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleAddExecution(const TShared
             WarnJson.Add(MakeShared<FJsonValueString>(T));
         }
         Result->SetArrayField(TEXT("unknown_tags"), WarnJson);
+    }
+    Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleAddCalculationModifier(const TSharedPtr<FJsonObject>& Params)
+{
+    // Append an FGameplayEffectExecutionScopedModifierInfo onto the
+    // chosen execution's CalculationModifiers array. These are the
+    // per-execution scoped modifiers the editor surfaces under each
+    // entry in the Executions list; the previous `add_execution` op
+    // landed the calculation_class + passed_in_tags fields only.
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("effect"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'asset' / 'effect' parameter (path to a UGameplayEffect or its Blueprint)"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not load asset at '%s'"), *AssetPath));
+    }
+    UClass* AssetClass = ResolveAssetClass(Asset);
+    UObject* CDO = ResolveCDO(Asset);
+    UGameplayEffect* Effect = CDO ? Cast<UGameplayEffect>(CDO) : nullptr;
+    if (!Effect)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UGameplayEffect (resolved class: %s)"),
+                *AssetPath, AssetClass ? *AssetClass->GetName() : TEXT("null")));
+    }
+
+    int32 ExecutionIndex = INDEX_NONE;
+    double TempNum = 0.0;
+    if (Params->TryGetNumberField(TEXT("execution_index"), TempNum)
+        || Params->TryGetNumberField(TEXT("index"), TempNum)
+        || Params->TryGetNumberField(TEXT("exec_index"), TempNum))
+    {
+        ExecutionIndex = static_cast<int32>(TempNum);
+    }
+    if (ExecutionIndex < 0 || ExecutionIndex >= Effect->Executions.Num())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("execution_index %d out of range [0, %d)"),
+                ExecutionIndex, Effect->Executions.Num()));
+    }
+
+    // Resolve the captured attribute. Mirrors `add_modifier`'s
+    // resolver: accepts `<set_path>:<name>`, `attribute_name` +
+    // optional `attribute_set`, and a bare name fallback that walks
+    // loaded UAttributeSet subclasses.
+    FString AttributeToken;
+    Params->TryGetStringField(TEXT("attribute"), AttributeToken);
+    FString AttributeSetToken;
+    Params->TryGetStringField(TEXT("attribute_set"), AttributeSetToken);
+    FString AttributeNameToken;
+    Params->TryGetStringField(TEXT("attribute_name"), AttributeNameToken);
+    FGameplayAttribute Attribute;
+    FString AttrError;
+    if (!ResolveAttribute(AttributeToken, AttributeSetToken, AttributeNameToken, Attribute, AttrError))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(AttrError);
+    }
+
+    // Capture source token. Default Source (the canonical
+    // EGameplayEffectAttributeCaptureDefinition default).
+    FString SourceToken;
+    Params->TryGetStringField(TEXT("source"), SourceToken);
+    if (SourceToken.IsEmpty()) Params->TryGetStringField(TEXT("attribute_source"), SourceToken);
+    if (SourceToken.IsEmpty()) Params->TryGetStringField(TEXT("capture_source"), SourceToken);
+    const FString SourceLower = SourceToken.ToLower();
+    EGameplayEffectAttributeCaptureSource CaptureSource = EGameplayEffectAttributeCaptureSource::Source;
+    FString SourceCanonical = TEXT("Source");
+    if (SourceLower.IsEmpty() || SourceLower == TEXT("source") || SourceLower == TEXT("caster"))
+    {
+        CaptureSource = EGameplayEffectAttributeCaptureSource::Source;
+        SourceCanonical = TEXT("Source");
+    }
+    else if (SourceLower == TEXT("target") || SourceLower == TEXT("recipient"))
+    {
+        CaptureSource = EGameplayEffectAttributeCaptureSource::Target;
+        SourceCanonical = TEXT("Target");
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unsupported capture source '%s' (source / target)"), *SourceToken));
+    }
+
+    bool bSnapshot = false;
+    Params->TryGetBoolField(TEXT("snapshot"), bSnapshot);
+
+    // Optional modifier op + magnitude. Default to Additive + zero.
+    FString ModOpToken;
+    Params->TryGetStringField(TEXT("modifier_op"), ModOpToken);
+    if (ModOpToken.IsEmpty()) Params->TryGetStringField(TEXT("op"), ModOpToken);
+    if (ModOpToken.IsEmpty()) ModOpToken = TEXT("Add");
+    EGameplayModOp::Type ModOp;
+    if (!ParseModOp(ModOpToken, ModOp))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unrecognised modifier_op '%s'"), *ModOpToken));
+    }
+
+    bool bHasMagnitude = false;
+    double MagnitudeRaw = 0.0;
+    if (Params->TryGetNumberField(TEXT("magnitude"), MagnitudeRaw))
+    {
+        bHasMagnitude = true;
+    }
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Build the scoped modifier through the public capture-backed
+    // constructor so AggregatorType lands on CapturedAttributeBacked.
+    FGameplayEffectAttributeCaptureDefinition CaptureDef(Attribute, CaptureSource, bSnapshot);
+    FGameplayEffectExecutionScopedModifierInfo NewMod(CaptureDef);
+    NewMod.ModifierOp = ModOp;
+    if (bHasMagnitude)
+    {
+        FScalableFloat Scale;
+        Scale.Value = static_cast<float>(MagnitudeRaw);
+        NewMod.ModifierMagnitude = FGameplayEffectModifierMagnitude(Scale);
+    }
+
+    FGameplayEffectExecutionDefinition& ExecDef = Effect->Executions[ExecutionIndex];
+    ExecDef.CalculationModifiers.Add(NewMod);
+    const int32 NewModIndex = ExecDef.CalculationModifiers.Num() - 1;
+
+    UBlueprint* OwningBP = Cast<UBlueprint>(Asset);
+    if (OwningBP)
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsModified(OwningBP);
+        if (bCompile)
+        {
+            FKismetEditorUtilities::CompileBlueprint(OwningBP);
+        }
+    }
+    Effect->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_calculation_modifier"));
+    Result->SetStringField(TEXT("path"), Asset->GetPathName());
+    Result->SetNumberField(TEXT("execution_index"), ExecutionIndex);
+    Result->SetNumberField(TEXT("calculation_modifier_index"), NewModIndex);
+    Result->SetNumberField(TEXT("calculation_modifier_count"), ExecDef.CalculationModifiers.Num());
+    Result->SetStringField(TEXT("attribute_name"), Attribute.GetName());
+    if (const FProperty* Prop = Attribute.GetUProperty())
+    {
+        if (UClass* OwnerClass = Prop->GetOwnerClass())
+        {
+            Result->SetStringField(TEXT("attribute_set_class"), OwnerClass->GetPathName());
+        }
+    }
+    Result->SetStringField(TEXT("capture_source"), SourceCanonical);
+    Result->SetBoolField(TEXT("snapshot"), bSnapshot);
+    Result->SetStringField(TEXT("modifier_op"), ModOpToCanonical(ModOp));
+    if (bHasMagnitude)
+    {
+        Result->SetNumberField(TEXT("magnitude"), MagnitudeRaw);
     }
     Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
     Result->SetBoolField(TEXT("saved"), bSave);
