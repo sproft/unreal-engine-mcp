@@ -1330,6 +1330,47 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `niagara_edit set_emitter_renderer` (small) — adds a
+  `UNiagaraRendererProperties` subobject to the matching emitter
+  handle's render stack through the public NIAGARA_API
+  `UNiagaraEmitter::AddRenderer(Renderer, EmitterVersion)` overload
+  (signature stable from 5.5 through 5.7 at
+  `Plugins/FX/Niagara/Source/Niagara/Classes/NiagaraEmitter.h` line
+  941). The emitter version comes through
+  `FNiagaraEmitterHandle::GetInstance().Version` so callers do not
+  have to plumb it. `renderer_class` accepts a short token (e.g.
+  `UNiagaraSpriteRendererProperties` /
+  `UNiagaraMeshRendererProperties` /
+  `UNiagaraRibbonRendererProperties` /
+  `UNiagaraLightRendererProperties`), a `/Script/Niagara.X`
+  path, or a short class name probed against the loaded class set
+  with a `U` prefix variant and a `/Script/Niagara.<Name>` fallback;
+  refuses abstract subclasses. The new renderer NewObject's with
+  the UNiagaraEmitter as outer so the subobject saves with the
+  emitter asset rather than the transient package, matching the
+  editor's render-stack panel. An optional flat `properties` dict
+  lands on the new renderer through
+  `FProperty::ImportText_InContainer`; failures collect on the
+  response's `skipped` array (with reason + attempted ImportText
+  input + property class) rather than aborting the whole call.
+  Useful for fields like `bUseCustomFacing` / `Material` /
+  `ParticleMesh` / `SourceMode`. JSON values marshal into
+  ImportText shape per-type (bool, number, string passthrough;
+  array / object re-serialised through `FJsonSerializer::Serialize`
+  so struct / array UPROPERTYs land too). When `replace=true` the
+  op walks the emitter's `FVersionedNiagaraEmitterData::GetRenderers()`
+  and runs `Emitter->RemoveRenderer(Existing, Version)` against
+  every renderer whose class matches before the add, so a single
+  call swaps "this is the sprite renderer of the emitter" without
+  us shipping a separate remove op. `replace=false` (the default)
+  adds the new renderer alongside any existing renderers so
+  emitters can carry multiple renderers of the same class (the
+  engine supports that shape). Saves on success unless
+  `save=false`. The response carries the new renderer's class +
+  path, the `removed_count` from the replace pass, and the
+  emitter's running renderer count. Aliases:
+  `set_emitter_renderer` / `add_emitter_renderer` /
+  `set_renderer` / `add_renderer`.
 - `widget_edit set_widget_navigation` (small) — writes a per-direction
   navigation rule onto a child widget's `UWidgetNavigation` instance.
   Resolves a target child widget by FName on the WBP's `WidgetTree`,

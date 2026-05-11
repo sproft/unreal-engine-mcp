@@ -216,4 +216,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetSystemWarmup(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterLoop(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterProperty(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetEmitterRenderer(const TSharedPtr<FJsonObject>& Params);
 };

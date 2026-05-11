@@ -9084,6 +9084,8 @@ def niagara_edit(
     loop_count: Optional[int] = None,
     properties: Optional[Dict[str, Any]] = None,
     name: Optional[str] = None,
+    renderer_class: Optional[str] = None,
+    replace: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
@@ -9321,6 +9323,10 @@ def niagara_edit(
         params["properties"] = properties
     if name is not None:
         params["name"] = name
+    if renderer_class is not None:
+        params["renderer_class"] = renderer_class
+    if replace is not None:
+        params["replace"] = replace
 
     try:
         response = unreal.send_command("niagara_edit", params)
