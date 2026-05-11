@@ -43,6 +43,15 @@
  *     editor world contains exactly that many actors of the
  *     resolved class (subclasses included; mirrors
  *     `UGameplayStatics::GetAllActorsOfClass`).
+ *   - `actor_distance`: target = first actor name, `target_b`
+ *     (or `other`) = second actor name, `max_distance` (or
+ *     `expected`) = upper-bound distance in cm, optional
+ *     `tolerance` (defaults 0.0). Pass = `FVector::Dist(A.Loc,
+ *     B.Loc) <= max_distance + tolerance`. Editor-world only;
+ *     no PIE drive. Useful for proximity assertions in level
+ *     setup tests (the player start sits within N cm of the
+ *     spawn marker, the patrol target lives within range of
+ *     the AI's home).
  *
  * Inputs:
  *   - `assertions`: array of assertion specs. Each entry is a dict

@@ -793,9 +793,132 @@ TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandlePieTestScene(const TS
             continue;
         }
 
+        if (Kind == TEXT("actor_distance"))
+        {
+            // Two-target distance assertion. `target` resolves the
+            // first actor and `target_b` (alias `other`) resolves
+            // the second; `max_distance` is the upper bound for the
+            // pass case (FVector::Dist(A, B) <= max_distance +
+            // tolerance). `tolerance` defaults to 0.0 so callers
+            // get an exact-or-less comparison unless they opt in.
+            // Both actor lookups go through the same name / label
+            // resolver every other kind uses so a designer can
+            // reference actors by their preferred name across
+            // every assertion shape.
+            if (Target.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_distance: missing 'target' actor name (the first actor)"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            FString TargetB;
+            if (!Spec->TryGetStringField(TEXT("target_b"), TargetB)
+                && !Spec->TryGetStringField(TEXT("other"), TargetB)
+                && !Spec->TryGetStringField(TEXT("b"), TargetB))
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_distance: missing 'target_b' (or 'other') actor name (the second actor)"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            if (TargetB.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_distance: 'target_b' must not be empty"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+
+            // `max_distance` is the documented pass-condition cap.
+            // We also accept `expected` as an alias so the field
+            // shape stays consistent with the other kinds when the
+            // caller wants one flat key.
+            double MaxDistance = 0.0;
+            bool bHaveMax = Spec->TryGetNumberField(TEXT("max_distance"), MaxDistance);
+            if (!bHaveMax)
+            {
+                const TSharedPtr<FJsonValue> ExpectedField = Spec->TryGetField(TEXT("expected"));
+                if (ExpectedField.IsValid())
+                {
+                    bHaveMax = ExpectedField->TryGetNumber(MaxDistance);
+                }
+            }
+            if (!bHaveMax)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_distance: missing 'max_distance' (or 'expected') number (the upper bound, in cm)"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            if (MaxDistance < 0.0)
+            {
+                MaxDistance = 0.0;
+            }
+            double Tolerance = 0.0;
+            Spec->TryGetNumberField(TEXT("tolerance"), Tolerance);
+            if (Tolerance < 0.0)
+            {
+                Tolerance = 0.0;
+            }
+
+            AActor* FoundA = PieTestScene_ResolveActorByName(World, Target);
+            if (!FoundA)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("actor_distance: no actor with name or label '%s'"), *Target));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            AActor* FoundB = PieTestScene_ResolveActorByName(World, TargetB);
+            if (!FoundB)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("target_b"), TargetB);
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("actor_distance: no actor with name or label '%s'"), *TargetB));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+
+            const FVector LocA = FoundA->GetActorLocation();
+            const FVector LocB = FoundB->GetActorLocation();
+            const double Distance = FVector::Dist(LocA, LocB);
+            const double EffectiveMax = MaxDistance + Tolerance;
+            const bool bPassed = Distance <= EffectiveMax;
+
+            Out->SetStringField(TEXT("target_b"), TargetB);
+            Out->SetField(TEXT("location_a"), VectorToJsonArray(LocA));
+            Out->SetField(TEXT("location_b"), VectorToJsonArray(LocB));
+            Out->SetNumberField(TEXT("distance"), Distance);
+            Out->SetNumberField(TEXT("max_distance"), MaxDistance);
+            Out->SetNumberField(TEXT("tolerance"), Tolerance);
+            Out->SetBoolField(TEXT("passed"), bPassed);
+            Out->SetStringField(TEXT("message"),
+                bPassed
+                    ? FString::Printf(TEXT("Actors '%s' and '%s' are %.4f cm apart (within max %.4f + tolerance %.4f)"),
+                        *FoundA->GetName(), *FoundB->GetName(), Distance, MaxDistance, Tolerance)
+                    : FString::Printf(TEXT("Actors '%s' and '%s' are %.4f cm apart; expected at most %.4f (+ tolerance %.4f)"),
+                        *FoundA->GetName(), *FoundB->GetName(), Distance, MaxDistance, Tolerance));
+            if (bPassed) { ++Passed; } else { ++Failed; }
+            Results.Add(MakeShared<FJsonValueObject>(Out));
+            continue;
+        }
+
         Out->SetBoolField(TEXT("passed"), false);
         Out->SetStringField(TEXT("message"),
-            FString::Printf(TEXT("Unsupported assertion kind '%s'; this build supports 'actor_exists', 'actor_at_location', 'actor_overlapping_tag', 'var_equals', 'actor_has_class', 'actor_tag_count', 'level_actor_count'"), *Kind));
+            FString::Printf(TEXT("Unsupported assertion kind '%s'; this build supports 'actor_exists', 'actor_at_location', 'actor_overlapping_tag', 'var_equals', 'actor_has_class', 'actor_tag_count', 'level_actor_count', 'actor_distance'"), *Kind));
         ++Unsupported;
         Results.Add(MakeShared<FJsonValueObject>(Out));
     }

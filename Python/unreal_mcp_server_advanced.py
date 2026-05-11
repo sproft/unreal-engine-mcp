@@ -7505,7 +7505,7 @@ def pie_test_scene(
     Runs a list of assertion specs against the active editor world and
     returns a per-assertion pass / fail record plus aggregate counts.
     Does not drive Play in Editor. Answers each supported assertion
-    statically against the editor world. Seven assertion kinds are
+    statically against the editor world. Eight assertion kinds are
     supported:
 
         - ``actor_exists``: ``target`` is an actor name. Pass = an actor
@@ -7536,11 +7536,18 @@ def pie_test_scene(
           shape as ``actor_has_class``), ``expected`` is an
           integer. Pass = the editor world contains exactly that
           many actors of the resolved class (subclasses included).
+        - ``actor_distance``: ``target`` is the first actor's
+          name, ``target_b`` (or ``other``) is the second actor's
+          name, ``max_distance`` (or ``expected``) is the upper
+          bound in cm, optional ``tolerance`` defaults to 0.0.
+          Pass = ``FVector::Dist(A.Loc, B.Loc) <= max_distance +
+          tolerance``. Useful for proximity assertions in level
+          setup tests.
 
     Args:
         assertions: Array of assertion specs. Each entry is a dict
-            ``{kind, target, expected?, tolerance?}``. Required;
-            non-empty.
+            ``{kind, target, expected?, tolerance?, target_b?,
+            max_distance?}``. Required; non-empty.
 
     Returns:
         Dict with ``total``, ``passed``, ``failed``, ``unsupported``,
