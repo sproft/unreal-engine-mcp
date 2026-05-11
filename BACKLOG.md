@@ -8,7 +8,52 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped two maintenance fixes that close
+The most recent pass shipped four deepening additions across
+existing tools: `behavior_tree` gains `set_root_decorator`
+(appends a UBTDecorator to `UBehaviorTree::RootDecorators`, the
+tree-level chain the BT editor exposes under "Add Decorator" on
+the root composite; NewObject's the decorator outered to the
+tree, runs `InitializeFromAsset`, and lands an optional flat
+property dict through `FProperty::ImportText_InContainer`),
+`sequencer_edit` gains `add_visibility_track` (declarative
+one-call wrapper for the show / hide pattern; resolves a
+binding through `binding` GUID or `actor` / `possessable` name,
+picks `UMovieSceneVisibilityTrack` for possessables and
+`UMovieSceneSpawnTrack` for spawnables, finds-or-adds the track,
+spawns a section through `UMovieSceneTrack::CreateNewSection` +
+`AddSection`, wraps `[start_frame, end_frame)` into the
+section's range, and writes the bool channel default through
+the shared `UMovieSceneBoolSection` base so the same writer
+covers both subclasses), `niagara_edit` gains
+`set_system_warmup` (writes the system-level warmup trio
+(`WarmupTime` / `WarmupTickCount` / `WarmupTickDelta`) on a
+`UNiagaraSystem`; routes through the public NIAGARA_API
+`SetWarmupTime` / `SetWarmupTickDelta` mutators so the engine's
+`ResolveWarmupTickCount` re-derives the count from the time and
+delta when those are supplied, and reflection-writes
+`WarmupTickCount` when the caller pins the count directly
+(harmonising the time field so the editor's `WarmupTime > 0`
+EditCondition holds)), and `behavior_tree` gains
+`rename_blackboard_key` (renames an own key on a target
+UBlackboardData and propagates the new name across every
+FBlackboardKeySelector on every Hard-referencer asset that
+implements IBlackboardAssetProvider; refuses duplicate names
+against own + parent keys, fires the documented
+PreEditChange + PostEditChangeChainProperty pair against the
+`Keys` array's `EntryName` subfield so open BB pickers refresh,
+walks each Hard-referencer package through
+`IAssetRegistry::GetReferencers`, loads each candidate asset,
+iterates every subobject under the package, rewrites
+`FStructProperty` of FBlackboardKeySelector whose
+`SelectedKeyName` matches the old name, and saves the BB plus
+every dirty referencer package). The four deepenings together
+close the tree-level RootDecorator authoring follow-on, the
+"show / hide an actor without leaving the MCP layer" gap on
+the Sequencer side, the system-level warmup writer gap on the
+Niagara side, and the Blackboard key-rename half of the
+"Blackboard rename / type-change ops" follow-on.
+
+The pass before that shipped two maintenance fixes that close
 the UE 5.7 build break (the `ENiagaraInterpolatedSpawnMode` enum
 tail dropped in this engine snapshot so the `bInterpolatedSpawning`
 branch on `niagara_edit` no longer compiled; the `FLinearColor`
@@ -1469,9 +1514,10 @@ ability" alongside `tag_registry_edit`.
   by default. The runtime exec / memory indices stay null on
   append; the BT graph editor's RebuildExecutionOrder populates
   them when the asset is re-opened or re-compiled. Adds AIModule
-  to PublicDependencyModuleNames. Open follow-ons: Blackboard
-  rename / type-change ops, parent-Blackboard re-bind, and
-  tree-level RootDecorator authoring.
+  to PublicDependencyModuleNames. The deepening passes since this
+  cut landed `add_blackboard_decorator`, `set_root_decorator`,
+  and `rename_blackboard_key`. Remaining follow-ons: Blackboard
+  key type-change op, and parent-Blackboard re-bind.
 - `widget_edit` slot-property surface — a third op `set_slot_property`
   on the existing `widget_edit` tool. Takes a target widget FName plus
   a flat property dict and applies the dict to the widget's UPanelSlot
@@ -2492,6 +2538,77 @@ ability" alongside `tag_registry_edit`.
   surfaces the resolved key + classified operation family + the
   payload triple + the decorator FName so a follow-up call can
   address the spawned decorator.
+- `behavior_tree set_root_decorator` (small) — appends a
+  UBTDecorator to `UBehaviorTree::RootDecorators`, the tree-level
+  decorator chain the BT editor exposes under "Add Decorator" on
+  the root composite. NewObject's the decorator outered to the
+  tree, runs `InitializeFromAsset`, and lands an optional flat
+  property dict through `FProperty::ImportText_InContainer`. The
+  decorator class is resolved through the same short-name table
+  `add_decorator` uses (`blackboard` / `cooldown` / `loop` /
+  `time_limit` / `force_success`) plus full `/Script/...` paths
+  and `/Game/...` BP class paths. Refuses abstract classes.
+  Saves the BT on success unless `save=false`. Closes the
+  "tree-level RootDecorator authoring" follow-on the prior
+  `behavior_tree` pass tagged.
+- `behavior_tree rename_blackboard_key` (small) — renames an own
+  key on a target UBlackboardData and propagates the new name to
+  every FBlackboardKeySelector across every asset that
+  Hard-references the BB's package and implements
+  IBlackboardAssetProvider. Refuses duplicate names (own + parent
+  keys) plus a same-name no-op. Fires the documented
+  PreEditChange / PostEditChangeChainProperty pair against the
+  `Keys` array's `EntryName` subfield so open BB pickers refresh,
+  then walks each Hard-referencer through
+  `IAssetRegistry::GetReferencers(EDependencyCategory::Package,
+  EDependencyProperty::Hard)`, loads each candidate, iterates
+  every subobject under the package via `GetObjectsWithOuter`,
+  and rewrites each `FStructProperty` of FBlackboardKeySelector
+  whose `SelectedKeyName` matches the old name. Saves the BB
+  plus every dirty referencer package. The walk re-implements
+  the BT editor's UpdateExternalBlackboardKeyReferences path
+  clean-room against the public AIModule + AssetRegistry API so
+  we stay clear of the editor-only BehaviorTreeEditor module.
+  Closes the rename half of the "Blackboard rename /
+  type-change ops" follow-on.
+- `sequencer_edit add_visibility_track` (small) — declarative
+  one-call wrapper for the show / hide pattern. Resolves a
+  binding through `binding` GUID or `actor` / `possessable` name
+  (visibility is per-binding). For possessables we attach
+  `UMovieSceneVisibilityTrack` (the bool property track that
+  drives `SetActorHiddenInGame`); for spawnables we attach
+  `UMovieSceneSpawnTrack` (the bool track that gates the
+  spawnable's lifetime). The binding kind is decided by a single
+  `UMovieScene::FindSpawnable` cast on the resolved GUID. The
+  track is reused when an existing one of the right class lives
+  under the binding so the op is idempotent for follow-up adds
+  (`force_new_track=true` overrides). The section spawns via
+  `UMovieSceneTrack::CreateNewSection` + `AddSection`; the range
+  wraps `[start_frame, end_frame)` with the inclusive-start /
+  exclusive-end convention. `start_frame` defaults to the
+  MovieScene's playback range start; `end_frame` defaults to
+  `start_frame + duration_frames` (when supplied) or the
+  playback range end otherwise. Bool channel default lands
+  through the shared `UMovieSceneBoolSection` base both subclasses
+  inherit, so a single `GetChannel().SetDefault(visible)` covers
+  both paths. Pass `visible=false` to key "hidden" / "dead". The
+  response carries the binding kind, the track-reuse flag, and
+  the resolved frame triple so the caller can verify what
+  landed.
+- `niagara_edit set_system_warmup` (small) — writes the
+  system-level warmup trio (`WarmupTime` seconds,
+  `WarmupTickCount` ticks, `WarmupTickDelta` seconds-per-tick)
+  on a UNiagaraSystem. The public NIAGARA_API mutators
+  `SetWarmupTime` and `SetWarmupTickDelta` call the engine's
+  `ResolveWarmupTickCount` so the derived count stays consistent
+  with the time / delta. When the caller wants to pin the tick
+  count directly we reflection-write `WarmupTickCount` (no
+  public setter; the engine derives it from the time / delta
+  pair) and harmonise `WarmupTime` so the editor's
+  `WarmupTime > 0` EditCondition reveals the rest of the warmup
+  surface. The response carries the previous + new trio plus
+  the `NeedsWarmup()` flag so the caller can verify the warmup
+  is active. Saves the system on success unless `save=false`.
 - `material_edit add_2d_array_sample` (small) — Texture2DArray
   sibling of `add_texture_sample` / `add_texture_sample_cube`.
   Spawns either a plain `UMaterialExpressionTextureSample` and
@@ -3374,9 +3491,9 @@ slice. The next set should pick up:
 11. `gas_edit` remaining ops — rebind cost / cooldown classes on a
     UGameplayAbility through the CDO, and a GameplayCue authoring
     slice (cue-tag set + level range + magnitude attribute).
-12. `behavior_tree` heavier edit ops — Blackboard key rename /
-    type-change ops, parent-Blackboard re-bind, and tree-level
-    RootDecorator authoring.
+12. `behavior_tree` heavier edit ops — Blackboard key type-change
+    op and parent-Blackboard re-bind. The `rename_blackboard_key`
+    and `set_root_decorator` ops shipped in the most recent pass.
 13. `sequencer_edit` remaining edit ops — spawnable creation and
     per-row edits. The `move_section` op shipped in the most
     recent pass.
