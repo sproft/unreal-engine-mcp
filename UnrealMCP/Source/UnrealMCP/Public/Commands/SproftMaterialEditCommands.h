@@ -218,6 +218,26 @@
  *      `add_expression` / `add_math` (`position`, `name`,
  *      `property` / `connect_to` / `connect_input` for one-shot
  *      downstream wiring, `recompile`, `save`).
+ *   - "add_fresnel": spawns a `UMaterialExpressionFresnel` on a target
+ *      material's graph. The Fresnel expression generates the
+ *      view-angle falloff most commonly wired into a material's
+ *      EmissiveColor (rim light) or Opacity (edge fade) input. The
+ *      engine surfaces three editor-side knobs on the expression:
+ *      `Exponent` (float; default 5.0; the falloff sharpness) and
+ *      `BaseReflectFraction` (float; default 0.04; the floor value
+ *      at view angle 0, the Schlick `F0` term) plus the `Normal`
+ *      and `CameraVector` input pins (both default to the engine's
+ *      pixel-shader-side world-space inputs when left empty).
+ *      Optional `normal` / `camera_vector` inputs wire a named
+ *      sibling expression's first output into the matching pin
+ *      through `ConnectMaterialExpressions`. Same downstream knobs
+ *      as `add_constant` / `add_math` / `add_uv_node` (`position`,
+ *      `name`, `properties`, `property` / `connect_to` /
+ *      `connect_input` for one-shot downstream wiring, `recompile`,
+ *      `save`). Common enough that calling `add_expression` then
+ *      setting two properties via `set_expression_property` (one
+ *      for `Exponent`, one for `BaseReflectFraction`) round-trips
+ *      when one call should suffice.
  *   - "set_attribute_blendable": flips a per-attribute override toggle
  *      on a UMaterialInstanceConstant's
  *      `FMaterialInstanceBasePropertyOverrides` struct. The
@@ -289,4 +309,5 @@ private:
     TSharedPtr<FJsonObject> AddMath(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddUVNode(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddDynamicParameter(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddFresnel(const TSharedPtr<FJsonObject>& Params);
 };

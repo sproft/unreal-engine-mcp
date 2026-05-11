@@ -537,9 +537,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddDynamicParameter(Params);
     }
+    if (Operation == TEXT("add_fresnel") || Operation == TEXT("fresnel")
+        || Operation == TEXT("add_fresnel_node"))
+    {
+        return AddFresnel(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter, add_fresnel"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -4730,6 +4735,279 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddDynamicParameter(const T
     ResultObj->SetObjectField(TEXT("default_value"), DefaultOut);
     ResultObj->SetBoolField(TEXT("wrote_default_value"), bWroteDefaultValue);
     ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
+    ResultObj->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
+    if (PropertyErrors.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& E : PropertyErrors)
+        {
+            Arr.Add(MakeShared<FJsonValueString>(E));
+        }
+        ResultObj->SetArrayField(TEXT("property_errors"), Arr);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_property"), bConnectedToProperty);
+    if (bConnectedToProperty)
+    {
+        ResultObj->SetStringField(TEXT("property"), PropertyConnected);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_expression"), bConnectedToExpression);
+    if (bConnectedToExpression)
+    {
+        ResultObj->SetStringField(TEXT("connect_to"), ExpressionConnected);
+    }
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddFresnel(const TSharedPtr<FJsonObject>& Params)
+{
+    // Spawns a UMaterialExpressionFresnel on a target material's
+    // graph. The Fresnel expression generates the view-angle falloff
+    // most commonly wired into a material's EmissiveColor (rim light)
+    // or Opacity (edge fade) input. The engine surfaces three
+    // editor-side knobs on the expression: `Exponent` (float; the
+    // falloff sharpness), `BaseReflectFraction` (float; the floor
+    // value at view angle 0, the Schlick F0 term) and the `Normal` /
+    // `CameraVector` input pins (both default to the engine's
+    // pixel-shader-side world-space inputs when left empty).
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+    UMaterial* Material = Cast<UMaterial>(UEditorAssetLibrary::LoadAsset(MaterialPath));
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial"), *MaterialPath));
+    }
+
+    // Position cascade reuses the same DeriveDefaultPosition helper
+    // that add_expression / add_constant / add_math / add_uv_node /
+    // add_dynamic_parameter share.
+    int32 PosX = 0, PosY = 0;
+    bool bExplicitPos = false;
+    if (Params->HasField(TEXT("position")))
+    {
+        const TSharedPtr<FJsonValue> PosVal = Params->TryGetField(TEXT("position"));
+        if (PosVal.IsValid() && PosVal->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = PosVal->AsArray();
+            if (Arr.Num() >= 2)
+            {
+                PosX = static_cast<int32>(Arr[0]->AsNumber());
+                PosY = static_cast<int32>(Arr[1]->AsNumber());
+                bExplicitPos = true;
+            }
+        }
+        else if (PosVal.IsValid() && PosVal->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject> PosObj = PosVal->AsObject();
+            double X = 0.0, Y = 0.0;
+            if (PosObj.IsValid()
+                && (PosObj->TryGetNumberField(TEXT("x"), X) || PosObj->TryGetNumberField(TEXT("X"), X))
+                && (PosObj->TryGetNumberField(TEXT("y"), Y) || PosObj->TryGetNumberField(TEXT("Y"), Y)))
+            {
+                PosX = static_cast<int32>(X);
+                PosY = static_cast<int32>(Y);
+                bExplicitPos = true;
+            }
+        }
+    }
+    if (!bExplicitPos)
+    {
+        DeriveDefaultPosition(Material, PosX, PosY);
+    }
+
+    UMaterialExpression* NewExprBase = UMaterialEditingLibrary::CreateMaterialExpression(
+        Material, UMaterialExpressionFresnel::StaticClass(), PosX, PosY);
+    UMaterialExpressionFresnel* NewExpr = Cast<UMaterialExpressionFresnel>(NewExprBase);
+    if (!NewExpr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("CreateMaterialExpression failed for class 'MaterialExpressionFresnel'"));
+    }
+
+    // Capture the engine-default values so the response carries the
+    // before / after pair on a single round trip.
+    const float DefaultExponent = NewExpr->Exponent;
+    const float DefaultBaseReflectFraction = NewExpr->BaseReflectFraction;
+
+    // Optional Exponent (falloff sharpness; UE default 5.0). The
+    // engine clamps the runtime side, but a sane caller still wants
+    // to land 1.0 / 2.0 / 5.0 for the classic preset shapes.
+    bool bWroteExponent = false;
+    double ExponentValue = 0.0;
+    if (Params->TryGetNumberField(TEXT("Exponent"), ExponentValue)
+        || Params->TryGetNumberField(TEXT("exponent"), ExponentValue)
+        || Params->TryGetNumberField(TEXT("falloff"), ExponentValue)
+        || Params->TryGetNumberField(TEXT("power"), ExponentValue))
+    {
+        NewExpr->Exponent = static_cast<float>(ExponentValue);
+        bWroteExponent = true;
+    }
+
+    // Optional BaseReflectFraction (the Schlick F0 floor at view
+    // angle 0). UE default is 0.04 (the canonical dielectric F0).
+    bool bWroteBaseReflectFraction = false;
+    double BaseReflectFractionValue = 0.0;
+    if (Params->TryGetNumberField(TEXT("BaseReflectFraction"), BaseReflectFractionValue)
+        || Params->TryGetNumberField(TEXT("base_reflect_fraction"), BaseReflectFractionValue)
+        || Params->TryGetNumberField(TEXT("base_reflect"), BaseReflectFractionValue)
+        || Params->TryGetNumberField(TEXT("f0"), BaseReflectFractionValue)
+        || Params->TryGetNumberField(TEXT("F0"), BaseReflectFractionValue))
+    {
+        NewExpr->BaseReflectFraction = static_cast<float>(BaseReflectFractionValue);
+        bWroteBaseReflectFraction = true;
+    }
+
+    // Optional `name` renames the spawned node for follow-up wiring.
+    FString NameOverride;
+    if (Params->TryGetStringField(TEXT("name"), NameOverride) && !NameOverride.IsEmpty())
+    {
+        NewExpr->Rename(*NameOverride, NewExpr->GetOuter(), REN_DontCreateRedirectors);
+    }
+
+    // Optional flat properties dict mirrors the other add_* ops for
+    // anything the dedicated knobs above do not cover.
+    TArray<FString> PropertyErrors;
+    int32 PropertyAppliedCount = 0;
+    if (Params->HasField(TEXT("properties")))
+    {
+        const TSharedPtr<FJsonValue> PropsVal = Params->TryGetField(TEXT("properties"));
+        if (PropsVal.IsValid() && PropsVal->Type == EJson::Object)
+        {
+            PropertyAppliedCount = MaterialEdit_ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
+        }
+    }
+
+    // Optional input wiring. The Fresnel expression carries two
+    // input pins: `Normal` and `CameraVector`. Both default to the
+    // engine's pixel-shader-side world-space inputs when left empty,
+    // which covers the common rim-light case. A caller who needs a
+    // tangent-space normal, a custom view vector, or a Niagara
+    // sprite alignment vector can wire a named sibling expression
+    // into either pin through ConnectMaterialExpressions.
+    bool bWroteNormalInput = false;
+    bool bWroteCameraVectorInput = false;
+    FString NormalSource, NormalOutput;
+    if (Params->TryGetStringField(TEXT("Normal"), NormalSource)
+        || Params->TryGetStringField(TEXT("normal"), NormalSource)
+        || Params->TryGetStringField(TEXT("normal_input"), NormalSource))
+    {
+        Params->TryGetStringField(TEXT("normal_output"), NormalOutput);
+        UMaterialExpression* SourceExpr = FindExpressionByName(Material, NormalSource);
+        if (!SourceExpr)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("'normal' source '%s' not found on material"), *NormalSource));
+        }
+        if (UMaterialEditingLibrary::ConnectMaterialExpressions(SourceExpr, NormalOutput, NewExpr, TEXT("Normal")))
+        {
+            bWroteNormalInput = true;
+        }
+    }
+    FString CameraVectorSource, CameraVectorOutput;
+    if (Params->TryGetStringField(TEXT("CameraVector"), CameraVectorSource)
+        || Params->TryGetStringField(TEXT("camera_vector"), CameraVectorSource)
+        || Params->TryGetStringField(TEXT("camera_vector_input"), CameraVectorSource)
+        || Params->TryGetStringField(TEXT("view"), CameraVectorSource)
+        || Params->TryGetStringField(TEXT("view_vector"), CameraVectorSource))
+    {
+        Params->TryGetStringField(TEXT("camera_vector_output"), CameraVectorOutput);
+        UMaterialExpression* SourceExpr = FindExpressionByName(Material, CameraVectorSource);
+        if (!SourceExpr)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("'camera_vector' source '%s' not found on material"), *CameraVectorSource));
+        }
+        if (UMaterialEditingLibrary::ConnectMaterialExpressions(SourceExpr, CameraVectorOutput, NewExpr, TEXT("CameraVector")))
+        {
+            bWroteCameraVectorInput = true;
+        }
+    }
+
+    // Optional one-shot downstream wiring (same shape as the other
+    // add_* ops): wire the new node's output to either a material
+    // attribute (`property`) or another named expression's input pin
+    // (`connect_to` + `connect_input`).
+    bool bConnectedToProperty = false;
+    bool bConnectedToExpression = false;
+    FString PropertyConnected;
+    FString ExpressionConnected;
+
+    FString PropertyToken;
+    if (Params->TryGetStringField(TEXT("property"), PropertyToken)
+        || Params->TryGetStringField(TEXT("connect_property"), PropertyToken))
+    {
+        EMaterialProperty MaterialProperty;
+        if (!TryParseMaterialProperty(PropertyToken, MaterialProperty))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unknown material property token '%s'. Use BaseColor, Metallic, Roughness, EmissiveColor, etc."), *PropertyToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialProperty(NewExpr, FromOutput, MaterialProperty))
+        {
+            bConnectedToProperty = true;
+            PropertyConnected = PropertyToken;
+        }
+    }
+
+    FString ConnectToToken;
+    FString ConnectInputToken;
+    if (Params->TryGetStringField(TEXT("connect_to"), ConnectToToken))
+    {
+        Params->TryGetStringField(TEXT("connect_input"), ConnectInputToken);
+        UMaterialExpression* ToExpr = FindExpressionByName(Material, ConnectToToken);
+        if (!ToExpr)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("connect_to expression '%s' not found on material"), *ConnectToToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialExpressions(NewExpr, FromOutput, ToExpr, ConnectInputToken))
+        {
+            bConnectedToExpression = true;
+            ExpressionConnected = ToExpr->GetName();
+        }
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_fresnel"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
+    ResultObj->SetNumberField(TEXT("exponent"), NewExpr->Exponent);
+    ResultObj->SetNumberField(TEXT("base_reflect_fraction"), NewExpr->BaseReflectFraction);
+    ResultObj->SetNumberField(TEXT("default_exponent"), DefaultExponent);
+    ResultObj->SetNumberField(TEXT("default_base_reflect_fraction"), DefaultBaseReflectFraction);
+    ResultObj->SetBoolField(TEXT("wrote_exponent"), bWroteExponent);
+    ResultObj->SetBoolField(TEXT("wrote_base_reflect_fraction"), bWroteBaseReflectFraction);
+    ResultObj->SetBoolField(TEXT("wrote_normal_input"), bWroteNormalInput);
+    ResultObj->SetBoolField(TEXT("wrote_camera_vector_input"), bWroteCameraVectorInput);
     ResultObj->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
     if (PropertyErrors.Num() > 0)
     {

@@ -3899,6 +3899,10 @@ def material_edit(
     parameter_index: Optional[int] = None,
     param_names: Optional[Union[List[str], Dict[str, str]]] = None,
     default_values: Optional[Union[List[float], Dict[str, float], float]] = None,
+    fresnel_exponent: Optional[float] = None,
+    base_reflect_fraction: Optional[float] = None,
+    normal: Optional[str] = None,
+    camera_vector: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -4099,6 +4103,24 @@ def material_edit(
           knobs as ``add_math`` / ``add_uv_node`` (``position``,
           ``name``, ``property`` / ``connect_to`` /
           ``connect_input``, ``recompile``, ``save``).
+        - "add_fresnel": spawns a ``UMaterialExpressionFresnel`` on
+          a target material's graph. The Fresnel expression
+          generates the view-angle falloff most commonly wired into
+          a material's EmissiveColor (rim light) or Opacity (edge
+          fade) input. The engine surfaces three editor-side knobs:
+          ``Exponent`` (alias ``fresnel_exponent`` / ``falloff`` /
+          ``power``; float; default 5.0; the falloff sharpness),
+          ``BaseReflectFraction`` (alias ``base_reflect_fraction``
+          / ``base_reflect`` / ``f0``; float; default 0.04; the
+          Schlick F0 floor at view angle 0) and the ``Normal`` /
+          ``CameraVector`` input pins (both default to the engine's
+          pixel-shader-side world-space inputs when left empty).
+          Optional ``normal`` / ``camera_vector`` wire a named
+          sibling expression's first output into the matching pin
+          through ``ConnectMaterialExpressions``. Same downstream
+          knobs as ``add_math`` / ``add_uv_node`` (``position``,
+          ``name``, ``properties``, ``property`` / ``connect_to`` /
+          ``connect_input``, ``recompile``, ``save``).
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.
@@ -4271,6 +4293,14 @@ def material_edit(
         params["param_names"] = param_names
     if default_values is not None:
         params["default_values"] = default_values
+    if fresnel_exponent is not None:
+        params["exponent"] = fresnel_exponent
+    if base_reflect_fraction is not None:
+        params["base_reflect_fraction"] = base_reflect_fraction
+    if normal is not None:
+        params["normal"] = normal
+    if camera_vector is not None:
+        params["camera_vector"] = camera_vector
 
     try:
         response = unreal.send_command("material_edit", params)
