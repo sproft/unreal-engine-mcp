@@ -180,6 +180,26 @@
  *      `name`, `properties`, `property` / `connect_to` /
  *      `connect_input` for one-shot downstream wiring, `recompile`,
  *      `save`).
+ *   - "add_dynamic_parameter": spawns a
+ *      `UMaterialExpressionDynamicParameter` on a target material's
+ *      graph and lands a per-channel name list onto the expression's
+ *      `ParamNames` array. Dynamic parameter nodes give Niagara
+ *      renderers (and other runtime systems) four extra material
+ *      inputs they can drive per particle / per instance without
+ *      shipping a Material Instance for every variation. The
+ *      `parameter_index` (0..3) picks the slot since each material
+ *      can host up to four dynamic parameter nodes; `param_names`
+ *      accepts a 4-entry list of FName strings (mapped to the R / G
+ *      / B / A channels in order) or an object form
+ *      `{r, g, b, a}` so callers can patch a subset without padding
+ *      with empty entries. Position cascades; the new node accepts
+ *      `name` to rename for follow-up wiring plus the same downstream
+ *      knobs the other `add_*` ops expose (`property` /
+ *      `connect_to` / `connect_input` for one-shot wiring,
+ *      `recompile`, `save`). The optional `default_values` array
+ *      (length 4) lands on the expression's `DefaultValue`
+ *      FLinearColor slot for the editor-side preview value the
+ *      compiler falls back to when no Niagara driver is bound.
  *   - "add_uv_node": single-call wrapper that spawns one of the
  *      common UV-flow expression nodes by short `op` token.
  *      Accepts `TextureCoordinate` / `Panner` / `Rotator` /
@@ -268,4 +288,5 @@ private:
     TSharedPtr<FJsonObject> AddConstant(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddMath(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddUVNode(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddDynamicParameter(const TSharedPtr<FJsonObject>& Params);
 };

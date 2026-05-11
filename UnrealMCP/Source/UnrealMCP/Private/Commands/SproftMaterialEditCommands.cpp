@@ -27,6 +27,7 @@
 #include "Materials/MaterialExpressionCrossProduct.h"
 #include "Materials/MaterialExpressionDivide.h"
 #include "Materials/MaterialExpressionDotProduct.h"
+#include "Materials/MaterialExpressionDynamicParameter.h"
 #include "Materials/MaterialExpressionFresnel.h"
 #include "Materials/MaterialExpressionFunctionInput.h"
 #include "Materials/MaterialExpressionFunctionOutput.h"
@@ -531,9 +532,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddUVNode(Params);
     }
+    if (Operation == TEXT("add_dynamic_parameter") || Operation == TEXT("add_dynamicparam")
+        || Operation == TEXT("dynamic_parameter") || Operation == TEXT("add_dynamic_param"))
+    {
+        return AddDynamicParameter(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -4386,6 +4392,343 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddUVNode(const TSharedPtr<
     ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
     ResultObj->SetStringField(TEXT("uv_op"), CanonicalToken);
     ResultObj->SetStringField(TEXT("expression_class"), NodeClass->GetName());
+    ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
+    ResultObj->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
+    if (PropertyErrors.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& E : PropertyErrors)
+        {
+            Arr.Add(MakeShared<FJsonValueString>(E));
+        }
+        ResultObj->SetArrayField(TEXT("property_errors"), Arr);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_property"), bConnectedToProperty);
+    if (bConnectedToProperty)
+    {
+        ResultObj->SetStringField(TEXT("property"), PropertyConnected);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_expression"), bConnectedToExpression);
+    if (bConnectedToExpression)
+    {
+        ResultObj->SetStringField(TEXT("connect_to"), ExpressionConnected);
+    }
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddDynamicParameter(const TSharedPtr<FJsonObject>& Params)
+{
+    // Spawns a UMaterialExpressionDynamicParameter on a target
+    // material's graph. Niagara renderers (and other runtime systems)
+    // can drive the four-channel output per particle / per instance
+    // without shipping a Material Instance for every variation. The
+    // engine surfaces the four channels through `ParamNames` (the
+    // editor-side per-channel name list) plus a `ParameterIndex`
+    // selector that lets a material host up to four dynamic parameter
+    // nodes (each one binds a different per-particle slot in the
+    // Niagara renderer). The expression also carries a `DefaultValue`
+    // FLinearColor used as the preview / fallback when no renderer is
+    // bound.
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+    UMaterial* Material = Cast<UMaterial>(UEditorAssetLibrary::LoadAsset(MaterialPath));
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial"), *MaterialPath));
+    }
+
+    // The per-material slot index: each material can carry up to four
+    // dynamic parameter expressions, each one binding a different
+    // per-particle slot in the Niagara renderer's
+    // DynamicMaterialParameters array. The engine clamps internally
+    // but we surface a clear error rather than relying on the implicit
+    // mod-4 to keep the shape obvious.
+    int32 ParameterIndex = 0;
+    if (!Params->TryGetNumberField(TEXT("parameter_index"), ParameterIndex)
+        && !Params->TryGetNumberField(TEXT("index"), ParameterIndex)
+        && !Params->TryGetNumberField(TEXT("slot"), ParameterIndex))
+    {
+        ParameterIndex = 0;
+    }
+    if (ParameterIndex < 0 || ParameterIndex > 3)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'parameter_index' must be in [0, 3], got %d"), ParameterIndex));
+    }
+
+    // ParamNames: 4-entry channel-named list. Accept either an array
+    // of strings (mapped to R / G / B / A in order) or an object
+    // {r, g, b, a} (case-insensitive keys). Missing channels stay at
+    // the engine-default `NAME_None`.
+    TArray<FName> ChannelNames;
+    ChannelNames.Init(NAME_None, 4);
+    const TCHAR* ChannelKeys[4] = { TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a") };
+
+    TSharedPtr<FJsonValue> NamesValue = Params->TryGetField(TEXT("param_names"));
+    if (!NamesValue.IsValid())
+    {
+        NamesValue = Params->TryGetField(TEXT("parameter_names"));
+    }
+    if (!NamesValue.IsValid())
+    {
+        NamesValue = Params->TryGetField(TEXT("channel_names"));
+    }
+    if (NamesValue.IsValid())
+    {
+        if (NamesValue->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = NamesValue->AsArray();
+            for (int32 I = 0; I < FMath::Min(4, Arr.Num()); ++I)
+            {
+                if (Arr[I].IsValid() && Arr[I]->Type == EJson::String)
+                {
+                    const FString Name = Arr[I]->AsString();
+                    if (!Name.IsEmpty())
+                    {
+                        ChannelNames[I] = FName(*Name);
+                    }
+                }
+            }
+        }
+        else if (NamesValue->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject>& Obj = NamesValue->AsObject();
+            for (int32 I = 0; I < 4; ++I)
+            {
+                FString Name;
+                if (Obj->TryGetStringField(ChannelKeys[I], Name) && !Name.IsEmpty())
+                {
+                    ChannelNames[I] = FName(*Name);
+                }
+            }
+        }
+    }
+
+    // Position cascade reuses the same DeriveDefaultPosition helper
+    // that add_expression / add_constant / add_math / add_uv_node
+    // share.
+    int32 PosX = 0, PosY = 0;
+    bool bExplicitPos = false;
+    if (Params->HasField(TEXT("position")))
+    {
+        const TSharedPtr<FJsonValue> PosVal = Params->TryGetField(TEXT("position"));
+        if (PosVal.IsValid() && PosVal->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = PosVal->AsArray();
+            if (Arr.Num() >= 2)
+            {
+                PosX = static_cast<int32>(Arr[0]->AsNumber());
+                PosY = static_cast<int32>(Arr[1]->AsNumber());
+                bExplicitPos = true;
+            }
+        }
+        else if (PosVal.IsValid() && PosVal->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject> PosObj = PosVal->AsObject();
+            double X = 0.0, Y = 0.0;
+            if (PosObj.IsValid()
+                && (PosObj->TryGetNumberField(TEXT("x"), X) || PosObj->TryGetNumberField(TEXT("X"), X))
+                && (PosObj->TryGetNumberField(TEXT("y"), Y) || PosObj->TryGetNumberField(TEXT("Y"), Y)))
+            {
+                PosX = static_cast<int32>(X);
+                PosY = static_cast<int32>(Y);
+                bExplicitPos = true;
+            }
+        }
+    }
+    if (!bExplicitPos)
+    {
+        DeriveDefaultPosition(Material, PosX, PosY);
+    }
+
+    UMaterialExpression* NewExprBase = UMaterialEditingLibrary::CreateMaterialExpression(
+        Material, UMaterialExpressionDynamicParameter::StaticClass(), PosX, PosY);
+    UMaterialExpressionDynamicParameter* NewExpr = Cast<UMaterialExpressionDynamicParameter>(NewExprBase);
+    if (!NewExpr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("CreateMaterialExpression failed for class 'MaterialExpressionDynamicParameter'"));
+    }
+
+    // Land the per-channel name list. The engine sizes ParamNames at
+    // 4 entries on construction; we overwrite each slot rather than
+    // SetNum so we leave any pre-set defaults the constructor put down
+    // in place when the caller passes a partial channel map.
+    if (NewExpr->ParamNames.Num() < 4)
+    {
+        NewExpr->ParamNames.SetNum(4);
+    }
+    for (int32 I = 0; I < 4; ++I)
+    {
+        NewExpr->ParamNames[I] = ChannelNames[I];
+    }
+
+    NewExpr->ParameterIndex = ParameterIndex;
+
+    // Optional editor-side default value (the FLinearColor preview /
+    // fallback the compiler uses when no Niagara driver is bound).
+    // Accept a 4-element array `[r, g, b, a]` or an object form
+    // `{r, g, b, a}` mirroring `param_names`. A scalar number falls
+    // back to (n, n, n, n) for the "drive every channel from a slider"
+    // shape.
+    TSharedPtr<FJsonValue> DefaultsValue = Params->TryGetField(TEXT("default_values"));
+    if (!DefaultsValue.IsValid())
+    {
+        DefaultsValue = Params->TryGetField(TEXT("defaults"));
+    }
+    if (!DefaultsValue.IsValid())
+    {
+        DefaultsValue = Params->TryGetField(TEXT("default_value"));
+    }
+    bool bWroteDefaultValue = false;
+    if (DefaultsValue.IsValid())
+    {
+        FLinearColor NewDefault = NewExpr->DefaultValue;
+        if (DefaultsValue->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = DefaultsValue->AsArray();
+            if (Arr.Num() >= 1) NewDefault.R = static_cast<float>(Arr[0]->AsNumber());
+            if (Arr.Num() >= 2) NewDefault.G = static_cast<float>(Arr[1]->AsNumber());
+            if (Arr.Num() >= 3) NewDefault.B = static_cast<float>(Arr[2]->AsNumber());
+            if (Arr.Num() >= 4) NewDefault.A = static_cast<float>(Arr[3]->AsNumber());
+            bWroteDefaultValue = true;
+        }
+        else if (DefaultsValue->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject>& Obj = DefaultsValue->AsObject();
+            double Tmp = 0.0;
+            if (Obj->TryGetNumberField(TEXT("r"), Tmp)) NewDefault.R = static_cast<float>(Tmp);
+            if (Obj->TryGetNumberField(TEXT("g"), Tmp)) NewDefault.G = static_cast<float>(Tmp);
+            if (Obj->TryGetNumberField(TEXT("b"), Tmp)) NewDefault.B = static_cast<float>(Tmp);
+            if (Obj->TryGetNumberField(TEXT("a"), Tmp)) NewDefault.A = static_cast<float>(Tmp);
+            bWroteDefaultValue = true;
+        }
+        else if (DefaultsValue->Type == EJson::Number)
+        {
+            const float N = static_cast<float>(DefaultsValue->AsNumber());
+            NewDefault = FLinearColor(N, N, N, N);
+            bWroteDefaultValue = true;
+        }
+        NewExpr->DefaultValue = NewDefault;
+    }
+
+    // Optional `name` renames the spawned node for follow-up wiring.
+    FString NameOverride;
+    if (Params->TryGetStringField(TEXT("name"), NameOverride) && !NameOverride.IsEmpty())
+    {
+        NewExpr->Rename(*NameOverride, NewExpr->GetOuter(), REN_DontCreateRedirectors);
+    }
+
+    // Optional flat `properties` dict for any additional UPROPERTY
+    // overrides (rare; the dedicated parameter_index / param_names /
+    // default_values knobs above cover the supported surface). Same
+    // shape as the other add_* ops.
+    TArray<FString> PropertyErrors;
+    int32 PropertyAppliedCount = 0;
+    if (Params->HasField(TEXT("properties")))
+    {
+        const TSharedPtr<FJsonValue> PropsVal = Params->TryGetField(TEXT("properties"));
+        if (PropsVal.IsValid() && PropsVal->Type == EJson::Object)
+        {
+            PropertyAppliedCount = MaterialEdit_ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
+        }
+    }
+
+    // Optional one-shot downstream wiring (same shape as add_uv_node /
+    // add_constant): wire one of the new node's outputs to either a
+    // material attribute (`property`) or another named expression's
+    // input pin (`connect_to` + `connect_input`).
+    bool bConnectedToProperty = false;
+    bool bConnectedToExpression = false;
+    FString PropertyConnected;
+    FString ExpressionConnected;
+
+    FString PropertyToken;
+    if (Params->TryGetStringField(TEXT("property"), PropertyToken)
+        || Params->TryGetStringField(TEXT("connect_property"), PropertyToken))
+    {
+        EMaterialProperty MaterialProperty;
+        if (!TryParseMaterialProperty(PropertyToken, MaterialProperty))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unknown material property token '%s'. Use BaseColor, Metallic, Roughness, EmissiveColor, etc."), *PropertyToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialProperty(NewExpr, FromOutput, MaterialProperty))
+        {
+            bConnectedToProperty = true;
+            PropertyConnected = PropertyToken;
+        }
+    }
+
+    FString ConnectToToken;
+    FString ConnectInputToken;
+    if (Params->TryGetStringField(TEXT("connect_to"), ConnectToToken))
+    {
+        Params->TryGetStringField(TEXT("connect_input"), ConnectInputToken);
+        UMaterialExpression* ToExpr = FindExpressionByName(Material, ConnectToToken);
+        if (!ToExpr)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("connect_to expression '%s' not found on material"), *ConnectToToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialExpressions(NewExpr, FromOutput, ToExpr, ConnectInputToken))
+        {
+            bConnectedToExpression = true;
+            ExpressionConnected = ToExpr->GetName();
+        }
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    // Surface the resolved per-channel name list so a follow-up call
+    // can verify the bytes landed without re-reading the expression.
+    TArray<TSharedPtr<FJsonValue>> NamesOut;
+    for (int32 I = 0; I < 4; ++I)
+    {
+        NamesOut.Add(MakeShared<FJsonValueString>(NewExpr->ParamNames[I].ToString()));
+    }
+
+    TSharedPtr<FJsonObject> DefaultOut = MakeShared<FJsonObject>();
+    DefaultOut->SetNumberField(TEXT("r"), NewExpr->DefaultValue.R);
+    DefaultOut->SetNumberField(TEXT("g"), NewExpr->DefaultValue.G);
+    DefaultOut->SetNumberField(TEXT("b"), NewExpr->DefaultValue.B);
+    DefaultOut->SetNumberField(TEXT("a"), NewExpr->DefaultValue.A);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_dynamic_parameter"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetNumberField(TEXT("parameter_index"), ParameterIndex);
+    ResultObj->SetArrayField(TEXT("param_names"), NamesOut);
+    ResultObj->SetObjectField(TEXT("default_value"), DefaultOut);
+    ResultObj->SetBoolField(TEXT("wrote_default_value"), bWroteDefaultValue);
     ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
     ResultObj->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
     if (PropertyErrors.Num() > 0)

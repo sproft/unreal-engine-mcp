@@ -3849,6 +3849,9 @@ def material_edit(
     constant_b: Optional[float] = None,
     constant_alpha: Optional[float] = None,
     constant_exponent: Optional[float] = None,
+    parameter_index: Optional[int] = None,
+    param_names: Optional[Union[List[str], Dict[str, str]]] = None,
+    default_values: Optional[Union[List[float], Dict[str, float], float]] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -4030,6 +4033,25 @@ def material_edit(
           ``add_math`` (``name``, ``property`` / ``connect_to`` /
           ``connect_input`` for one-shot downstream wiring,
           ``recompile``, ``save``).
+        - "add_dynamic_parameter": spawns a
+          ``UMaterialExpressionDynamicParameter`` on a target
+          material and lands a per-channel name list onto the
+          expression's ``ParamNames`` array. Dynamic parameter
+          nodes give Niagara renderers (and other runtime
+          systems) four extra material inputs they can drive per
+          particle / per instance without shipping a Material
+          Instance for every variation. ``parameter_index``
+          (0..3) picks the slot (each material can host up to
+          four dynamic parameter nodes). ``param_names`` is a
+          4-entry list of FName strings (mapped to R / G / B / A
+          in order) or an object ``{r, g, b, a}`` so callers can
+          patch a subset. ``default_values`` lands on the
+          expression's ``DefaultValue`` FLinearColor preview
+          (4-channel array, ``{r, g, b, a}`` object, or a scalar
+          number that drives every channel). Same downstream
+          knobs as ``add_math`` / ``add_uv_node`` (``position``,
+          ``name``, ``property`` / ``connect_to`` /
+          ``connect_input``, ``recompile``, ``save``).
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.
@@ -4196,6 +4218,12 @@ def material_edit(
         params["constant_alpha"] = constant_alpha
     if constant_exponent is not None:
         params["constant_exponent"] = constant_exponent
+    if parameter_index is not None:
+        params["parameter_index"] = parameter_index
+    if param_names is not None:
+        params["param_names"] = param_names
+    if default_values is not None:
+        params["default_values"] = default_values
 
     try:
         response = unreal.send_command("material_edit", params)
