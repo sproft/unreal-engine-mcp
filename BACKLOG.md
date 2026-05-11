@@ -9,6 +9,74 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped four deepening additions across
+existing tools: `behavior_tree` gains `set_parent_blackboard`
+(rebinds a target UBlackboardData's `Parent` UPROPERTY to another
+UBlackboardData, or unbinds when `clear=true` / `parent='none'` is
+passed; refuses self-parenting and the parent-cycle case through
+the engine's `UBlackboardData::IsChildOf` guard; fires the
+canonical PreEditChange + PostEditChangeChainProperty pair against
+the Parent UPROPERTY so the FBlackboardDataChanged multicast hits
+anyone listening, then runs `UpdateParentKeys` so `ParentKeys` is
+regenerated from the new chain (deduped against own `Keys`),
+`UpdateIfHasSynchronizedKeys` so the instance-synced flag
+propagates, `UpdateKeyIDs` so FirstKeyID stays consistent, and
+`PropagateKeyChangesToDerivedBlackboardAssets` so derived
+Blackboards refresh; closes the parent-Blackboard half of the
+"Blackboard rename / type-change ops" follow-on), `material_edit`
+gains `add_math` (single-call wrapper that spawns the common math
+expression nodes by short token; `op` accepts `Add` / `Subtract` /
+`Multiply` / `Divide` / `Min` / `Max` / `Lerp` / `Power` / `Sin` /
+`Cos` / `Abs` / `Saturate` / `OneMinus` / `Normalize` /
+`DotProduct` / `CrossProduct`; optional per-slot input names
+(`A` / `B` / `T` / `Alpha` / `input` / `Base` / `Exponent`) wire
+sibling expressions through
+`UMaterialEditingLibrary::ConnectMaterialExpressions`; the Const*
+fallback slots (`constant_a` / `constant_b` / `constant_alpha` /
+`constant_exponent`) land literal floats and a bare `constant`
+populates the second slot for the "* scalar" idiom; reuses the
+same `DeriveDefaultPosition` cascade,
+`MaterialEdit_ApplyPropertyDict`, `FindExpressionByName`, and
+`TryParseMaterialProperty` helpers `add_expression` /
+`add_constant` already use; same downstream knobs (`position` /
+`properties` / `property` / `connect_to` / `connect_input` /
+`recompile` / `save`)), `animation_edit` gains
+`add_metadata_curve` (pairs off the canonical Float / Vector /
+Transform `add_curve` shapes with the typed metadata curves
+AnimBPs use as runtime triggers; `metadata_type` accepts
+`Material` / `Morph` / `Attribute`; the per-asset curve is a
+Float curve flagged with `AACF_Metadata` (registered through
+`UAnimationBlueprintLibrary::AddCurve` with `bMetaDataCurve=true`)
+so the timeline stores a sparse boolean trigger marker rather
+than a smooth scalar; the typing lives on the USkeleton's per-
+curve `FCurveMetaData` Material / MorphTarget bits (the legacy
+`AACF_DriveMaterial` / `AACF_DriveMorphTarget` asset-side flags
+moved to the skeleton in 5.x and are marked Hidden on the asset);
+the Attribute case clears both bits so the curve flows through
+the engine's "no typed driver" path; non-editor builds fall back
+to the public `AccumulateCurveMetaData` hot path; optional
+keyframes accept a flat `[time, value]` float pair list; saves
+the sequence and the skeleton on success), and `sequencer_edit`
+gains `add_audio_fade` (writes a fade-in / fade-out volume ramp
+on an existing UMovieSceneAudioSection; the engine stores per-
+section audio volume on the section's `SoundVolume`
+FMovieSceneFloatChannel at channel index 0 on the channel proxy
+(both editor "Volume" identifier and runtime value-channel
+registrations land at index 0 from
+`UMovieSceneAudioSection::CacheChannelProxy`); the fade lands as
+a 4-key linear envelope (`[start, 0.0]` / `[start + fade_in, 1.0]`
+/ `[end - fade_out, 1.0]` / `[end, 0.0]`) with the matching pair
+dropped when a fade duration is zero; clears the channel's
+existing keys first so a second call replaces the prior
+envelope rather than stacking; each fade caps at half the
+section's duration so the two fades cannot cross over). The
+four deepenings together close the parent-Blackboard half of
+the "Blackboard rename / type-change ops" follow-on on the
+behavior_tree side, the math-node authoring shorthand gap on the
+material_edit side, the typed-metadata-curve gap on the
+animation_edit side, and the per-section audio fade gap on the
+sequencer_edit side.
+
+The pass before that shipped four deepening additions across
 existing tools: `behavior_tree` gains `change_blackboard_key_type`
 (swaps the UBlackboardKeyType instance on an own key entry of a
 target Blackboard for a freshly NewObject'd instance of the
@@ -69,7 +137,7 @@ pie_test_scene side, the per-emitter loop-behaviour writer gap on
 the Niagara side, and the literal-constant authoring gap on the
 material_edit side.
 
-The pass before that shipped four deepening additions across
+The pass before those shipped four deepening additions across
 existing tools: `behavior_tree` gains `set_root_decorator`
 (appends a UBTDecorator to `UBehaviorTree::RootDecorators`, the
 tree-level chain the BT editor exposes under "Add Decorator" on
@@ -1262,6 +1330,111 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `behavior_tree set_parent_blackboard` (small) — rebinds a
+  target UBlackboardData's `Parent` UPROPERTY to another
+  UBlackboardData, or unbinds the slot when `clear=true` or
+  `parent='none'` (`null` / empty string) is passed. Refuses
+  self-parenting (a BB cannot be its own parent) and the
+  parent-cycle case through the engine's
+  `UBlackboardData::IsChildOf` ancestor probe (rejects the
+  case where the proposed parent already inherits from the
+  target). After the write fires the canonical PreEditChange +
+  PostEditChangeChainProperty pair against the Parent UPROPERTY
+  so the FBlackboardDataChanged multicast hits anyone
+  listening, then runs the documented `UpdateParentKeys` +
+  `UpdateIfHasSynchronizedKeys` + `UpdateKeyIDs` +
+  `PropagateKeyChangesToDerivedBlackboardAssets` fix-up so
+  `ParentKeys` is regenerated from the new chain (deduped
+  against own `Keys` through the engine's contains-name walk),
+  the instance-synced flag propagates from the new parent,
+  FirstKeyID stays consistent, and any derived Blackboard
+  refreshes. The response carries `previous_parent_path`,
+  `parent_path`, `inherited_key_count` (post-write), and
+  `own_key_count`. Aliases: `set_parent_blackboard` /
+  `set_blackboard_parent` / `rebind_parent_blackboard`. Closes
+  the parent-Blackboard half of the "Blackboard rename /
+  type-change ops" follow-on; the
+  `rename_blackboard_key` + `change_blackboard_key_type` +
+  `set_parent_blackboard` triple closes the BB management row
+  end-to-end on this fork.
+- `material_edit add_math` (small) — single-call wrapper that
+  spawns the common math expression nodes by short token so
+  callers do not have to spell out the long
+  `UMaterialExpressionXyz` class names. `op` accepts `Add` /
+  `Subtract` / `Multiply` / `Divide` / `Min` / `Max` / `Lerp`
+  / `Power` / `Sin` / `Cos` / `Abs` / `Saturate` / `OneMinus`
+  / `Normalize` / `DotProduct` / `CrossProduct` (case-
+  insensitive; the table covers the engine's set of
+  two-input math, three-input lerp, power's base / exponent
+  shape, single-input transcendentals, the Normalize
+  VectorInput slot, and the two-input dot / cross products).
+  Optional `A` / `B` / `T` (alpha) / `input` / `Base` /
+  `Exponent` name sibling expressions on the same material
+  whose first output (or the pin named by `<slot>_output`)
+  wires into the matching FExpressionInput slot through
+  `UMaterialEditingLibrary::ConnectMaterialExpressions`. The
+  Const* fallback slots accept literal floats: `constant_a` /
+  `constant_b` map onto each two-input math node's ConstA /
+  ConstB; a bare `constant` populates the second slot for the
+  "* scalar" idiom; `Lerp` adds `constant_alpha`; `Power` adds
+  `constant_exponent`. Reuses the same `DeriveDefaultPosition`
+  cascade, `MaterialEdit_ApplyPropertyDict`,
+  `FindExpressionByName`, and `TryParseMaterialProperty`
+  helpers `add_expression` / `add_constant` already use. Same
+  downstream knobs (`position` / `properties` / `property` /
+  `connect_to` / `connect_input` / `recompile` / `save`). Per-
+  input wiring errors and per-property ImportText errors
+  surface as arrays on the response so a caller can audit a
+  partial graph add without crashing the call.
+- `animation_edit add_metadata_curve` (small) — pairs off the
+  canonical Float / Vector / Transform `add_curve` shapes
+  with the typed metadata curves AnimBPs use as runtime
+  triggers. `metadata_type` (alias `type`) accepts `Material`
+  / `Morph` / `Attribute`. The per-asset curve is a Float
+  curve flagged with `AACF_Metadata` (registered through
+  `UAnimationBlueprintLibrary::AddCurve(Seq, Name, RCT_Float,
+  /*bMetaDataCurve=*/true)`) so the timeline stores a sparse
+  boolean trigger marker rather than a smooth scalar. The
+  typing lives on the USkeleton's per-curve `FCurveMetaData`
+  Material / MorphTarget bits (the legacy `AACF_DriveMaterial`
+  / `AACF_DriveMorphTarget` asset-side flags moved to the
+  skeleton in 5.x and are now Hidden on the asset). The op
+  writes the per-skeleton typing through the editor-only
+  `USkeleton::AddCurveMetaData` plus `SetCurveMetaDataMaterial`
+  / `SetCurveMetaDataMorphTarget`; the Attribute case clears
+  both bits so the curve flows through the engine's "no typed
+  driver" path. Non-editor builds fall back to the public
+  `AccumulateCurveMetaData` hot path so the runtime stays
+  consistent. Optional `keyframes` accepts a flat
+  `[time, value]` float pair list, same shape `add_curve`
+  uses for Float curves. Saves both the sequence and the
+  skeleton on success unless `save=false`.
+- `sequencer_edit add_audio_fade` (small) — writes a fade-in
+  / fade-out volume ramp on an existing
+  `UMovieSceneAudioSection`. The engine stores per-section
+  audio volume on the section's `SoundVolume`
+  FMovieSceneFloatChannel; UE 5.4+ moved the channel proxy
+  registration under
+  `UMovieSceneAudioSection::CacheChannelProxy` and registered
+  SoundVolume at channel index 0 with the identifier "Volume"
+  in editor builds (plain value channel in runtime builds),
+  so the op resolves the channel through
+  `Section->GetChannelProxy().GetChannel<FMovieSceneFloatChannel>(0)`
+  in both shapes. The fade lands as a 4-key linear envelope:
+  `[start, 0.0]` / `[start + fade_in, 1.0]` /
+  `[end - fade_out, 1.0]` / `[end, 0.0]`; a zero fade
+  duration drops the matching pair of keys so the envelope
+  still lands clean. The op clears the channel's existing
+  keys first so a second call replaces the prior fade rather
+  than stacking new keys on top; default value resets to 1.0
+  so the section plays at full volume between the ramp
+  endpoints. Each fade caps at half the section's duration so
+  the two fades cannot cross over. Resolves the audio track
+  on master scope by default; pass `binding` GUID or `actor`
+  / `possessable` to target a binding-scoped audio track.
+  `section_index` (default 0) picks the section row. Aliases:
+  `add_audio_fade` / `audio_fade` / `add_fade` /
+  `set_audio_fade`.
 - `behavior_tree change_blackboard_key_type` (small) — replace
   the UBlackboardKeyType instance on an own key entry of a
   target Blackboard with a freshly NewObject'd instance of the
