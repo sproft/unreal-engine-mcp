@@ -8,7 +8,49 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped four additions that close the
+The most recent pass shipped three deepening additions across
+existing tools: `widget_edit` gains `set_widget_brush` (FSlateBrush
+reflective writer with designer-sugar shorthands), `chaos_edit`
+gains `set_damage_threshold` (per-fracture-level + uniform writer
+over the asset's `DamageThreshold` array), and `sequencer_edit`
+gains `add_audio_track` (declarative one-call wrapper that lays a
+UMovieSceneAudioTrack + UMovieSceneAudioSection for a chosen
+USoundBase in one pass). `widget_edit set_widget_brush` resolves
+a target child widget on a UWidgetBlueprint, picks the FSlateBrush
+UPROPERTY through an explicit `brush_field` or a short-name probe
+that defaults to `Brush` for UImage and `Background` for UBorder,
+then applies a dict of writes covering designer-sugar keys
+(`texture` / `material` / `resource_object` lands an asset on
+`FSlateBrush::SetResourceObject`; `tint` accepts `[r,g,b,a]` /
+`{R,G,B,A}` / `(R=,G=,B=,A=)` ImportText; `size` accepts `[x,y]` /
+`{X,Y}`; `margin` accepts `[L,T,R,B]` / `[H,V]` / uniform float /
+`{Left,Top,Right,Bottom}`; `tiling` / `draw_as` / `mirroring`
+route through TEnumAsByte ImportText) plus a raw `brush` dict that
+lands any other FSlateBrush UPROPERTY through
+`FProperty::ImportText_Direct`. `chaos_edit set_damage_threshold`
+accepts either a per-level float array (`thresholds`) or a single
+uniform `threshold` / `value`. Optional `set_damage_model=true`
+flips `DamageModel` over to UserDefined so the per-level threshold
+actually drives the runtime strain; optional
+`clear_size_specific=true` clears the size-specific override so
+the per-level table applies. The Dataflow-driver path stays on the
+BACKLOG (the inner FDataflowNode is not a UPROPERTY on the
+UDataflowEdNode wrapper, so the reflective write needs the
+editor-only DATAFLOWENGINE dep this module stays clear of).
+`sequencer_edit add_audio_track` resolves a USoundBase by path /
+short name, finds or creates a UMovieSceneAudioTrack scoped to a
+binding or master, routes through
+`UMovieSceneAudioTrack::AddNewSound` to land a
+UMovieSceneAudioSection, and sets the section range from
+`start_frame` + `duration_frames` or the sound's intrinsic length
+through `USoundBase::GetDuration` converted via the MovieScene's
+tick resolution. An `force_new_track=true` knob bypasses the
+reuse-existing path so each call spawns a fresh track. Each tool
+keeps the rest of its surface intact; per-tool BACKLOG follow-on
+rows shrink to the dataflow side on chaos and per-section
+audio-channel writes on sequencer.
+
+The pass before that shipped four additions that close the
 UMG event-binding gap on `widget_edit`, the UMG style-struct gap
 on `widget_edit`, the long-standing PlanarCut gap on `chaos_edit`,
 and the mystery Blueprint authoring trio (`bp_author` /
