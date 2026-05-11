@@ -9,6 +9,84 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped three deepening additions across
+existing tools: `widget_edit` gains `set_canvas_slot` (single-call
+sugar over `set_slot_property` for the canonical
+`UCanvasPanelSlot` surface; takes the widget blueprint plus a
+target child widget FName plus any of the canvas slot knobs:
+`anchors_min` `[x, y]` / `anchors_max` `[x, y]` (the anchor box;
+equal min == max collapses the anchor onto a point; also accepts
+the box-form shorthand `anchors` `[minx, miny, maxx, maxy]` or
+`{min:[x,y], max:[x,y]}`), `offsets` `[left, top, right, bottom]`
+(the `FAnchorData::Offsets` margin; doubles as width / height
+when anchors collapse onto a point, otherwise stays a margin
+only; also accepts `position` `[x, y]` + `size` `[x, y]`
+shorthand for the absolutely-positioned widget case), `alignment`
+/ `pivot` `[x, y]` (the per-axis pivot the offsets resolve
+against; a scalar broadcasts onto both axes), `z_order` int
+draw-order under the panel, `auto_size` bool drives
+`UCanvasPanelSlot::bAutoSize` so the slot sizes to its child's
+preferred size; refuses children whose parent is not a
+UCanvasPanel since the slot class on a vertical box / overlay
+child does not carry these fields; routes through the
+UCanvasPanelSlot setters (`SetAnchors` / `SetOffsets` /
+`SetAlignment` / `SetZOrder` / `SetAutoSize`) so the engine's
+layout-invalidate path fires, then PostEditChange on the slot +
+the widget so an open UMG editor refresh picks the slot change
+up; surfaces the previous and new layout in the response so the
+caller can confirm the writes without a follow-up read),
+`material_edit` gains `add_fresnel` (spawns a
+`UMaterialExpressionFresnel` on a target UMaterial's graph; the
+Fresnel expression generates the view-angle falloff most often
+wired into a material's EmissiveColor (rim light) or Opacity
+(edge fade) input; the engine surfaces three editor-side knobs:
+`Exponent` (float; UE default 5.0; the falloff sharpness),
+`BaseReflectFraction` (float; UE default 0.04; the Schlick F0
+floor at view angle 0) and the `Normal` / `CameraVector` input
+pins (both default to the engine's pixel-shader-side world-space
+inputs when left empty); the op writes both float knobs directly
+on the typed pointer and captures the engine-default values on
+the response so the caller gets a before / after pair on a
+single round trip; optional `normal` / `camera_vector` wire a
+named sibling expression's first output into the matching pin
+through `ConnectMaterialExpressions`, covering the
+tangent-space-normal and custom-view-vector authoring cases;
+reuses the same `DeriveDefaultPosition` cascade,
+`MaterialEdit_ApplyPropertyDict`, `FindExpressionByName`, and
+`TryParseMaterialProperty` helpers the other `add_*` ops share;
+same downstream knobs (`position` / `name` / `properties` /
+`property` / `connect_to` / `connect_input` / `recompile` /
+`save`)), and `animation_edit` gains `set_curve_compression`
+(writes the per-sequence curve compression slot; complement to
+`set_compression_scheme` which covers the bone-track side; UE5
+routes float-curve compression through
+`UAnimSequence::CurveCompressionSettings`, a
+UAnimCurveCompressionSettings DataAsset whose `Codec` slot holds
+the UAnimCurveCompressionCodec subclass instance the engine
+runs; two input shapes share the op: `compression_settings`
+(alias `curve_compression_settings` / `settings_path`) for a
+`/Game/...` UAnimCurveCompressionSettings DataAsset path written
+into the slot directly, or `compression_codec` (alias
+`curve_compression_codec` / `curve_compression_scheme` /
+`scheme` / `codec`) for a codec class path or short class name
+(e.g. `UAnimCurveCompressionCodec_CompressedRichCurve` /
+`UAnimCurveCompressionCodec_UniformIndexable` /
+`UAnimCurveCompressionCodec_UniformlySampled`); the codec-class
+shape NewObject's a per-sequence UAnimCurveCompressionSettings
+outered to the sequence so the codec choice does not bleed into
+any other sequence on the project; assigns one codec subobject
+of the requested class into the settings's single `Codec` slot
+(the curve side stores one codec, unlike the bone side's
+`Codecs` array); optional `request_compile` (alias `recompile`)
+triggers `UAnimSequence::RequestAnimCompression` with the
+default synchronous `FRequestAnimCompressionParams` so the DDC
+bake reruns with the new curve codec before save; saves the
+sequence on success unless `save=false`). The three additions
+together close the canvas-anchored-UMG layout authoring gap on
+the widget_edit side, the rim-light / edge-fade Fresnel shorthand
+gap on the material_edit side, and the curve-compression-scheme
+authoring gap on the animation_edit side.
+
+The pass before that shipped three deepening additions across
 existing tools: `niagara_edit` gains `add_user_parameter`
 (declares a new user-tunable parameter on
 `UNiagaraSystem::GetExposedParameters()`, the `User.` namespace
