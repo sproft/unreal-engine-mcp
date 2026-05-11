@@ -123,6 +123,13 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleSetEmitterFlag(Params);
     }
+    if (Op.Equals(TEXT("set_emitter_local_space"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_local_space"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_emitter_localspace"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("local_space"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetEmitterLocalSpace(Params);
+    }
     if (Op.Equals(TEXT("add_sim_stage"), ESearchCase::IgnoreCase)
         || Op.Equals(TEXT("add_simulation_stage"), ESearchCase::IgnoreCase)
         || Op.Equals(TEXT("add_simstage"), ESearchCase::IgnoreCase))
@@ -186,7 +193,7 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
         return HandleRemoveEmitter(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup, set_emitter_loop, set_emitter_property, set_emitter_renderer, set_renderer_property, add_user_parameter, remove_emitter"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, set_emitter_local_space, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup, set_emitter_loop, set_emitter_property, set_emitter_renderer, set_renderer_property, add_user_parameter, remove_emitter"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -3224,5 +3231,169 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleRemoveEmitter(const TS
 #else
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         TEXT("niagara_edit remove_emitter requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterLocalSpace(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    // Dedicated convenience op for the headline `bLocalSpace` boolean
+    // on FVersionedNiagaraEmitterData. Equivalent to calling
+    // `set_emitter_flag flag=bLocalSpace value=<bool>` but with a
+    // single dedicated knob so the op stays readable for the common
+    // case. The write routes through reflection on the
+    // FVersionedNiagaraEmitterData UScriptStruct so the bitfield /
+    // plain-bool split stays compatible across UE versions.
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_emitter_local_space: missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_emitter_local_space: could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString HandleToken;
+    if (!Params->TryGetStringField(TEXT("emitter"), HandleToken)
+        && !Params->TryGetStringField(TEXT("emitter_handle"), HandleToken)
+        && !Params->TryGetStringField(TEXT("handle_name"), HandleToken)
+        && !Params->TryGetStringField(TEXT("name"), HandleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_emitter_local_space: missing 'emitter' parameter (handle name on the system)"));
+    }
+
+    // The dedicated bool knob. Accept the standard JSON shape plus the
+    // generic `value` alias so callers that already build a generic
+    // flag-style payload still resolve.
+    bool bRequestedValue = false;
+    {
+        bool bFound = false;
+        if (Params->TryGetBoolField(TEXT("local_space"), bRequestedValue))           { bFound = true; }
+        else if (Params->TryGetBoolField(TEXT("localspace"), bRequestedValue))       { bFound = true; }
+        else if (Params->TryGetBoolField(TEXT("bLocalSpace"), bRequestedValue))      { bFound = true; }
+        else if (Params->TryGetBoolField(TEXT("enabled"), bRequestedValue))          { bFound = true; }
+        else if (Params->TryGetBoolField(TEXT("value"), bRequestedValue))            { bFound = true; }
+        if (!bFound)
+        {
+            // Number / string shape fallback so 0 / 1 / "true" / "false" still resolve.
+            const TSharedPtr<FJsonValue> ValueJson = Params->TryGetField(TEXT("local_space"));
+            const TSharedPtr<FJsonValue> Fallback = Params->TryGetField(TEXT("value"));
+            const TSharedPtr<FJsonValue> Pick = ValueJson.IsValid() ? ValueJson : Fallback;
+            if (Pick.IsValid())
+            {
+                if (Pick->Type == EJson::Number)
+                {
+                    bRequestedValue = (Pick->AsNumber() != 0.0);
+                    bFound = true;
+                }
+                else if (Pick->Type == EJson::String)
+                {
+                    const FString S = Pick->AsString().TrimStartAndEnd().ToLower();
+                    if (S == TEXT("true") || S == TEXT("1") || S == TEXT("on") || S == TEXT("yes"))
+                    {
+                        bRequestedValue = true;
+                        bFound = true;
+                    }
+                    else if (S == TEXT("false") || S == TEXT("0") || S == TEXT("off") || S == TEXT("no"))
+                    {
+                        bRequestedValue = false;
+                        bFound = true;
+                    }
+                }
+            }
+        }
+        if (!bFound)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("set_emitter_local_space: missing 'local_space' parameter (bool)"));
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Match the emitter handle on the system. Same matcher
+    // set_emitter_flag uses (display name first, then source-emitter name).
+    FNiagaraEmitterHandle* MatchedHandle = nullptr;
+    int32 HandleIndex = INDEX_NONE;
+    TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    for (int32 I = 0; I < Handles.Num(); ++I)
+    {
+        FNiagaraEmitterHandle& H = Handles[I];
+        const FString HName = H.GetName().ToString();
+        FString SourceName;
+        if (UNiagaraEmitter* SrcEmitter = H.GetInstance().Emitter)
+        {
+            SourceName = SrcEmitter->GetName();
+        }
+        if (HName.Equals(HandleToken, ESearchCase::IgnoreCase)
+            || (!SourceName.IsEmpty() && SourceName.Equals(HandleToken, ESearchCase::IgnoreCase)))
+        {
+            MatchedHandle = &H;
+            HandleIndex = I;
+            break;
+        }
+    }
+    if (!MatchedHandle)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_emitter_local_space: could not resolve emitter handle '%s' on system '%s'"),
+                *HandleToken, *System->GetPathName()));
+    }
+
+    FVersionedNiagaraEmitterData* EmitterData = MatchedHandle->GetEmitterData();
+    if (!EmitterData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_emitter_local_space: emitter handle '%s' has no emitter data"), *HandleToken));
+    }
+
+    UScriptStruct* EmitterDataStruct = FVersionedNiagaraEmitterData::StaticStruct();
+    if (!EmitterDataStruct)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_emitter_local_space: could not resolve FVersionedNiagaraEmitterData::StaticStruct()"));
+    }
+
+    // Route through reflection so the bitfield / plain-bool split
+    // stays compatible across UE versions. `bLocalSpace` is the
+    // canonical UPROPERTY spelling on FVersionedNiagaraEmitterData.
+    FBoolProperty* BoolProp = CastField<FBoolProperty>(EmitterDataStruct->FindPropertyByName(FName(TEXT("bLocalSpace"))));
+    if (!BoolProp)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_emitter_local_space: FVersionedNiagaraEmitterData has no FBoolProperty named 'bLocalSpace' (engine API drift?)"));
+    }
+
+    void* Container = static_cast<void*>(EmitterData);
+    const bool bPreviousValue = BoolProp->GetPropertyValue_InContainer(Container);
+    BoolProp->SetPropertyValue_InContainer(Container, bRequestedValue);
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_emitter_local_space"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("emitter_handle"), MatchedHandle->GetName().ToString());
+    Out->SetNumberField(TEXT("emitter_handle_index"), HandleIndex);
+    Out->SetBoolField(TEXT("local_space"), bRequestedValue);
+    Out->SetBoolField(TEXT("previous_local_space"), bPreviousValue);
+    Out->SetBoolField(TEXT("changed"), bPreviousValue != bRequestedValue);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit set_emitter_local_space requires WITH_EDITORONLY_DATA"));
 #endif
 }

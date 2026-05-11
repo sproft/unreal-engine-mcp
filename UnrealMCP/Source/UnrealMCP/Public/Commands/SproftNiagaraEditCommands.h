@@ -65,6 +65,17 @@
  *     `run_update_script_with_interpolation`) and writes through
  *     `InterpolatedSpawnMode` when the flag token is
  *     `bInterpolatedSpawning` to keep modern emitters consistent.
+ *   - `set_emitter_local_space`: dedicated convenience op for the
+ *     headline `bLocalSpace` boolean on
+ *     `FVersionedNiagaraEmitterData`. Equivalent to calling
+ *     `set_emitter_flag flag=bLocalSpace value=<bool>` but with a
+ *     single dedicated knob (`local_space`) so the op stays
+ *     readable for the common case (Niagara systems frequently flip
+ *     local space on a per-emitter basis as an authoring step). The
+ *     write routes through the same reflection path against the
+ *     `bLocalSpace` FBoolProperty so the bitfield / plain-bool split
+ *     stays compatible across UE versions. The response carries the
+ *     previous + new bool values plus a `changed` flag.
  *   - `add_sim_stage`: resolves an existing system + emitter handle
  *     and routes through `UNiagaraEmitter::AddSimulationStage(stage,
  *     EmitterVersion)` (NIAGARA_API). The new
@@ -246,6 +257,7 @@ private:
     TSharedPtr<FJsonObject> HandleAddModuleToStage(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRequestCompile(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterFlag(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetEmitterLocalSpace(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddSimStage(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterSimTarget(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetSystemExposedParameter(const TSharedPtr<FJsonObject>& Params);

@@ -9586,6 +9586,7 @@ def niagara_edit(
     renderer_index: Optional[int] = None,
     replace: Optional[bool] = None,
     default: Optional[Union[bool, int, float, str, List[float], Dict[str, Any]]] = None,
+    local_space: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
@@ -9644,6 +9645,16 @@ def niagara_edit(
           slot instead and ``value`` may be a token
           (``no_interpolation`` / ``run_update_script`` /
           ``run_update_script_with_interpolation``).
+        - ``set_emitter_local_space``: dedicated convenience op for
+          the headline ``bLocalSpace`` boolean on
+          ``FVersionedNiagaraEmitterData``. Equivalent to calling
+          ``set_emitter_flag flag=bLocalSpace value=<bool>`` but with
+          a single dedicated knob (``local_space``) so the op stays
+          readable for the common case. The write routes through
+          reflection on the ``bLocalSpace`` FBoolProperty so the
+          bitfield / plain-bool split stays compatible across UE
+          versions. The response carries the previous + new bool
+          values plus a ``changed`` flag.
         - ``add_sim_stage``: resolves an existing system + emitter
           handle and routes through
           ``UNiagaraEmitter::AddSimulationStage(stage, EmitterVersion)``.
@@ -9886,6 +9897,8 @@ def niagara_edit(
         params["replace"] = replace
     if default is not None:
         params["default"] = default
+    if local_space is not None:
+        params["local_space"] = local_space
 
     try:
         response = unreal.send_command("niagara_edit", params)
