@@ -115,6 +115,24 @@
  *      writes `PostEditChangeProperty` fires on the widget so the
  *      UMG editor's preview refreshes and the variable's compiled
  *      default propagates.
+ *   - "set_widget_brush": write an FSlateBrush field on a target
+ *      child widget. `brush_field` picks the FSlateBrush UPROPERTY
+ *      (e.g. `Brush` on UImage, `Background` on UBorder,
+ *      `NormalThumbnail` on USlider, `FillImage` on UProgressBar);
+ *      defaults to the canonical brush field for the widget's
+ *      class (`Brush` for UImage, `Background` for UBorder).
+ *      Supports both designer-sugar keys (`texture` /
+ *      `material` / `tint` / `tint_color` / `size` / `image_size`
+ *      / `margin` / `tiling` / `draw_as` / `mirroring`) and the
+ *      raw FSlateBrush field set (any FSlateBrush UPROPERTY
+ *      surfaced through reflection). Texture / material paths
+ *      resolve through the asset registry and land on
+ *      `ResourceObject`; tint accepts a `[r,g,b,a]` array, an
+ *      `{R,G,B,A}` object, or a colour token; size accepts
+ *      `[x,y]` / `{X,Y}`; margin accepts `[l,t,r,b]` or
+ *      `{Left,Top,Right,Bottom}`. After the writes
+ *      `PostEditChangeProperty` fires on the widget so the UMG
+ *      editor's preview refreshes.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - FKismetEditorUtilities::CreateBlueprint for asset creation
@@ -151,4 +169,5 @@ private:
     TSharedPtr<FJsonObject> SetBindingConversion(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddEventBinding(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetWidgetStyle(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetWidgetBrush(const TSharedPtr<FJsonObject>& Params);
 };

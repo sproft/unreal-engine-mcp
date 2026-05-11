@@ -31,7 +31,12 @@
 #include "Channels/MovieSceneChannelProxy.h"
 #include "Channels/MovieSceneDoubleChannel.h"
 #include "Channels/MovieSceneFloatChannel.h"
+#include "Engine/Texture.h"
+#include "Layout/Margin.h"
+#include "Materials/MaterialInterface.h"
 #include "MovieScene.h"
+#include "Styling/SlateBrush.h"
+#include "Styling/SlateColor.h"
 #include "MovieSceneSection.h"
 #include "MovieSceneTrack.h"
 #include "Serialization/JsonSerializer.h"
@@ -343,9 +348,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetWidgetStyle(Params);
     }
+    if (Operation == TEXT("set_widget_brush") || Operation == TEXT("set_brush")
+        || Operation == TEXT("apply_widget_brush") || Operation == TEXT("apply_brush"))
+    {
+        return SetWidgetBrush(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -2732,6 +2742,589 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWidgetStyle(const TSharedP
     ResultObj->SetStringField(TEXT("widget_class"), WidgetClass->GetPathName());
     ResultObj->SetStringField(TEXT("style_field"), StyleFieldName);
     ResultObj->SetStringField(TEXT("style_struct"), StyleStruct->GetPathName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedRows);
+    ResultObj->SetArrayField(TEXT("skipped"), SkippedRows);
+    ResultObj->SetNumberField(TEXT("applied_count"), AppliedCount);
+    ResultObj->SetNumberField(TEXT("skipped_count"), SkippedCount);
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Heuristic for the canonical FSlateBrush UPROPERTY on a UMG
+     *  widget class. UImage stores its brush on `Brush`; UBorder on
+     *  `Background`. For other classes we fall back to whatever the
+     *  caller passed in `brush_field`, or scan for the first
+     *  FStructProperty whose Struct is FSlateBrush. */
+    FStructProperty* WidgetEdit_FindBrushProperty(UClass* WidgetClass, const FString& Hint, FString& OutPickedName)
+    {
+        auto IsBrushStruct = [](const FStructProperty* Prop) -> bool
+        {
+            return Prop && Prop->Struct && Prop->Struct->GetFName() == TEXT("SlateBrush");
+        };
+
+        if (!Hint.IsEmpty())
+        {
+            if (FStructProperty* Direct = FindFProperty<FStructProperty>(WidgetClass, *Hint))
+            {
+                if (IsBrushStruct(Direct))
+                {
+                    OutPickedName = Hint;
+                    return Direct;
+                }
+            }
+            return nullptr;
+        }
+
+        // No hint; try the canonical UMG names in order.
+        static const TCHAR* CandidateNames[] = {
+            TEXT("Brush"),         // UImage
+            TEXT("Background"),    // UBorder
+            TEXT("WidgetStyle"),   // some styles embed a brush slot
+        };
+        for (const TCHAR* Name : CandidateNames)
+        {
+            if (FStructProperty* Prop = FindFProperty<FStructProperty>(WidgetClass, FName(Name)))
+            {
+                if (IsBrushStruct(Prop))
+                {
+                    OutPickedName = Name;
+                    return Prop;
+                }
+            }
+        }
+
+        // Last-ditch: walk the class looking for any FSlateBrush field.
+        for (TFieldIterator<FStructProperty> It(WidgetClass); It; ++It)
+        {
+            FStructProperty* SP = *It;
+            if (IsBrushStruct(SP))
+            {
+                OutPickedName = SP->GetName();
+                return SP;
+            }
+        }
+        return nullptr;
+    }
+
+    /** Pull a vector pair (x, y) out of a JSON value. Accepts an
+     *  ordered array `[x, y]` or an object with `X`/`Y` / `x`/`y` keys. */
+    bool WidgetEdit_ReadVec2(const TSharedPtr<FJsonValue>& V, FVector2D& OutVec)
+    {
+        if (!V.IsValid()) return false;
+        if (V->Type == EJson::Array)
+        {
+            const auto& Arr = V->AsArray();
+            if (Arr.Num() < 2) return false;
+            OutVec.X = Arr[0]->AsNumber();
+            OutVec.Y = Arr[1]->AsNumber();
+            return true;
+        }
+        if (V->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject>& Obj = V->AsObject();
+            double Tmp = 0.0;
+            auto GetNum = [&Obj, &Tmp](const TCHAR* K) -> bool
+            {
+                return Obj->TryGetNumberField(K, Tmp);
+            };
+            double X = 0.0, Y = 0.0;
+            if (GetNum(TEXT("X"))) { X = Tmp; }
+            else if (GetNum(TEXT("x"))) { X = Tmp; }
+            else { return false; }
+            if (GetNum(TEXT("Y"))) { Y = Tmp; }
+            else if (GetNum(TEXT("y"))) { Y = Tmp; }
+            else { return false; }
+            OutVec.X = X;
+            OutVec.Y = Y;
+            return true;
+        }
+        return false;
+    }
+
+    /** Pull an FMargin (left, top, right, bottom) from a JSON value.
+     *  Accepts a 4-array `[L, T, R, B]`, a 2-array `[H, V]` (horizontal
+     *  / vertical pairs), a 1-array `[U]` (uniform), or an object
+     *  with `Left`/`Top`/`Right`/`Bottom` keys. */
+    bool WidgetEdit_ReadMargin(const TSharedPtr<FJsonValue>& V, FMargin& OutMargin)
+    {
+        if (!V.IsValid()) return false;
+        if (V->Type == EJson::Number)
+        {
+            const float U = (float)V->AsNumber();
+            OutMargin = FMargin(U);
+            return true;
+        }
+        if (V->Type == EJson::Array)
+        {
+            const auto& Arr = V->AsArray();
+            if (Arr.Num() == 4)
+            {
+                OutMargin.Left = (float)Arr[0]->AsNumber();
+                OutMargin.Top = (float)Arr[1]->AsNumber();
+                OutMargin.Right = (float)Arr[2]->AsNumber();
+                OutMargin.Bottom = (float)Arr[3]->AsNumber();
+                return true;
+            }
+            if (Arr.Num() == 2)
+            {
+                const float H = (float)Arr[0]->AsNumber();
+                const float Vv = (float)Arr[1]->AsNumber();
+                OutMargin = FMargin(H, Vv);
+                return true;
+            }
+            if (Arr.Num() == 1)
+            {
+                OutMargin = FMargin((float)Arr[0]->AsNumber());
+                return true;
+            }
+            return false;
+        }
+        if (V->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject>& Obj = V->AsObject();
+            double Tmp = 0.0;
+            if (Obj->TryGetNumberField(TEXT("Left"), Tmp)) OutMargin.Left = (float)Tmp;
+            if (Obj->TryGetNumberField(TEXT("Top"), Tmp)) OutMargin.Top = (float)Tmp;
+            if (Obj->TryGetNumberField(TEXT("Right"), Tmp)) OutMargin.Right = (float)Tmp;
+            if (Obj->TryGetNumberField(TEXT("Bottom"), Tmp)) OutMargin.Bottom = (float)Tmp;
+            return true;
+        }
+        return false;
+    }
+
+    /** Pull an FLinearColor from a JSON value. Accepts a 3/4-array
+     *  `[r, g, b, a?]`, an object with `R`/`G`/`B`/`A` (or lower-case)
+     *  keys, or a string that flows through ImportText. */
+    bool WidgetEdit_ReadLinearColor(const TSharedPtr<FJsonValue>& V, FLinearColor& OutColor)
+    {
+        if (!V.IsValid()) return false;
+        if (V->Type == EJson::Array)
+        {
+            const auto& Arr = V->AsArray();
+            if (Arr.Num() < 3) return false;
+            OutColor.R = (float)Arr[0]->AsNumber();
+            OutColor.G = (float)Arr[1]->AsNumber();
+            OutColor.B = (float)Arr[2]->AsNumber();
+            OutColor.A = Arr.Num() >= 4 ? (float)Arr[3]->AsNumber() : 1.0f;
+            return true;
+        }
+        if (V->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject>& Obj = V->AsObject();
+            double Tmp = 0.0;
+            auto Read = [&Obj, &Tmp](const TCHAR* Upper, const TCHAR* Lower) -> bool
+            {
+                return Obj->TryGetNumberField(Upper, Tmp) || Obj->TryGetNumberField(Lower, Tmp);
+            };
+            if (!Read(TEXT("R"), TEXT("r"))) return false;
+            OutColor.R = (float)Tmp;
+            if (!Read(TEXT("G"), TEXT("g"))) return false;
+            OutColor.G = (float)Tmp;
+            if (!Read(TEXT("B"), TEXT("b"))) return false;
+            OutColor.B = (float)Tmp;
+            OutColor.A = Read(TEXT("A"), TEXT("a")) ? (float)Tmp : 1.0f;
+            return true;
+        }
+        if (V->Type == EJson::String)
+        {
+            // Allow `(R=1,G=0,B=0,A=1)` style ImportText through.
+            FString Str = V->AsString();
+            FOutputDeviceNull NullDevice;
+            FLinearColor Imported;
+            const TCHAR* Ptr = *Str;
+            if (FLinearColor::StaticStruct()->ImportText(Ptr, &Imported, nullptr, PPF_None, &NullDevice, FLinearColor::StaticStruct()->GetName()) != nullptr)
+            {
+                OutColor = Imported;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Resolve a content path / short-name to a UObject. Used for
+     *  texture / material references on FSlateBrush::ResourceObject. */
+    UObject* WidgetEdit_ResolveResourceObject(const FString& Path)
+    {
+        if (Path.IsEmpty() || Path.Equals(TEXT("none"), ESearchCase::IgnoreCase)) return nullptr;
+        if (UObject* Direct = StaticLoadObject(UObject::StaticClass(), nullptr, *Path))
+        {
+            return Direct;
+        }
+        // Fall back to the editor asset library path (deals with
+        // package-only paths like "/Game/Foo/Bar" without the trailing
+        // ".Bar" object suffix).
+        if (UObject* ViaLibrary = UEditorAssetLibrary::LoadAsset(Path))
+        {
+            return ViaLibrary;
+        }
+        return nullptr;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWidgetBrush(const TSharedPtr<FJsonObject>& Params)
+{
+    // Write an FSlateBrush field on a target child widget. The op
+    // doubles as both designer sugar (texture / tint / size / margin
+    // shorthands) and a full FSlateBrush reflective dict write.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target_widget"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget' parameter (target child widget FName)"));
+    }
+    UWidget* TargetWidget = nullptr;
+    if (UWidgetTree* Tree = WBP->WidgetTree)
+    {
+        Tree->ForEachWidget([&](UWidget* W)
+        {
+            if (TargetWidget) return;
+            if (W && W->GetFName() == FName(*WidgetNameStr))
+            {
+                TargetWidget = W;
+            }
+        });
+    }
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    FString BrushFieldHint;
+    Params->TryGetStringField(TEXT("brush_field"), BrushFieldHint);
+    if (BrushFieldHint.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("field"), BrushFieldHint);
+    }
+
+    UClass* WidgetClass = TargetWidget->GetClass();
+    FString PickedFieldName;
+    FStructProperty* BrushProp = WidgetEdit_FindBrushProperty(WidgetClass, BrushFieldHint, PickedFieldName);
+    if (!BrushProp)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Widget '%s' (%s) has no FSlateBrush field named '%s' (pass 'brush_field' to target a non-default brush slot)"),
+                *WidgetNameStr, *WidgetClass->GetPathName(),
+                BrushFieldHint.IsEmpty() ? TEXT("<default>") : *BrushFieldHint));
+    }
+
+    FSlateBrush* BrushPtr = BrushProp->ContainerPtrToValuePtr<FSlateBrush>(TargetWidget);
+    if (!BrushPtr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve FSlateBrush pointer on '%s' / '%s'"),
+                *WidgetNameStr, *PickedFieldName));
+    }
+
+    // Pull the payload dict. Accepts both `brush` (designer-side
+    // shape) and `properties` (the dict shape every other Sproft
+    // edit op accepts).
+    const TSharedPtr<FJsonObject>* BrushObj = nullptr;
+    Params->TryGetObjectField(TEXT("brush"), BrushObj);
+    if (!BrushObj)
+    {
+        Params->TryGetObjectField(TEXT("properties"), BrushObj);
+    }
+    if (!BrushObj)
+    {
+        Params->TryGetObjectField(TEXT("brush_properties"), BrushObj);
+    }
+    if (!BrushObj)
+    {
+        Params->TryGetObjectField(TEXT("values"), BrushObj);
+    }
+    if (!BrushObj)
+    {
+        // The op also accepts top-level sugar shorthands without a
+        // wrapping dict so a caller can pass `texture` / `tint` /
+        // `size` / `margin` directly on the params object.
+        BrushObj = nullptr;
+    }
+
+    TArray<TSharedPtr<FJsonValue>> AppliedRows;
+    TArray<TSharedPtr<FJsonValue>> SkippedRows;
+    int32 AppliedCount = 0;
+    int32 SkippedCount = 0;
+
+    auto NoteApplied = [&AppliedRows, &AppliedCount](const FString& Key, const FString& Detail)
+    {
+        TSharedPtr<FJsonObject> R = MakeShared<FJsonObject>();
+        R->SetStringField(TEXT("name"), Key);
+        if (!Detail.IsEmpty())
+        {
+            R->SetStringField(TEXT("detail"), Detail);
+        }
+        AppliedRows.Add(MakeShared<FJsonValueObject>(R));
+        ++AppliedCount;
+    };
+    auto NoteSkipped = [&SkippedRows, &SkippedCount](const FString& Key, const FString& Reason, const FString& Input = FString())
+    {
+        TSharedPtr<FJsonObject> R = MakeShared<FJsonObject>();
+        R->SetStringField(TEXT("name"), Key);
+        R->SetStringField(TEXT("reason"), Reason);
+        if (!Input.IsEmpty())
+        {
+            R->SetStringField(TEXT("input"), Input);
+        }
+        SkippedRows.Add(MakeShared<FJsonValueObject>(R));
+        ++SkippedCount;
+    };
+
+    // Walk a flat dict and apply each entry. Sugar keys
+    // (texture / material / resource_object / tint / size /
+    // image_size / margin / tiling / draw_as / mirroring) win first;
+    // everything else falls through to a reflective FSlateBrush
+    // field write via ImportText_Direct.
+    auto ApplyEntry = [&](const FString& Key, const TSharedPtr<FJsonValue>& Val) -> void
+    {
+        const FString Lower = Key.ToLower();
+
+        // Texture / material / resource_object sugar: resolve the
+        // path through the asset registry and land it on
+        // FSlateBrush::ResourceObject. UMG's draw code accepts any
+        // UTexture or UMaterialInterface as a brush resource (see
+        // FSlateBrush::AllowedClasses meta on the UPROPERTY).
+        if (Lower == TEXT("texture") || Lower == TEXT("material")
+            || Lower == TEXT("resource_object") || Lower == TEXT("resourceobject")
+            || Lower == TEXT("image"))
+        {
+            if (!Val.IsValid() || Val->Type == EJson::Null)
+            {
+                BrushPtr->SetResourceObject(nullptr);
+                NoteApplied(Key, TEXT("resource_object_cleared"));
+                return;
+            }
+            const FString Path = Val->AsString();
+            if (Path.IsEmpty() || Path.Equals(TEXT("none"), ESearchCase::IgnoreCase))
+            {
+                BrushPtr->SetResourceObject(nullptr);
+                NoteApplied(Key, TEXT("resource_object_cleared"));
+                return;
+            }
+            UObject* Resolved = WidgetEdit_ResolveResourceObject(Path);
+            if (!Resolved)
+            {
+                NoteSkipped(Key, TEXT("resource_object_unresolved"), Path);
+                return;
+            }
+            const bool bIsTexture = Resolved->IsA(UTexture::StaticClass());
+            const bool bIsMaterial = Resolved->IsA(UMaterialInterface::StaticClass());
+            if (!bIsTexture && !bIsMaterial)
+            {
+                NoteSkipped(Key, TEXT("resource_object_unsupported_class"), Resolved->GetClass()->GetPathName());
+                return;
+            }
+            BrushPtr->SetResourceObject(Resolved);
+            NoteApplied(Key, Resolved->GetPathName());
+            return;
+        }
+
+        if (Lower == TEXT("tint") || Lower == TEXT("tint_color") || Lower == TEXT("tintcolor"))
+        {
+            FLinearColor Col;
+            if (!WidgetEdit_ReadLinearColor(Val, Col))
+            {
+                NoteSkipped(Key, TEXT("tint_unreadable"));
+                return;
+            }
+            BrushPtr->TintColor = FSlateColor(Col);
+            NoteApplied(Key, Col.ToString());
+            return;
+        }
+
+        if (Lower == TEXT("size") || Lower == TEXT("image_size") || Lower == TEXT("imagesize"))
+        {
+            FVector2D Vec(FVector2D::ZeroVector);
+            if (!WidgetEdit_ReadVec2(Val, Vec))
+            {
+                NoteSkipped(Key, TEXT("size_unreadable"));
+                return;
+            }
+            BrushPtr->SetImageSize(FVector2f((float)Vec.X, (float)Vec.Y));
+            NoteApplied(Key, FString::Printf(TEXT("(%g, %g)"), Vec.X, Vec.Y));
+            return;
+        }
+
+        if (Lower == TEXT("margin"))
+        {
+            FMargin M;
+            if (!WidgetEdit_ReadMargin(Val, M))
+            {
+                NoteSkipped(Key, TEXT("margin_unreadable"));
+                return;
+            }
+            BrushPtr->Margin = M;
+            NoteApplied(Key, FString::Printf(TEXT("(L=%g, T=%g, R=%g, B=%g)"), M.Left, M.Top, M.Right, M.Bottom));
+            return;
+        }
+
+        if (Lower == TEXT("tiling") || Lower == TEXT("draw_as") || Lower == TEXT("drawas")
+            || Lower == TEXT("mirroring"))
+        {
+            // These are TEnumAsByte<EXxx::Type> fields on FSlateBrush;
+            // hand them to ImportText_Direct so canonical tokens like
+            // "Image" / "Box" / "Border" / "RoundedBox" /
+            // "NoTile" / "Horizontal" / "Vertical" / "Both" /
+            // "NoMirror" / "Horizontal" / "Vertical" / "Both" land
+            // through the enum-token machinery.
+            FName FieldName;
+            if (Lower == TEXT("tiling")) FieldName = TEXT("Tiling");
+            else if (Lower == TEXT("mirroring")) FieldName = TEXT("Mirroring");
+            else FieldName = TEXT("DrawAs");
+
+            FProperty* FieldProp = FSlateBrush::StaticStruct()->FindPropertyByName(FieldName);
+            if (!FieldProp)
+            {
+                NoteSkipped(Key, TEXT("enum_field_missing"));
+                return;
+            }
+            const FString InputText = WidgetEdit_JsonValueToImportText(Val);
+            void* FieldAddr = FieldProp->ContainerPtrToValuePtr<void>(BrushPtr);
+            FOutputDeviceNull NullDevice;
+            const TCHAR* ImportPtr = *InputText;
+            const bool bImported = FieldProp->ImportText_Direct(ImportPtr, FieldAddr, TargetWidget,
+                PPF_None, &NullDevice) != nullptr;
+            if (!bImported)
+            {
+                NoteSkipped(Key, TEXT("enum_import_failed"), InputText);
+                return;
+            }
+            NoteApplied(Key, InputText);
+            return;
+        }
+
+        // Generic FSlateBrush reflective write. Lets the caller land
+        // any FSlateBrush UPROPERTY by name (`OutlineSettings`,
+        // `bIsDynamicallyLoaded`, etc.) without us spelling out the
+        // surface.
+        FProperty* FieldProp = FSlateBrush::StaticStruct()->FindPropertyByName(*Key);
+        if (!FieldProp)
+        {
+            NoteSkipped(Key, TEXT("not_a_uproperty"));
+            return;
+        }
+        const FString InputText = WidgetEdit_JsonValueToImportText(Val);
+        void* FieldAddr = FieldProp->ContainerPtrToValuePtr<void>(BrushPtr);
+        FOutputDeviceNull NullDevice;
+        const TCHAR* ImportPtr = *InputText;
+        const bool bImported = FieldProp->ImportText_Direct(ImportPtr, FieldAddr, TargetWidget,
+            PPF_None, &NullDevice) != nullptr;
+        if (!bImported)
+        {
+            NoteSkipped(Key, TEXT("import_text_failed"), InputText);
+            return;
+        }
+        NoteApplied(Key, InputText);
+    };
+
+    if (BrushObj && (*BrushObj).IsValid())
+    {
+        for (const auto& KV : (*BrushObj)->Values)
+        {
+            ApplyEntry(KV.Key, KV.Value);
+        }
+    }
+
+    // Top-level sugar: a caller may pass `texture` / `tint` / `size`
+    // / `margin` / `tiling` / `draw_as` directly on the params
+    // object (in addition to or in place of `brush`).
+    static const TCHAR* TopLevelSugar[] = {
+        TEXT("texture"), TEXT("material"), TEXT("resource_object"),
+        TEXT("tint"), TEXT("tint_color"),
+        TEXT("size"), TEXT("image_size"),
+        TEXT("margin"),
+        TEXT("tiling"), TEXT("draw_as"), TEXT("mirroring")
+    };
+    for (const TCHAR* SugarKey : TopLevelSugar)
+    {
+        if (Params->HasField(SugarKey))
+        {
+            ApplyEntry(FString(SugarKey), Params->TryGetField(SugarKey));
+        }
+    }
+
+    // PostEditChangeProperty on the widget so the UMG editor's
+    // preview refreshes (texture swap, etc.) and any compiled
+    // defaults pick up the new brush on the next compile.
+    FPropertyChangedEvent PropChanged(BrushProp, EPropertyChangeType::ValueSet);
+    TargetWidget->PostEditChangeProperty(PropChanged);
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+    bool bCompile = false;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_widget_brush"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("widget"), WidgetNameStr);
+    ResultObj->SetStringField(TEXT("widget_class"), WidgetClass->GetPathName());
+    ResultObj->SetStringField(TEXT("brush_field"), PickedFieldName);
+    if (UObject* Res = BrushPtr->GetResourceObject())
+    {
+        ResultObj->SetStringField(TEXT("resource_object"), Res->GetPathName());
+        ResultObj->SetStringField(TEXT("resource_class"), Res->GetClass()->GetPathName());
+    }
+    else
+    {
+        ResultObj->SetStringField(TEXT("resource_object"), FString());
+    }
+    {
+        const FLinearColor Specified = BrushPtr->TintColor.GetSpecifiedColor();
+        TArray<TSharedPtr<FJsonValue>> TintArr;
+        TintArr.Add(MakeShared<FJsonValueNumber>(Specified.R));
+        TintArr.Add(MakeShared<FJsonValueNumber>(Specified.G));
+        TintArr.Add(MakeShared<FJsonValueNumber>(Specified.B));
+        TintArr.Add(MakeShared<FJsonValueNumber>(Specified.A));
+        ResultObj->SetArrayField(TEXT("tint"), TintArr);
+    }
+    {
+        TArray<TSharedPtr<FJsonValue>> SizeArr;
+        const FVector2D ImageSize(BrushPtr->GetImageSize());
+        SizeArr.Add(MakeShared<FJsonValueNumber>(ImageSize.X));
+        SizeArr.Add(MakeShared<FJsonValueNumber>(ImageSize.Y));
+        ResultObj->SetArrayField(TEXT("image_size"), SizeArr);
+    }
+    {
+        const FMargin& Margin = BrushPtr->Margin;
+        TArray<TSharedPtr<FJsonValue>> MarginArr;
+        MarginArr.Add(MakeShared<FJsonValueNumber>(Margin.Left));
+        MarginArr.Add(MakeShared<FJsonValueNumber>(Margin.Top));
+        MarginArr.Add(MakeShared<FJsonValueNumber>(Margin.Right));
+        MarginArr.Add(MakeShared<FJsonValueNumber>(Margin.Bottom));
+        ResultObj->SetArrayField(TEXT("margin"), MarginArr);
+    }
     ResultObj->SetArrayField(TEXT("applied"), AppliedRows);
     ResultObj->SetArrayField(TEXT("skipped"), SkippedRows);
     ResultObj->SetNumberField(TEXT("applied_count"), AppliedCount);

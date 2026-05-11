@@ -119,7 +119,7 @@
  * BP class path, or a bare class name lookup. Optional
  * `passed_in_tags` lands on the entry's `PassedInTags`
  * `FGameplayTagContainer` (each tag added through
- * `RequestGameplayTag(..., /*bErrorIfNotFound=*/false)` so unknown
+ * `RequestGameplayTag(..., bErrorIfNotFound=false)` so unknown
  * tags surface a warning and skip rather than crash). Recompiles +
  * saves on success.
  *

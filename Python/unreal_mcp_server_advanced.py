@@ -3043,6 +3043,19 @@ def widget_edit(
     compile: Optional[bool] = None,
     style: Optional[Dict[str, Any]] = None,
     style_field: Optional[str] = None,
+    brush: Optional[Dict[str, Any]] = None,
+    brush_field: Optional[str] = None,
+    texture: Optional[str] = None,
+    material: Optional[str] = None,
+    resource_object: Optional[str] = None,
+    tint: Optional[Any] = None,
+    tint_color: Optional[Any] = None,
+    size: Optional[Any] = None,
+    image_size: Optional[Any] = None,
+    margin: Optional[Any] = None,
+    tiling: Optional[str] = None,
+    draw_as: Optional[str] = None,
+    mirroring: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3158,6 +3171,25 @@ def widget_edit(
           the response's ``skipped`` array with a reason. After the
           writes ``PostEditChangeProperty`` fires on the widget so
           the UMG editor preview refreshes.
+        - "set_widget_brush": write an FSlateBrush field on a
+          target child widget. ``brush_field`` picks the
+          FSlateBrush UPROPERTY (e.g. ``Brush`` on UImage,
+          ``Background`` on UBorder, ``NormalThumbnail`` on
+          USlider); defaults to the canonical brush field for the
+          widget's class. Supports both designer-sugar keys
+          (``texture`` / ``material`` / ``tint`` / ``tint_color``
+          / ``size`` / ``image_size`` / ``margin`` / ``tiling`` /
+          ``draw_as`` / ``mirroring``) and the raw FSlateBrush
+          field set (any FSlateBrush UPROPERTY surfaced through
+          reflection in the ``brush`` dict). Texture / material
+          paths resolve through the asset registry and land on
+          ``ResourceObject``. Tint accepts ``[r,g,b,a]``,
+          ``{R,G,B,A}``, or the engine ``(R=,G=,B=,A=)`` ImportText
+          form. Size accepts ``[x,y]`` / ``{X,Y}``. Margin accepts
+          ``[L,T,R,B]``, ``[H,V]``, a uniform number, or
+          ``{Left,Top,Right,Bottom}``. After the writes
+          ``PostEditChangeProperty`` fires on the widget so the
+          UMG editor preview refreshes.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3296,6 +3328,32 @@ def widget_edit(
         params["style"] = style
     if style_field is not None:
         params["style_field"] = style_field
+    if brush is not None:
+        params["brush"] = brush
+    if brush_field is not None:
+        params["brush_field"] = brush_field
+    if texture is not None:
+        params["texture"] = texture
+    if material is not None:
+        params["material"] = material
+    if resource_object is not None:
+        params["resource_object"] = resource_object
+    if tint is not None:
+        params["tint"] = tint
+    if tint_color is not None:
+        params["tint_color"] = tint_color
+    if size is not None:
+        params["size"] = size
+    if image_size is not None:
+        params["image_size"] = image_size
+    if margin is not None:
+        params["margin"] = margin
+    if tiling is not None:
+        params["tiling"] = tiling
+    if draw_as is not None:
+        params["draw_as"] = draw_as
+    if mirroring is not None:
+        params["mirroring"] = mirroring
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite

@@ -2590,8 +2590,14 @@ helpers.
   Style authoring ships through `set_widget_style` (flat property
   dict against a child widget's style struct field through
   reflection; defaults to the `WidgetStyle` UPROPERTY and supports
-  any FXyzStyle slot). Remaining open follow-ons: the K2Node-class
-  conversion branch (async conversion nodes on `set_binding_conversion`),
+  any FXyzStyle slot). Brush authoring ships through
+  `set_widget_brush` (writes an FSlateBrush field on a target
+  child widget; sugar keys `texture` / `material` / `tint` /
+  `size` / `margin` / `tiling` / `draw_as` plus a reflective
+  `brush` dict for raw FSlateBrush UPROPERTY writes; defaults the
+  brush_field to `Brush` for UImage and `Background` for UBorder).
+  Remaining open follow-ons: the K2Node-class conversion branch
+  (async conversion nodes on `set_binding_conversion`),
   per-binding pin-default authoring inside the wrapper graph, and
   USlateBrush asset-driven style swaps (i.e. plumbing the
   `Style` slot of a `USlateWidgetStyleAsset` onto the resolved
