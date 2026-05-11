@@ -8072,6 +8072,8 @@ def animation_edit(
     blend_in_time: Optional[float] = None,
     blend_out_time: Optional[float] = None,
     enable_root_motion_translation: Optional[bool] = None,
+    section_name: Optional[str] = None,
+    is_loop: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Targeted UAnimSequence / UAnimMontage edits (small variant).
@@ -8248,6 +8250,29 @@ def animation_edit(
           the writes so an open Persona refreshes; save defaults
           true. Useful for tuning anim montage / sequence
           interactions without opening Persona.
+        - ``add_montage_section``: append a new FCompositeSection
+          to a UAnimMontage's CompositeSections array. Wraps
+          ``UAnimMontage::AddAnimCompositeSection(FName, float)``
+          so the engine's own dedup + previous-section auto-link
+          logic runs (the previous-last section's
+          ``NextSectionName`` gets auto-pointed at the new
+          section when it was empty). ``section_name`` is the
+          FName label for the new section (must be unique on
+          the montage). ``start_frame`` (alias ``frame``) wins
+          over ``start_time`` (alias ``time`` seconds); both
+          fall back to the end of the last existing section
+          (or 0 when none exist) so the new section appends
+          after everything that came before. Frames convert
+          through the 30 fps default since UAnimMontage does
+          not expose a per-asset sampling rate; pass
+          ``start_time`` for full precision. Optional
+          ``is_loop=true`` (alias ``loop`` / ``looping``)
+          self-links the new section's ``NextSectionName`` so
+          playback loops on the new section. The op
+          PostEditChange + MarkPackageDirty after the write so
+          an open montage editor refreshes; saves on success
+          unless ``save=false``. Useful for scripting montage
+          section authoring without opening the montage editor.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -8390,6 +8415,10 @@ def animation_edit(
         params["blend_out_time"] = blend_out_time
     if enable_root_motion_translation is not None:
         params["enable_root_motion_translation"] = enable_root_motion_translation
+    if section_name is not None:
+        params["section_name"] = section_name
+    if is_loop is not None:
+        params["is_loop"] = is_loop
 
     try:
         response = unreal.send_command("animation_edit", params)

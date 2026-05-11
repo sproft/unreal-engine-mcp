@@ -248,4 +248,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetCurveCompression(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetLoopFlags(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetBlendTimes(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddMontageSection(const TSharedPtr<FJsonObject>& Params);
 };

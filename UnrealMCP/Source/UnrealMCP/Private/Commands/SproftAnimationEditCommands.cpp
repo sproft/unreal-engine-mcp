@@ -310,8 +310,13 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleSetBlendTimes(Params);
     }
+    if (Op == TEXT("add_montage_section") || Op == TEXT("add_section")
+        || Op == TEXT("add_composite_section") || Op == TEXT("montage_add_section"))
+    {
+        return HandleAddMontageSection(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion', 'set_compression_scheme', 'set_curve_compression', 'set_loop_flags', 'set_blend_times'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion', 'set_compression_scheme', 'set_curve_compression', 'set_loop_flags', 'set_blend_times', 'add_montage_section'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -2937,6 +2942,199 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetBlendTimes(const 
     Result->SetBoolField(TEXT("enable_root_motion_translation"), bWroteRMTranslation ? bNewRMTranslation : bPrevRMTranslation);
     Result->SetBoolField(TEXT("previous_enable_root_motion_translation"), bPrevRMTranslation);
 
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddMontageSection(const TSharedPtr<FJsonObject>& Params)
+{
+    // Wraps UAnimMontage::AddAnimCompositeSection. The engine surfaces
+    // this as the canonical way to land a new FCompositeSection on a
+    // montage's CompositeSections array (the inner section list the
+    // AnimGraph reads when it jumps a montage between named labels).
+    // Useful for scripting montage section authoring without opening
+    // the montage editor; mirrors the editor's right-click "+ Add
+    // Section" action.
+    //
+    // `section_name` is the FName label for the new section.
+    // `start_frame` (alias `start_time` seconds) places the new
+    // section on the timeline; when omitted we default to the end of
+    // the last existing section (or 0 when none exist) so the new
+    // section appends after everything that came before. Optional
+    // `is_loop=true` self-links the new section's NextSectionName so
+    // playback loops on this section.
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_montage_section: missing 'asset' (path to a UAnimMontage)"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_montage_section: failed to load asset '%s'"), *AssetParam));
+    }
+    UAnimMontage* Montage = Cast<UAnimMontage>(Asset);
+    if (!Montage)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_montage_section: asset '%s' is not a UAnimMontage"), *AssetParam));
+    }
+
+    FString SectionNameStr;
+    if (!Params->TryGetStringField(TEXT("section_name"), SectionNameStr)
+        && !Params->TryGetStringField(TEXT("name"), SectionNameStr)
+        && !Params->TryGetStringField(TEXT("section"), SectionNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_montage_section: missing 'section_name' (FName label for the new composite section)"));
+    }
+    SectionNameStr.TrimStartAndEndInline();
+    if (SectionNameStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_montage_section: 'section_name' must be non-empty"));
+    }
+    const FName NewSectionName(*SectionNameStr);
+
+    // Reject duplicate names up front so the caller gets a clear error
+    // rather than the engine's INDEX_NONE return. The same check runs
+    // inside AddAnimCompositeSection but we surface it here for the
+    // structured response shape.
+    if (Montage->GetSectionIndex(NewSectionName) != INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_montage_section: section '%s' already exists on montage '%s'"),
+                *SectionNameStr, *AssetParam));
+    }
+
+    // Resolve the start position. `start_frame` (int) wins over
+    // `start_time` (float seconds); both fall back to the end of the
+    // last existing section (or 0 when the montage has none yet).
+    double FrameValue = 0.0;
+    const bool bHasFrame = Params->TryGetNumberField(TEXT("start_frame"), FrameValue)
+        || Params->TryGetNumberField(TEXT("frame"), FrameValue);
+    double TimeValue = 0.0;
+    const bool bHasTime = Params->TryGetNumberField(TEXT("start_time"), TimeValue)
+        || Params->TryGetNumberField(TEXT("time"), TimeValue);
+
+    float StartPos = 0.0f;
+    bool bUsedDefault = false;
+    FString StartSource;
+    if (bHasFrame)
+    {
+        // UAnimMontage does not expose GetSamplingFrameRate(), so we use
+        // the 30 fps default the other animation_edit ops fall back to
+        // when the asset itself does not carry a per-asset frame rate.
+        // The caller can pass `start_time` directly for full precision.
+        const FFrameRate Rate(30, 1);
+        const FFrameTime FrameTime(FFrameNumber(static_cast<int32>(FrameValue)));
+        StartPos = static_cast<float>(Rate.AsSeconds(FrameTime));
+        StartSource = TEXT("start_frame");
+    }
+    else if (bHasTime)
+    {
+        StartPos = static_cast<float>(TimeValue);
+        StartSource = TEXT("start_time");
+    }
+    else
+    {
+        // Default: end of last existing section (or 0 when none exist).
+        // The engine sorts CompositeSections by GetTime() on save so the
+        // last entry in the array is the latest in time; we walk the
+        // array to find the max so we stay correct even before the sort
+        // step has run.
+        bUsedDefault = true;
+        float MaxTime = 0.0f;
+        for (const FCompositeSection& Sect : Montage->CompositeSections)
+        {
+            const float T = Sect.GetTime(EAnimLinkMethod::Absolute);
+            if (T > MaxTime)
+            {
+                MaxTime = T;
+            }
+        }
+        StartPos = MaxTime;
+        StartSource = TEXT("default_end_of_last_section");
+    }
+    if (StartPos < 0.0f)
+    {
+        StartPos = 0.0f;
+    }
+    // Clamp to the montage's play length so an off-the-end section
+    // does not lose its anchor when the engine resolves the linkable
+    // element back into a time. The engine itself does not clamp
+    // inside AddAnimCompositeSection so we do it here for safety.
+    const float PlayLength = Montage->GetPlayLength();
+    if (PlayLength > 0.0f && StartPos > PlayLength)
+    {
+        StartPos = PlayLength;
+    }
+
+    // Optional `is_loop`: a self-link on NextSectionName makes the
+    // section loop. The engine resolves the next-section chain at
+    // playback so writing it on the new section is enough.
+    bool bIsLoop = false;
+    Params->TryGetBoolField(TEXT("is_loop"), bIsLoop)
+        || Params->TryGetBoolField(TEXT("loop"), bIsLoop)
+        || Params->TryGetBoolField(TEXT("looping"), bIsLoop);
+
+    // Capture the previous section count for the diff payload.
+    const int32 PreviousCount = Montage->CompositeSections.Num();
+
+#if WITH_EDITOR
+    const int32 NewIndex = Montage->AddAnimCompositeSection(NewSectionName, StartPos);
+#else
+    const int32 NewIndex = INDEX_NONE;
+#endif
+    if (NewIndex == INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_montage_section: AddAnimCompositeSection returned INDEX_NONE for section '%s' on '%s' (duplicate name, or build does not have WITH_EDITOR)"),
+                *SectionNameStr, *AssetParam));
+    }
+
+    // Self-link the NextSectionName for the loop case. We resolve the
+    // index again since AddAnimCompositeSection returns the position
+    // before the engine's sort pass runs (the engine's
+    // SortAnimCompositeSectionByPos call sits on the editor's "save
+    // montage" path).
+    if (bIsLoop)
+    {
+        if (Montage->CompositeSections.IsValidIndex(NewIndex))
+        {
+            Montage->CompositeSections[NewIndex].NextSectionName = NewSectionName;
+        }
+    }
+
+#if WITH_EDITOR
+    Montage->PostEditChange();
+#endif
+    Montage->MarkPackageDirty();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(Montage->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("add_montage_section"));
+    Result->SetStringField(TEXT("asset"), AssetParam);
+    Result->SetStringField(TEXT("path"), Montage->GetPathName());
+    Result->SetStringField(TEXT("section_name"), SectionNameStr);
+    Result->SetNumberField(TEXT("section_index"), NewIndex);
+    Result->SetNumberField(TEXT("start_time"), StartPos);
+    Result->SetStringField(TEXT("start_source"), StartSource);
+    Result->SetBoolField(TEXT("used_default_start"), bUsedDefault);
+    Result->SetBoolField(TEXT("is_loop"), bIsLoop);
+    Result->SetNumberField(TEXT("previous_section_count"), PreviousCount);
+    Result->SetNumberField(TEXT("section_count"), Montage->CompositeSections.Num());
+    Result->SetNumberField(TEXT("play_length"), PlayLength);
     Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }
