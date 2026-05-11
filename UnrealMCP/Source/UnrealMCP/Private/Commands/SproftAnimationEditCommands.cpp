@@ -278,8 +278,13 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleSetRootMotion(Params);
     }
+    if (Op == TEXT("add_notify_state") || Op == TEXT("add_state_notify")
+        || Op == TEXT("add_notifystate"))
+    {
+        return HandleAddNotifyState(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -1749,6 +1754,194 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRootMotion(const 
     Result->SetBoolField(TEXT("lock_provided"), bLockProvided);
     Result->SetBoolField(TEXT("force_root_lock_provided"), bForceProvided);
     Result->SetBoolField(TEXT("use_normalized_root_motion_scale_provided"), bNormProvided);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddNotifyState(const TSharedPtr<FJsonObject>& Params)
+{
+    // Pairs with the existing `add_notify` op. `add_notify` covers both
+    // UAnimNotify and UAnimNotifyState shapes through a single seconds-
+    // based `time` + `duration` pair, which is convenient for one-shot
+    // event notifies but awkward for state notifies that the designer
+    // thinks of in frame counts. This op accepts the canonical
+    // `start_frame` + `duration_frames` pair, refuses non-state classes,
+    // and routes through the same public AnimationBlueprintLibrary
+    // entry point.
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_notify_state: missing 'asset'"));
+    }
+    FString TrackParam;
+    if (!Params->TryGetStringField(TEXT("track"), TrackParam)
+        && !Params->TryGetStringField(TEXT("track_name"), TrackParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_notify_state: missing 'track' name"));
+    }
+    if (TrackParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_notify_state: 'track' must be non-empty"));
+    }
+
+    FString NotifyClassParam;
+    if (!Params->TryGetStringField(TEXT("notify_state_class"), NotifyClassParam)
+        && !Params->TryGetStringField(TEXT("notify_class"), NotifyClassParam)
+        && !Params->TryGetStringField(TEXT("class"), NotifyClassParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_notify_state: missing 'notify_state_class' (UAnimNotifyState subclass path or short name)"));
+    }
+    if (NotifyClassParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_notify_state: 'notify_state_class' must be non-empty"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    UAnimSequenceBase* SeqBase = Cast<UAnimSequenceBase>(Asset);
+    if (!SeqBase)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_notify_state: '%s' is not a UAnimSequenceBase"), *AssetParam));
+    }
+
+    // Resolve the class against UAnimNotifyState. The existing
+    // `ResolveNotifyClass` helper takes a base-class filter and rejects
+    // anything that fails the IsChildOf check, so a UAnimNotify (the
+    // point-notify shape) lands as a clear error rather than silently
+    // misrouting to the AddAnimationNotifyEvent path.
+    UClass* StateClass = ResolveNotifyClass(NotifyClassParam, UAnimNotifyState::StaticClass());
+    if (!StateClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_notify_state: failed to resolve '%s' as a UAnimNotifyState subclass (point-notify shapes go through 'add_notify')"), *NotifyClassParam));
+    }
+    if (StateClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_notify_state: '%s' resolves to an abstract class; pick a concrete UAnimNotifyState subclass"), *NotifyClassParam));
+    }
+
+    // Resolve start + duration in seconds. Frame counts win; seconds
+    // shapes (`start_time` + `duration`) are accepted for symmetry with
+    // `add_notify`'s seconds-friendly precedence.
+    double StartFrameValue = 0.0;
+    const bool bHasStartFrame = Params->TryGetNumberField(TEXT("start_frame"), StartFrameValue)
+        || Params->TryGetNumberField(TEXT("frame"), StartFrameValue);
+    double StartTimeValue = 0.0;
+    const bool bHasStartTime = Params->TryGetNumberField(TEXT("start_time"), StartTimeValue)
+        || Params->TryGetNumberField(TEXT("time"), StartTimeValue);
+    if (!bHasStartFrame && !bHasStartTime)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_notify_state: one of 'start_frame' (int) or 'start_time' (float seconds) is required"));
+    }
+
+    double DurationFramesValue = 0.0;
+    const bool bHasDurationFrames = Params->TryGetNumberField(TEXT("duration_frames"), DurationFramesValue);
+    double DurationSecondsValue = 0.0;
+    const bool bHasDurationSeconds = Params->TryGetNumberField(TEXT("duration"), DurationSecondsValue)
+        || Params->TryGetNumberField(TEXT("duration_seconds"), DurationSecondsValue);
+    if (!bHasDurationFrames && !bHasDurationSeconds)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_notify_state: one of 'duration_frames' (int) or 'duration' (float seconds) is required"));
+    }
+
+    // The seconds-conversion path matches `add_notify`: the public
+    // UAnimSequence::GetSamplingFrameRate is the canonical frames-to-
+    // seconds ratio. UAnimMontage and UAnimComposite branches do not
+    // expose the per-asset frame rate so we fall back to 30 fps.
+    FFrameRate Rate(30, 1);
+    if (UAnimSequence* Seq = Cast<UAnimSequence>(SeqBase))
+    {
+        const FFrameRate AssetRate = Seq->GetSamplingFrameRate();
+        if (AssetRate.Numerator > 0)
+        {
+            Rate = AssetRate;
+        }
+    }
+
+    float StartTime = 0.0f;
+    if (bHasStartFrame)
+    {
+        const FFrameTime FrameTime(FFrameNumber(static_cast<int32>(StartFrameValue)));
+        StartTime = static_cast<float>(Rate.AsSeconds(FrameTime));
+    }
+    else
+    {
+        StartTime = static_cast<float>(StartTimeValue);
+    }
+    if (StartTime < 0.0f)
+    {
+        StartTime = 0.0f;
+    }
+
+    float Duration = 0.0f;
+    if (bHasDurationFrames)
+    {
+        const FFrameTime FrameTime(FFrameNumber(static_cast<int32>(DurationFramesValue)));
+        Duration = static_cast<float>(Rate.AsSeconds(FrameTime));
+    }
+    else
+    {
+        Duration = static_cast<float>(DurationSecondsValue);
+    }
+    if (Duration <= 0.0f)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_notify_state: duration resolved to %f seconds; the engine treats non-positive state notifies as zero-length and ignores them"), Duration));
+    }
+
+    // Auto-create the notify track when missing, matching `add_notify`.
+    const FName TrackFName(*TrackParam);
+    if (!UAnimationBlueprintLibrary::IsValidAnimNotifyTrackName(SeqBase, TrackFName))
+    {
+        UAnimationBlueprintLibrary::AddAnimationNotifyTrack(SeqBase, TrackFName, FLinearColor::White);
+    }
+
+    UAnimNotifyState* CreatedNotify = UAnimationBlueprintLibrary::AddAnimationNotifyStateEvent(
+        SeqBase, TrackFName, StartTime, Duration, StateClass);
+    if (!CreatedNotify)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_notify_state: AddAnimationNotifyStateEvent returned null for class '%s' on track '%s'"), *StateClass->GetName(), *TrackParam));
+    }
+
+    SeqBase->MarkPackageDirty();
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(SeqBase->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("add_notify_state"));
+    Result->SetStringField(TEXT("asset"), SeqBase->GetName());
+    Result->SetStringField(TEXT("path"), SeqBase->GetPathName());
+    Result->SetStringField(TEXT("class"), SeqBase->GetClass()->GetName());
+    Result->SetStringField(TEXT("track_name"), TrackFName.ToString());
+    Result->SetStringField(TEXT("notify_class"), StateClass->GetName());
+    Result->SetStringField(TEXT("notify_class_path"), StateClass->GetPathName());
+    Result->SetStringField(TEXT("notify_kind"), TEXT("state"));
+    Result->SetNumberField(TEXT("start_time"), StartTime);
+    Result->SetNumberField(TEXT("duration"), Duration);
+    Result->SetNumberField(TEXT("end_time"), StartTime + Duration);
+    Result->SetNumberField(TEXT("frame_rate_numerator"), Rate.Numerator);
+    Result->SetNumberField(TEXT("frame_rate_denominator"), Rate.Denominator);
+    if (bHasStartFrame)
+    {
+        Result->SetNumberField(TEXT("start_frame"), StartFrameValue);
+    }
+    if (bHasDurationFrames)
+    {
+        Result->SetNumberField(TEXT("duration_frames"), DurationFramesValue);
+    }
+    Result->SetStringField(TEXT("notify_object"), CreatedNotify->GetName());
+    Result->SetNumberField(TEXT("notify_count"), SeqBase->Notifies.Num());
     Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }

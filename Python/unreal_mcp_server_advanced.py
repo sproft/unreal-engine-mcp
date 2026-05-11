@@ -7741,6 +7741,10 @@ def animation_edit(
     root_motion_root_lock: Optional[str] = None,
     force_root_lock: Optional[bool] = None,
     use_normalized_root_motion_scale: Optional[bool] = None,
+    notify_state_class: Optional[str] = None,
+    start_frame: Optional[int] = None,
+    start_time: Optional[float] = None,
+    duration_frames: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Targeted UAnimSequence / UAnimMontage edits (small variant).
@@ -7824,6 +7828,21 @@ def animation_edit(
           fields are public UPROPERTYs on UAnimSequence under
           Category=RootMotion. PostEditChange + MarkPackageDirty
           fire after the writes so any open editor refreshes.
+        - ``add_notify_state``: append an FAnimNotifyEvent backed
+          by a UAnimNotifyState subclass on a notify track of a
+          UAnimSequenceBase. Pairs with ``add_notify`` which only
+          handles the point-notify shape (UAnimNotify). The notify
+          track auto-creates through ``AddAnimationNotifyTrack``
+          when missing. ``track`` is the notify track FName;
+          ``notify_state_class`` is a UAnimNotifyState subclass
+          (e.g. ``UAnimNotifyState_TimedParticleEffect`` /
+          ``UAnimNotifyState_DisableRootMotion``); resolves through
+          a short name or full ``/Script/Module.ClassName`` /
+          ``/Game/...`` Blueprint class path. ``start_frame`` (int)
+          wins over ``start_time`` (float seconds);
+          ``duration_frames`` (int) wins over ``duration`` (float
+          seconds). The frame-to-seconds conversion uses the
+          asset's sampling frame rate when present.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -7936,6 +7955,14 @@ def animation_edit(
         params["force_root_lock"] = force_root_lock
     if use_normalized_root_motion_scale is not None:
         params["use_normalized_root_motion_scale"] = use_normalized_root_motion_scale
+    if notify_state_class is not None:
+        params["notify_state_class"] = notify_state_class
+    if start_frame is not None:
+        params["start_frame"] = start_frame
+    if start_time is not None:
+        params["start_time"] = start_time
+    if duration_frames is not None:
+        params["duration_frames"] = duration_frames
 
     try:
         response = unreal.send_command("animation_edit", params)

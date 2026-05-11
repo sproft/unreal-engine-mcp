@@ -1330,6 +1330,34 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `animation_edit add_notify_state` (small) — pairs with the
+  existing `add_notify` op which already handles point notifies
+  (UAnimNotify). The new op accepts the canonical state-notify
+  shape: a UAnimNotifyState subclass plus `start_frame` (int) +
+  `duration_frames` (int). Frame counts win over their seconds
+  counterparts (`start_time` / `duration`) for symmetry with
+  `add_notify`'s frame-vs-time precedence; the seconds conversion
+  routes through the asset's `GetSamplingFrameRate` when present
+  and falls back to 30 fps for UAnimMontage and UAnimComposite
+  branches that do not expose the per-asset rate. Resolves the
+  class against `UAnimNotifyState` and refuses anything that
+  fails the IsChildOf check, so a UAnimNotify (the point-notify
+  shape) lands as a clear error rather than silently misrouting
+  to the AddAnimationNotifyEvent path. Refuses abstract subclasses
+  and non-positive durations (the engine treats a zero-length
+  state notify as a no-op). Auto-creates the named notify track
+  through `AddAnimationNotifyTrack` when missing, matching
+  `add_notify`. Routes through the public
+  `UAnimationBlueprintLibrary::AddAnimationNotifyStateEvent`
+  entry point (signature: `UAnimNotifyState* (UAnimSequenceBase*,
+  FName, float StartTime, float Duration, TSubclassOf<UAnimNotifyState>)`,
+  exported through `AnimationBlueprintLibrary.h` line 264).
+  The response carries the resolved start time + duration in
+  seconds plus the original frame counts when supplied, the
+  resolved sampling frame rate as `{numerator, denominator}`,
+  the spawned notify's class + name, and the asset's running
+  notify count. Saves on success unless `save=false`. Aliases:
+  `add_notify_state` / `add_state_notify` / `add_notifystate`.
 - `gas_edit create_attribute_set` (small) — NewObject's a
   UBlueprint subclass of `UAttributeSet` at a `/Game/...`
   path with an optional list of named attributes added as

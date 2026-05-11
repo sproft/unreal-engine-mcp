@@ -73,6 +73,17 @@
  *     Category=RootMotion. PostEditChange + MarkPackageDirty fire
  *     after the writes so any open editor refreshes; saves on
  *     success unless `save=false`.
+ *   - `add_notify_state`: append an FAnimNotifyEvent backed by a
+ *     UAnimNotifyState subclass on a notify track of a
+ *     UAnimSequenceBase. Pairs with `add_notify` which only handles
+ *     the point-notify shape (UAnimNotify). Routes through the public
+ *     `UAnimationBlueprintLibrary::AddAnimationNotifyStateEvent`
+ *     entry point with start time and duration converted from frame
+ *     counts through the asset's sampling frame rate (matches
+ *     `add_notify`'s frame-vs-time precedence). The named notify track
+ *     auto-creates through `AddAnimationNotifyTrack` when missing.
+ *     The resolved class must derive from UAnimNotifyState (the
+ *     UAnimNotify branch belongs on `add_notify`).
  *
  * Inputs (set_rate_scale):
  *   - asset: short asset name or `/Game/...` UAnimSequenceBase path.
@@ -154,4 +165,5 @@ private:
     TSharedPtr<FJsonObject> HandleDeleteBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddMetadataCurve(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetRootMotion(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddNotifyState(const TSharedPtr<FJsonObject>& Params);
 };
