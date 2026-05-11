@@ -6396,6 +6396,10 @@ def behavior_tree(
     description: Optional[str] = None,
     category: Optional[str] = None,
     save: Optional[bool] = None,
+    key: Optional[str] = None,
+    condition: Optional[str] = None,
+    value: Optional[Any] = None,
+    notify_observer: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over a UBehaviorTree asset (read + edit slice).
@@ -6414,6 +6418,15 @@ def behavior_tree(
           named composite.
         - ``add_decorator``: append a UBTDecorator to a target child
           slot's decorator chain.
+        - ``add_blackboard_decorator``: append a UBTDecorator_Blackboard
+          to a target child slot's decorator chain in one call. Takes
+          a Blackboard ``key`` name + ``condition`` (``IsSet`` /
+          ``IsNotSet`` / ``IsEqualTo`` / ``IsNotEqualTo``) + an
+          optional comparison ``value``. Classifies the key type from
+          the linked Blackboard and routes the comparison through the
+          matching EBasicKeyOperation / EArithmeticKeyOperation /
+          ETextKeyOperation triple so the decorator runs against the
+          right operation family at game time.
         - ``add_service``: append a UBTService to a target composite.
         - ``set_blackboard``: rebind the BT's BlackboardAsset slot.
           Pass ``clear=True`` to unbind.
@@ -6527,6 +6540,14 @@ def behavior_tree(
         params["category"] = category
     if save is not None:
         params["save"] = save
+    if key is not None:
+        params["key"] = key
+    if condition is not None:
+        params["condition"] = condition
+    if value is not None:
+        params["value"] = value
+    if notify_observer is not None:
+        params["notify_observer"] = notify_observer
 
     try:
         response = unreal.send_command("behavior_tree", params)

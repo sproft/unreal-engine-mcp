@@ -9,6 +9,7 @@
 #include "BehaviorTree/BTService.h"
 #include "BehaviorTree/BTTaskNode.h"
 #include "BehaviorTree/BlackboardData.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyEnums.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Bool.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Class.h"
@@ -592,6 +593,10 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCommand(const FString
     {
         return HandleAddDecorator(Params);
     }
+    if (Op == TEXT("add_blackboard_decorator") || Op == TEXT("add_bb_decorator"))
+    {
+        return HandleAddBlackboardDecorator(Params);
+    }
     if (Op == TEXT("add_service"))
     {
         return HandleAddService(Params);
@@ -1164,6 +1169,439 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddDecorator(const TS
     {
         Result->SetArrayField(TEXT("applied_properties"), AppliedJson);
         Result->SetArrayField(TEXT("skipped_properties"), SkippedJson);
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddBlackboardDecorator(const TSharedPtr<FJsonObject>& Params)
+{
+    FString TreeError;
+    UBehaviorTree* Tree = LoadTargetTree(Params, TreeError);
+    if (!Tree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TreeError);
+    }
+    if (!Tree->RootNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Tree '%s' has no RootNode"), *Tree->GetName()));
+    }
+
+    // Walk to the child slot we attach the decorator under.
+    FString TargetName;
+    if (!Params->TryGetStringField(TEXT("target"), TargetName)
+        && !Params->TryGetStringField(TEXT("target_name"), TargetName)
+        && !Params->TryGetStringField(TEXT("node"), TargetName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'target' parameter (decorator attaches to a child slot under a composite)"));
+    }
+    UBTCompositeNode* ParentComposite = nullptr;
+    int32 ChildIndex = INDEX_NONE;
+    if (!FindChildSlot(Tree->RootNode, TargetName, ParentComposite, ChildIndex))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No child slot matching '%s' under tree '%s'"),
+                *TargetName, *Tree->GetName()));
+    }
+
+    // The Blackboard asset has to exist for the key to resolve.
+    UBlackboardData* Blackboard = Tree->GetBlackboardAsset();
+    if (!Blackboard)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Tree '%s' has no Blackboard asset; pair one with set_blackboard before adding a Blackboard decorator"),
+                *Tree->GetName()));
+    }
+
+    // Required: the key name. Resolve it against the blackboard's own
+    // and inherited entries so we can pick the matching key type.
+    FString KeyToken;
+    if (!Params->TryGetStringField(TEXT("key"), KeyToken)
+        && !Params->TryGetStringField(TEXT("key_name"), KeyToken)
+        && !Params->TryGetStringField(TEXT("blackboard_key"), KeyToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'key' parameter (Blackboard key name)"));
+    }
+
+    auto FindKeyEntry = [Blackboard](const FString& KeyName) -> const FBlackboardEntry*
+    {
+        for (const FBlackboardEntry& Entry : Blackboard->Keys)
+        {
+            if (Entry.EntryName.ToString().Equals(KeyName, ESearchCase::IgnoreCase))
+            {
+                return &Entry;
+            }
+        }
+#if WITH_EDITORONLY_DATA
+        for (const FBlackboardEntry& Entry : Blackboard->ParentKeys)
+        {
+            if (Entry.EntryName.ToString().Equals(KeyName, ESearchCase::IgnoreCase))
+            {
+                return &Entry;
+            }
+        }
+#endif
+        return nullptr;
+    };
+    const FBlackboardEntry* KeyEntry = FindKeyEntry(KeyToken);
+    if (!KeyEntry)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blackboard '%s' has no key named '%s'"),
+                *Blackboard->GetName(), *KeyToken));
+    }
+
+    // Required: the condition. The four documented tokens map onto
+    // the standard EBasicKeyOperation / EArithmeticKeyOperation /
+    // ETextKeyOperation triple the editor's Blackboard-decorator
+    // detail panel exposes. IsSet / IsNotSet use the Basic family;
+    // IsEqualTo / IsNotEqualTo route through the arithmetic family
+    // for numeric / bool / enum keys and the text family for
+    // FName / FString.
+    FString ConditionToken;
+    if (!Params->TryGetStringField(TEXT("condition"), ConditionToken)
+        && !Params->TryGetStringField(TEXT("operation"), ConditionToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'condition' parameter (try IsSet / IsNotSet / IsEqualTo / IsNotEqualTo)"));
+    }
+    FString ConditionLower = ConditionToken.ToLower();
+    ConditionLower.ReplaceInline(TEXT("_"), TEXT(""));
+    ConditionLower.ReplaceInline(TEXT(" "), TEXT(""));
+
+    enum class EBBDecoratorCondition : uint8
+    {
+        IsSet,
+        IsNotSet,
+        IsEqualTo,
+        IsNotEqualTo,
+    };
+    EBBDecoratorCondition Condition = EBBDecoratorCondition::IsSet;
+    FString ConditionCanonical;
+    if (ConditionLower == TEXT("isset") || ConditionLower == TEXT("set"))
+    {
+        Condition = EBBDecoratorCondition::IsSet;
+        ConditionCanonical = TEXT("IsSet");
+    }
+    else if (ConditionLower == TEXT("isnotset") || ConditionLower == TEXT("notset") || ConditionLower == TEXT("unset"))
+    {
+        Condition = EBBDecoratorCondition::IsNotSet;
+        ConditionCanonical = TEXT("IsNotSet");
+    }
+    else if (ConditionLower == TEXT("isequalto") || ConditionLower == TEXT("equalto") || ConditionLower == TEXT("equal") || ConditionLower == TEXT("eq"))
+    {
+        Condition = EBBDecoratorCondition::IsEqualTo;
+        ConditionCanonical = TEXT("IsEqualTo");
+    }
+    else if (ConditionLower == TEXT("isnotequalto") || ConditionLower == TEXT("notequalto") || ConditionLower == TEXT("notequal") || ConditionLower == TEXT("ne"))
+    {
+        Condition = EBBDecoratorCondition::IsNotEqualTo;
+        ConditionCanonical = TEXT("IsNotEqualTo");
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unsupported condition '%s' (try IsSet / IsNotSet / IsEqualTo / IsNotEqualTo)"),
+                *ConditionToken));
+    }
+
+    // Classify the key type so we know which operation family to write
+    // (Basic / Arithmetic / Text) and which payload field (IntValue /
+    // FloatValue / StringValue) carries the comparison value.
+    enum class EBBDecoratorFamily : uint8
+    {
+        Basic,
+        Arithmetic,
+        Text,
+    };
+    EBBDecoratorFamily Family = EBBDecoratorFamily::Basic;
+    FString KeyTypeName = TEXT("none");
+    bool bRequiresValue = (Condition == EBBDecoratorCondition::IsEqualTo || Condition == EBBDecoratorCondition::IsNotEqualTo);
+    if (KeyEntry->KeyType)
+    {
+        KeyTypeName = KeyEntry->KeyType->GetClass()->GetName();
+        if (KeyEntry->KeyType->IsA<UBlackboardKeyType_Name>()
+            || KeyEntry->KeyType->IsA<UBlackboardKeyType_String>())
+        {
+            Family = EBBDecoratorFamily::Text;
+        }
+        else if (KeyEntry->KeyType->IsA<UBlackboardKeyType_Int>()
+                 || KeyEntry->KeyType->IsA<UBlackboardKeyType_Float>()
+                 || KeyEntry->KeyType->IsA<UBlackboardKeyType_Bool>()
+                 || KeyEntry->KeyType->IsA<UBlackboardKeyType_Enum>())
+        {
+            Family = EBBDecoratorFamily::Arithmetic;
+        }
+        else
+        {
+            // Object / Class / Vector / Rotator / Struct keys only
+            // support the Basic family (IsSet / IsNotSet). Asking for
+            // IsEqualTo on those is a caller error.
+            Family = EBBDecoratorFamily::Basic;
+        }
+    }
+    // IsSet / IsNotSet always use the Basic family regardless of key.
+    if (Condition == EBBDecoratorCondition::IsSet || Condition == EBBDecoratorCondition::IsNotSet)
+    {
+        Family = EBBDecoratorFamily::Basic;
+    }
+    if (bRequiresValue && Family == EBBDecoratorFamily::Basic && KeyEntry->KeyType)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blackboard key '%s' (type '%s') does not support IsEqualTo / IsNotEqualTo (only IsSet / IsNotSet)"),
+                *KeyToken, *KeyTypeName));
+    }
+
+    // Optional comparison value. Read once into a strongly typed
+    // payload so we can route to IntValue / FloatValue / StringValue
+    // based on the key family.
+    int32 PayloadInt = 0;
+    float PayloadFloat = 0.0f;
+    FString PayloadString;
+    bool bPayloadProvided = false;
+    if (Params->HasField(TEXT("value")) || Params->HasField(TEXT("comparison_value"))
+        || Params->HasField(TEXT("compare_to")))
+    {
+        TSharedPtr<FJsonValue> Val = Params->TryGetField(TEXT("value"));
+        if (!Val.IsValid()) { Val = Params->TryGetField(TEXT("comparison_value")); }
+        if (!Val.IsValid()) { Val = Params->TryGetField(TEXT("compare_to")); }
+        if (Val.IsValid() && Val->Type != EJson::Null)
+        {
+            bPayloadProvided = true;
+            if (Val->Type == EJson::Number)
+            {
+                const double D = Val->AsNumber();
+                PayloadInt = static_cast<int32>(D);
+                PayloadFloat = static_cast<float>(D);
+                PayloadString = FString::Printf(TEXT("%g"), D);
+            }
+            else if (Val->Type == EJson::Boolean)
+            {
+                PayloadInt = Val->AsBool() ? 1 : 0;
+                PayloadFloat = Val->AsBool() ? 1.0f : 0.0f;
+                PayloadString = Val->AsBool() ? TEXT("true") : TEXT("false");
+            }
+            else if (Val->Type == EJson::String)
+            {
+                PayloadString = Val->AsString();
+                LexFromString(PayloadInt, *PayloadString);
+                LexFromString(PayloadFloat, *PayloadString);
+            }
+        }
+    }
+    if (bRequiresValue && !bPayloadProvided)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Condition '%s' requires a 'value' (the comparison target)"),
+                *ConditionCanonical));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Spawn the decorator. NewObject runs the same constructor path
+    // HandleAddDecorator uses; InitializeFromAsset hooks up the
+    // FBlackboardKeySelector against the tree's Blackboard.
+    UBTDecorator_Blackboard* NewDecorator = NewObject<UBTDecorator_Blackboard>(
+        Tree, UBTDecorator_Blackboard::StaticClass(), NAME_None, RF_Transactional);
+    if (!NewDecorator)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Failed to NewObject UBTDecorator_Blackboard"));
+    }
+
+    // Reflection-write the protected UPROPERTY fields. Going through
+    // the property database bypasses C++ access controls without us
+    // touching engine private headers. The BlackboardKey field is an
+    // FBlackboardKeySelector struct; we write only SelectedKeyName
+    // and let InitializeFromAsset resolve the rest.
+    UClass* DecoratorClass = NewDecorator->GetClass();
+    FProperty* BlackboardKeyProp = DecoratorClass->FindPropertyByName(TEXT("BlackboardKey"));
+    if (FStructProperty* SelectorProp = CastField<FStructProperty>(BlackboardKeyProp))
+    {
+        void* SelectorPtr = SelectorProp->ContainerPtrToValuePtr<void>(NewDecorator);
+        // SelectedKeyName is a public field on FBlackboardKeySelector,
+        // so the struct property's inner FNameProperty lands the
+        // FName cleanly.
+        FProperty* SelectedKeyNameProp = SelectorProp->Struct->FindPropertyByName(TEXT("SelectedKeyName"));
+        if (FNameProperty* NameProp = CastField<FNameProperty>(SelectedKeyNameProp))
+        {
+            NameProp->SetPropertyValue(NameProp->ContainerPtrToValuePtr<void>(SelectorPtr),
+                FName(*KeyEntry->EntryName.ToString()));
+        }
+    }
+
+    // OperationType is a uint8 the engine indexes into the
+    // EBlackboardKeyOperation::Type enum (Basic / Arithmetic / Text).
+    if (FProperty* OperationTypeProp = DecoratorClass->FindPropertyByName(TEXT("OperationType")))
+    {
+        if (FByteProperty* ByteProp = CastField<FByteProperty>(OperationTypeProp))
+        {
+            uint8 OpType = static_cast<uint8>(EBlackboardKeyOperation::Basic);
+            if (Family == EBBDecoratorFamily::Arithmetic)
+            {
+                OpType = static_cast<uint8>(EBlackboardKeyOperation::Arithmetic);
+            }
+            else if (Family == EBBDecoratorFamily::Text)
+            {
+                OpType = static_cast<uint8>(EBlackboardKeyOperation::Text);
+            }
+            ByteProp->SetPropertyValue(ByteProp->ContainerPtrToValuePtr<void>(NewDecorator), OpType);
+        }
+    }
+
+    // BasicOperation / ArithmeticOperation / TextOperation are
+    // TEnumAsByte under WITH_EDITORONLY_DATA. Writing the matching
+    // enum value through the byte field surface lands the IsSet /
+    // IsNotSet / Equal / NotEqual selection the editor row exposes.
+#if WITH_EDITORONLY_DATA
+    auto WriteByteEnum = [&DecoratorClass, &NewDecorator](const TCHAR* FieldName, uint8 Value)
+    {
+        if (FProperty* Prop = DecoratorClass->FindPropertyByName(FieldName))
+        {
+            if (FByteProperty* ByteProp = CastField<FByteProperty>(Prop))
+            {
+                ByteProp->SetPropertyValue(ByteProp->ContainerPtrToValuePtr<void>(NewDecorator), Value);
+            }
+        }
+    };
+
+    if (Family == EBBDecoratorFamily::Basic)
+    {
+        const uint8 BasicVal = (Condition == EBBDecoratorCondition::IsSet)
+            ? static_cast<uint8>(EBasicKeyOperation::Set)
+            : static_cast<uint8>(EBasicKeyOperation::NotSet);
+        WriteByteEnum(TEXT("BasicOperation"), BasicVal);
+    }
+    else if (Family == EBBDecoratorFamily::Arithmetic)
+    {
+        const uint8 ArithVal = (Condition == EBBDecoratorCondition::IsEqualTo)
+            ? static_cast<uint8>(EArithmeticKeyOperation::Equal)
+            : static_cast<uint8>(EArithmeticKeyOperation::NotEqual);
+        WriteByteEnum(TEXT("ArithmeticOperation"), ArithVal);
+    }
+    else if (Family == EBBDecoratorFamily::Text)
+    {
+        const uint8 TextVal = (Condition == EBBDecoratorCondition::IsEqualTo)
+            ? static_cast<uint8>(ETextKeyOperation::Equal)
+            : static_cast<uint8>(ETextKeyOperation::NotEqual);
+        WriteByteEnum(TEXT("TextOperation"), TextVal);
+    }
+#endif
+
+    // Land the comparison payload on the right field. IntValue and
+    // FloatValue cover the arithmetic family; StringValue covers
+    // both the text family (for FName / FString keys) and is the
+    // engine's go-to storage slot for enum-key arithmetic ops
+    // (see UBTDecorator_Blackboard::RefreshEnumBasedDecorator).
+    auto WriteFloat = [&DecoratorClass, NewDecorator](const TCHAR* FieldName, float Value)
+    {
+        if (FProperty* Prop = DecoratorClass->FindPropertyByName(FieldName))
+        {
+            if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Prop))
+            {
+                FloatProp->SetPropertyValue(FloatProp->ContainerPtrToValuePtr<void>(NewDecorator), Value);
+            }
+        }
+    };
+    auto WriteInt = [&DecoratorClass, NewDecorator](const TCHAR* FieldName, int32 Value)
+    {
+        if (FProperty* Prop = DecoratorClass->FindPropertyByName(FieldName))
+        {
+            if (FIntProperty* IntProp = CastField<FIntProperty>(Prop))
+            {
+                IntProp->SetPropertyValue(IntProp->ContainerPtrToValuePtr<void>(NewDecorator), Value);
+            }
+        }
+    };
+    auto WriteString = [&DecoratorClass, NewDecorator](const TCHAR* FieldName, const FString& Value)
+    {
+        if (FProperty* Prop = DecoratorClass->FindPropertyByName(FieldName))
+        {
+            if (FStrProperty* StrProp = CastField<FStrProperty>(Prop))
+            {
+                StrProp->SetPropertyValue(StrProp->ContainerPtrToValuePtr<void>(NewDecorator), Value);
+            }
+        }
+    };
+
+    if (bPayloadProvided)
+    {
+        WriteInt(TEXT("IntValue"), PayloadInt);
+        WriteFloat(TEXT("FloatValue"), PayloadFloat);
+        WriteString(TEXT("StringValue"), PayloadString);
+    }
+
+    // NotifyObserver picks how often the runtime restarts the branch
+    // when the observed key changes. Default ResultChange matches the
+    // editor's default; callers can override through the
+    // `notify_observer` field if needed.
+    FString NotifyToken;
+    if (Params->TryGetStringField(TEXT("notify_observer"), NotifyToken)
+        || Params->TryGetStringField(TEXT("notify"), NotifyToken))
+    {
+        if (FProperty* NotifyProp = DecoratorClass->FindPropertyByName(TEXT("NotifyObserver")))
+        {
+            if (FByteProperty* ByteProp = CastField<FByteProperty>(NotifyProp))
+            {
+                const FString NLower = NotifyToken.ToLower();
+                uint8 NotifyVal = static_cast<uint8>(EBTBlackboardRestart::ResultChange);
+                if (NLower == TEXT("valuechange") || NLower == TEXT("value_change") || NLower == TEXT("on_value_change"))
+                {
+                    NotifyVal = static_cast<uint8>(EBTBlackboardRestart::ValueChange);
+                }
+                ByteProp->SetPropertyValue(ByteProp->ContainerPtrToValuePtr<void>(NewDecorator), NotifyVal);
+            }
+        }
+    }
+
+    // Resolves the selector against the tree's Blackboard so
+    // SelectedKeyID + SelectedKeyType match the named key. Without
+    // this step the decorator runs against InvalidKey at game time.
+    NewDecorator->InitializeFromAsset(*Tree);
+
+    // Attach to the child slot. Same path HandleAddDecorator uses.
+    ParentComposite->Children[ChildIndex].Decorators.Add(NewDecorator);
+
+    Tree->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Tree->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    const FBTCompositeChild& Slot = ParentComposite->Children[ChildIndex];
+    UBTNode* SlotNode = Slot.ChildComposite ? static_cast<UBTNode*>(Slot.ChildComposite)
+                                             : static_cast<UBTNode*>(Slot.ChildTask);
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_blackboard_decorator"));
+    Result->SetStringField(TEXT("tree"), Tree->GetPathName());
+    Result->SetStringField(TEXT("parent_composite"), ParentComposite->GetNodeName());
+    Result->SetNumberField(TEXT("child_index"), ChildIndex);
+    if (SlotNode)
+    {
+        Result->SetStringField(TEXT("target_node"), SlotNode->GetNodeName());
+    }
+    Result->SetStringField(TEXT("class"), UBTDecorator_Blackboard::StaticClass()->GetName());
+    Result->SetStringField(TEXT("class_path"), UBTDecorator_Blackboard::StaticClass()->GetPathName());
+    Result->SetStringField(TEXT("decorator_name"), NewDecorator->GetNodeName());
+    Result->SetStringField(TEXT("object_name"), NewDecorator->GetName());
+    Result->SetNumberField(TEXT("decorator_index"), Slot.Decorators.Num() - 1);
+    Result->SetStringField(TEXT("key"), KeyEntry->EntryName.ToString());
+    Result->SetStringField(TEXT("key_type"), DescribeKeyType(KeyEntry->KeyType));
+    Result->SetStringField(TEXT("condition"), ConditionCanonical);
+    Result->SetStringField(TEXT("operation_family"),
+        Family == EBBDecoratorFamily::Basic ? TEXT("Basic")
+        : Family == EBBDecoratorFamily::Arithmetic ? TEXT("Arithmetic")
+        : TEXT("Text"));
+    Result->SetBoolField(TEXT("value_provided"), bPayloadProvided);
+    if (bPayloadProvided)
+    {
+        Result->SetNumberField(TEXT("int_value"), PayloadInt);
+        Result->SetNumberField(TEXT("float_value"), PayloadFloat);
+        Result->SetStringField(TEXT("string_value"), PayloadString);
     }
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;

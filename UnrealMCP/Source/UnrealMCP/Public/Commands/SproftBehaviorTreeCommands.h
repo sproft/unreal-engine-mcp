@@ -25,6 +25,22 @@
  *     `GetNodeName()` (composite walk). Optionally takes a flat
  *     property dict applied through `FProperty::ImportText` on the
  *     new decorator.
+ *   - `add_blackboard_decorator`: declarative one-call shortcut for
+ *     the Blackboard decorator the editor's add-decorator picker
+ *     spawns most often. Spawns a UBTDecorator_Blackboard under a
+ *     target child slot, wires the FBlackboardKeySelector against a
+ *     named Blackboard key, picks the right operation family
+ *     (Basic / Arithmetic / Text) from the resolved key's type, and
+ *     writes the matching EBasicKeyOperation / EArithmeticKeyOperation
+ *     / ETextKeyOperation row plus the comparison payload field
+ *     (IntValue / FloatValue / StringValue) through reflection so
+ *     the protected UPROPERTY surface lands without us touching
+ *     engine private headers. Conditions: `IsSet` / `IsNotSet`
+ *     (Basic family) or `IsEqualTo` / `IsNotEqualTo` (Arithmetic
+ *     family for int / float / bool / enum keys; Text family for
+ *     FName / FString keys). Returns the resolved key + classified
+ *     family + decorator FName so a follow-up call can address the
+ *     spawned decorator.
  *   - `add_service`: append a UBTService to a composite's service
  *     chain. Targets the composite by `GetNodeName()`. Optionally
  *     takes a flat property dict applied through `FProperty::ImportText`
@@ -197,6 +213,7 @@ private:
     TSharedPtr<FJsonObject> HandleAddRootComposite(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddChildTask(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddDecorator(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddBlackboardDecorator(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddService(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetBlackboard(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddBlackboardKey(const TSharedPtr<FJsonObject>& Params);
