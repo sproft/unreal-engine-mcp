@@ -8010,6 +8010,9 @@ def animation_edit(
     loop: Optional[bool] = None,
     looping_interpolation: Optional[bool] = None,
     enable_root_motion_on_allowed: Optional[bool] = None,
+    blend_in_time: Optional[float] = None,
+    blend_out_time: Optional[float] = None,
+    enable_root_motion_translation: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Targeted UAnimSequence / UAnimMontage edits (small variant).
@@ -8166,6 +8169,26 @@ def animation_edit(
           across recent versions. Distinct from ``set_root_motion``
           which writes the root-motion knobs proper. Refuses
           non-UAnimSequence assets.
+        - ``set_blend_times``: tunes the seconds-long crossfade
+          knobs the AnimGraph reads when a montage blends in or
+          out plus the optional ``bEnableRootMotionTranslation``
+          toggle on a UAnimSequence. ``blend_in_time`` and
+          ``blend_out_time`` write the inner ``BlendTime`` float
+          on the UAnimMontage's ``BlendIn`` / ``BlendOut``
+          FAlphaBlend(Args) struct slot. The op resolves through
+          reflection on the outer FStructProperty's Struct so it
+          stays compatible with the FAlphaBlend (legacy) and
+          FAlphaBlendArgs (modern) struct shapes UE has shipped.
+          The two blend-time fields require a UAnimMontage;
+          ``enable_root_motion_translation`` (alias
+          ``b_enable_root_motion_translation`` /
+          ``root_motion_translation``) requires a UAnimSequence
+          (the engine reads it on UAnimSequence directly, not on
+          UAnimMontage). At least one of the three knobs must be
+          provided. PostEditChange + MarkPackageDirty fire after
+          the writes so an open Persona refreshes; save defaults
+          true. Useful for tuning anim montage / sequence
+          interactions without opening Persona.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -8302,6 +8325,12 @@ def animation_edit(
         params["looping_interpolation"] = looping_interpolation
     if enable_root_motion_on_allowed is not None:
         params["enable_root_motion_on_allowed"] = enable_root_motion_on_allowed
+    if blend_in_time is not None:
+        params["blend_in_time"] = blend_in_time
+    if blend_out_time is not None:
+        params["blend_out_time"] = blend_out_time
+    if enable_root_motion_translation is not None:
+        params["enable_root_motion_translation"] = enable_root_motion_translation
 
     try:
         response = unreal.send_command("animation_edit", params)

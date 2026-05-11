@@ -305,8 +305,13 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleSetLoopFlags(Params);
     }
+    if (Op == TEXT("set_blend_times") || Op == TEXT("set_blendtimes")
+        || Op == TEXT("set_blend") || Op == TEXT("blend_times"))
+    {
+        return HandleSetBlendTimes(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion', 'set_compression_scheme', 'set_curve_compression', 'set_loop_flags'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion', 'set_compression_scheme', 'set_curve_compression', 'set_loop_flags', 'set_blend_times'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -2609,6 +2614,329 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetLoopFlags(const T
     Result->SetBoolField(TEXT("enable_root_motion_on_allowed"), bWroteRMAllowed ? bNewRMAllowed : bPrevRMAllowed);
     Result->SetBoolField(TEXT("previous_enable_root_motion_on_allowed"), bPrevRMAllowed);
     Result->SetBoolField(TEXT("enable_root_motion_on_allowed_provided"), bRMAllowedProvided);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+namespace
+{
+    /** Try to read an optional float from a set of aliased keys. Returns
+     *  true on success; writes a diagnostic into OutErr only when the
+     *  caller supplied the key but the value was not a number. */
+    bool BlendTimes_ReadAliasedFloat(const TSharedPtr<FJsonObject>& Params,
+        const TArray<FString>& Aliases, double& OutValue, FString& OutErr)
+    {
+        OutErr.Reset();
+        for (const FString& Key : Aliases)
+        {
+            const TSharedPtr<FJsonValue> Val = Params->TryGetField(Key);
+            if (!Val.IsValid())
+            {
+                continue;
+            }
+            if (Val->Type == EJson::Number)
+            {
+                OutValue = Val->AsNumber();
+                return true;
+            }
+            if (Val->Type == EJson::String)
+            {
+                const FString S = Val->AsString().TrimStartAndEnd();
+                if (!S.IsNumeric())
+                {
+                    OutErr = FString::Printf(TEXT("value for '%s' must be a number, got string '%s'"), *Key, *S);
+                    return false;
+                }
+                OutValue = FCString::Atod(*S);
+                return true;
+            }
+            OutErr = FString::Printf(TEXT("value for '%s' must be a number"), *Key);
+            return false;
+        }
+        return false;
+    }
+
+    /** Resolve the inner `BlendTime` float UPROPERTY on an FAlphaBlend (or
+     *  FAlphaBlendArgs) struct that lives at the named outer UPROPERTY on
+     *  a UAnimMontage. The engine has shipped both FAlphaBlend (legacy)
+     *  and FAlphaBlendArgs (modern) as the struct type for the
+     *  Montage->BlendIn / Montage->BlendOut slots since 5.0; we walk the
+     *  outer FStructProperty's Struct to find the inner BlendTime, so
+     *  the op stays compatible with either shape without us spelling out
+     *  the engine version. Returns the address of the inner float in
+     *  OutFloatAddr. */
+    bool BlendTimes_ResolveMontageInnerFloat(UAnimMontage* Montage, const FName& OuterFieldName,
+        FFloatProperty*& OutFloatProp, void*& OutFloatAddr, FString& OutErr)
+    {
+        OutFloatProp = nullptr;
+        OutFloatAddr = nullptr;
+
+        if (!Montage)
+        {
+            OutErr = TEXT("montage is null");
+            return false;
+        }
+
+        FProperty* OuterProp = Montage->GetClass()->FindPropertyByName(OuterFieldName);
+        if (!OuterProp)
+        {
+            OutErr = FString::Printf(TEXT("UAnimMontage has no UPROPERTY named '%s'"), *OuterFieldName.ToString());
+            return false;
+        }
+        FStructProperty* OuterStructProp = CastField<FStructProperty>(OuterProp);
+        if (!OuterStructProp)
+        {
+            OutErr = FString::Printf(TEXT("UAnimMontage::%s is not an FStructProperty"), *OuterFieldName.ToString());
+            return false;
+        }
+
+        FProperty* InnerProp = OuterStructProp->Struct->FindPropertyByName(TEXT("BlendTime"));
+        if (!InnerProp)
+        {
+            OutErr = FString::Printf(TEXT("struct '%s' on UAnimMontage::%s has no inner 'BlendTime' field"),
+                *OuterStructProp->Struct->GetName(), *OuterFieldName.ToString());
+            return false;
+        }
+        FFloatProperty* FloatProp = CastField<FFloatProperty>(InnerProp);
+        if (!FloatProp)
+        {
+            OutErr = FString::Printf(TEXT("inner 'BlendTime' on struct '%s' is not a float UPROPERTY"),
+                *OuterStructProp->Struct->GetName());
+            return false;
+        }
+        // Get the address of the outer struct's value, then offset to the
+        // inner BlendTime float. ContainerPtrToValuePtr lands on the
+        // FAlphaBlend(Args) struct body; InnerProp's ContainerPtrToValuePtr
+        // resolves the float address inside that struct body.
+        void* OuterStructAddr = OuterStructProp->ContainerPtrToValuePtr<void>(Montage);
+        OutFloatAddr = FloatProp->ContainerPtrToValuePtr<void>(OuterStructAddr);
+        OutFloatProp = FloatProp;
+        return true;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetBlendTimes(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writes the blend-time knobs the AnimGraph reads when a montage
+    // crossfades in / out, plus the optional bEnableRootMotionTranslation
+    // toggle on UAnimSequence so callers can pair a montage tuning pass
+    // with the per-sequence root-motion translation gate in a single
+    // round trip.
+    //
+    // The BlendIn / BlendOut slots on UAnimMontage are FAlphaBlend(Args)
+    // structs whose inner `BlendTime` float is the seconds-long crossfade
+    // duration. The engine has shipped FAlphaBlend in the past and
+    // FAlphaBlendArgs more recently; we resolve through reflection on
+    // the outer FStructProperty's Struct so the op stays compatible with
+    // either struct shape without us hard-coding it.
+    //
+    // For non-Montage UAnimSequence inputs we still expose the
+    // bEnableRootMotionTranslation toggle (the field lives on
+    // UAnimSequence itself, not on UAnimMontage), so a caller flipping a
+    // looping sequence's root-motion translation gate does not need to
+    // open Persona.
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("set_blend_times: missing 'asset'"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_blend_times: failed to load asset '%s'"), *AssetParam));
+    }
+    UAnimMontage* Montage = Cast<UAnimMontage>(Asset);
+    UAnimSequence* Seq = Cast<UAnimSequence>(Asset);
+    if (!Montage && !Seq)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_blend_times: asset '%s' is not a UAnimMontage or UAnimSequence"), *AssetParam));
+    }
+
+    // Optional: blend_in_time (seconds). Only applicable to montages
+    // since UAnimSequence does not carry FAlphaBlend slots.
+    double NewBlendInSeconds = 0.0;
+    FString BlendInErr;
+    const bool bBlendInProvided = BlendTimes_ReadAliasedFloat(Params,
+        {
+            TEXT("blend_in_time"), TEXT("blend_in"), TEXT("BlendInTime"),
+            TEXT("blend_in_seconds")
+        }, NewBlendInSeconds, BlendInErr);
+    if (!BlendInErr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_blend_times: %s"), *BlendInErr));
+    }
+
+    // Optional: blend_out_time (seconds). Same Montage caveat.
+    double NewBlendOutSeconds = 0.0;
+    FString BlendOutErr;
+    const bool bBlendOutProvided = BlendTimes_ReadAliasedFloat(Params,
+        {
+            TEXT("blend_out_time"), TEXT("blend_out"), TEXT("BlendOutTime"),
+            TEXT("blend_out_seconds")
+        }, NewBlendOutSeconds, BlendOutErr);
+    if (!BlendOutErr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_blend_times: %s"), *BlendOutErr));
+    }
+
+    // Optional: bEnableRootMotionTranslation toggle. The field lives on
+    // UAnimSequence, so we route through reflection only when the asset
+    // is a UAnimSequence (UAnimMontage inherits from UAnimCompositeBase
+    // -> UAnimSequenceBase, not UAnimSequence).
+    bool bNewRMTranslation = false;
+    FString RMTransErr;
+    const bool bRMTransProvided = LoopFlags_ReadAliasedBool(Params,
+        {
+            TEXT("enable_root_motion_translation"),
+            TEXT("b_enable_root_motion_translation"),
+            TEXT("bEnableRootMotionTranslation"),
+            TEXT("root_motion_translation")
+        }, bNewRMTranslation, RMTransErr);
+    if (!RMTransErr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_blend_times: 'enable_root_motion_translation' %s"), *RMTransErr));
+    }
+
+    if (!bBlendInProvided && !bBlendOutProvided && !bRMTransProvided)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_blend_times: pass at least one of 'blend_in_time' / 'blend_out_time' / 'enable_root_motion_translation'"));
+    }
+
+    // Reject blend_in_time / blend_out_time on non-Montage assets up front
+    // so the caller gets a clear error rather than a silent skip.
+    if ((bBlendInProvided || bBlendOutProvided) && !Montage)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_blend_times: 'blend_in_time' / 'blend_out_time' require a UAnimMontage; '%s' is %s"),
+                *AssetParam, *Asset->GetClass()->GetName()));
+    }
+
+    // Snapshot previous values for the diff payload.
+    double PrevBlendInSeconds = 0.0;
+    double PrevBlendOutSeconds = 0.0;
+    bool bWroteBlendIn = false;
+    bool bWroteBlendOut = false;
+    if (Montage)
+    {
+        // BlendIn
+        if (bBlendInProvided)
+        {
+            FFloatProperty* FloatProp = nullptr;
+            void* FloatAddr = nullptr;
+            FString Err;
+            if (!BlendTimes_ResolveMontageInnerFloat(Montage, TEXT("BlendIn"), FloatProp, FloatAddr, Err))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_blend_times: %s"), *Err));
+            }
+            PrevBlendInSeconds = FloatProp->GetPropertyValue(FloatAddr);
+            FloatProp->SetPropertyValue(FloatAddr, static_cast<float>(NewBlendInSeconds));
+            bWroteBlendIn = true;
+        }
+        else
+        {
+            // Read the current value for the response, no write.
+            FFloatProperty* FloatProp = nullptr;
+            void* FloatAddr = nullptr;
+            FString Err;
+            if (BlendTimes_ResolveMontageInnerFloat(Montage, TEXT("BlendIn"), FloatProp, FloatAddr, Err))
+            {
+                PrevBlendInSeconds = FloatProp->GetPropertyValue(FloatAddr);
+            }
+        }
+
+        // BlendOut
+        if (bBlendOutProvided)
+        {
+            FFloatProperty* FloatProp = nullptr;
+            void* FloatAddr = nullptr;
+            FString Err;
+            if (!BlendTimes_ResolveMontageInnerFloat(Montage, TEXT("BlendOut"), FloatProp, FloatAddr, Err))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_blend_times: %s"), *Err));
+            }
+            PrevBlendOutSeconds = FloatProp->GetPropertyValue(FloatAddr);
+            FloatProp->SetPropertyValue(FloatAddr, static_cast<float>(NewBlendOutSeconds));
+            bWroteBlendOut = true;
+        }
+        else
+        {
+            FFloatProperty* FloatProp = nullptr;
+            void* FloatAddr = nullptr;
+            FString Err;
+            if (BlendTimes_ResolveMontageInnerFloat(Montage, TEXT("BlendOut"), FloatProp, FloatAddr, Err))
+            {
+                PrevBlendOutSeconds = FloatProp->GetPropertyValue(FloatAddr);
+            }
+        }
+    }
+
+    // bEnableRootMotionTranslation on UAnimSequence (Montages do not
+    // expose this field; the engine only reads it on UAnimSequence).
+    bool bPrevRMTranslation = false;
+    bool bWroteRMTranslation = false;
+    if (bRMTransProvided)
+    {
+        if (!Seq)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_blend_times: 'enable_root_motion_translation' requires a UAnimSequence; '%s' is %s"),
+                    *AssetParam, *Asset->GetClass()->GetName()));
+        }
+        FBoolProperty* BoolProp = CastField<FBoolProperty>(
+            Seq->GetClass()->FindPropertyByName(TEXT("bEnableRootMotionTranslation")));
+        if (!BoolProp)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("set_blend_times: UAnimSequence does not expose 'bEnableRootMotionTranslation' on the reflection database"));
+        }
+        bPrevRMTranslation = BoolProp->GetPropertyValue_InContainer(Seq);
+        BoolProp->SetPropertyValue_InContainer(Seq, bNewRMTranslation);
+        bWroteRMTranslation = true;
+    }
+
+#if WITH_EDITOR
+    Asset->PostEditChange();
+#endif
+    Asset->MarkPackageDirty();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("set_blend_times"));
+    Result->SetStringField(TEXT("asset"), AssetParam);
+    Result->SetStringField(TEXT("path"), Asset->GetPathName());
+    Result->SetStringField(TEXT("class"), Asset->GetClass()->GetName());
+
+    Result->SetBoolField(TEXT("blend_in_provided"), bBlendInProvided);
+    Result->SetBoolField(TEXT("blend_in_written"), bWroteBlendIn);
+    Result->SetNumberField(TEXT("blend_in_time"), bWroteBlendIn ? NewBlendInSeconds : PrevBlendInSeconds);
+    Result->SetNumberField(TEXT("previous_blend_in_time"), PrevBlendInSeconds);
+
+    Result->SetBoolField(TEXT("blend_out_provided"), bBlendOutProvided);
+    Result->SetBoolField(TEXT("blend_out_written"), bWroteBlendOut);
+    Result->SetNumberField(TEXT("blend_out_time"), bWroteBlendOut ? NewBlendOutSeconds : PrevBlendOutSeconds);
+    Result->SetNumberField(TEXT("previous_blend_out_time"), PrevBlendOutSeconds);
+
+    Result->SetBoolField(TEXT("enable_root_motion_translation_provided"), bRMTransProvided);
+    Result->SetBoolField(TEXT("enable_root_motion_translation_written"), bWroteRMTranslation);
+    Result->SetBoolField(TEXT("enable_root_motion_translation"), bWroteRMTranslation ? bNewRMTranslation : bPrevRMTranslation);
+    Result->SetBoolField(TEXT("previous_enable_root_motion_translation"), bPrevRMTranslation);
+
     Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }
