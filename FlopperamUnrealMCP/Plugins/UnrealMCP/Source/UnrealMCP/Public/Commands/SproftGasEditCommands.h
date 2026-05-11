@@ -112,6 +112,17 @@
  * existing matching call node if one is already wired for the
  * resolved tag so the op is idempotent.
  *
+ * The `add_execution` op appends an `FGameplayEffectExecutionDefinition`
+ * to a UGameplayEffect's `Executions` array on the GE CDO.
+ * `calculation_class` resolves to a `UGameplayEffectExecutionCalculation`
+ * subclass through a `/Script/Module.ClassName` path, a `/Game/...`
+ * BP class path, or a bare class name lookup. Optional
+ * `passed_in_tags` lands on the entry's `PassedInTags`
+ * `FGameplayTagContainer` (each tag added through
+ * `RequestGameplayTag(..., /*bErrorIfNotFound=*/false)` so unknown
+ * tags surface a warning and skip rather than crash). Recompiles +
+ * saves on success.
+ *
  * Clean-room implementation derived from the public UE5 API:
  *   - UGameplayAbility property surface (CancelAbilitiesWithTag etc.).
  *   - UGameplayEffect public AddComponent / FindOrAddComponent template
@@ -140,4 +151,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetAbilityCostOrCooldown(const TSharedPtr<FJsonObject>& Params, bool bIsCost);
     TSharedPtr<FJsonObject> HandleCreateCueNotify(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetAbilityCueTag(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddExecution(const TSharedPtr<FJsonObject>& Params);
 };

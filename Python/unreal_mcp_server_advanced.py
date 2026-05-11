@@ -5631,6 +5631,8 @@ def gas_edit(
     data_name: Optional[str] = None,
     data_tag: Optional[str] = None,
     calculation_class: Optional[str] = None,
+    execution_class: Optional[str] = None,
+    passed_in_tags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over Gameplay Ability System assets.
@@ -5714,6 +5716,20 @@ def gas_edit(
           (UGameplayModMagnitudeCalculation subclass path) plus
           optional ``coefficient`` / ``pre_multiply`` /
           ``post_multiply`` floats.
+        - ``add_execution``: append an
+          ``FGameplayEffectExecutionDefinition`` to a
+          UGameplayEffect's ``Executions`` array on the CDO.
+          ``calculation_class`` (alias ``execution_class``) resolves
+          to a ``UGameplayEffectExecutionCalculation`` subclass
+          through a ``/Script/Module.ClassName`` path, a ``/Game/...``
+          BP-class path, or a bare class name. Optional
+          ``passed_in_tags`` lands on the entry's ``PassedInTags``
+          ``FGameplayTagContainer`` (each tag added through
+          ``UGameplayTagsManager::RequestGameplayTag`` with
+          bErrorIfNotFound=false so unknown tags surface in an
+          ``unknown_tags`` response field rather than abort the
+          op). Recompiles + saves on success unless
+          ``compile=False`` / ``save=False`` is passed.
 
     Args:
         asset: Required for ``inspect`` / ``set_gameplay_tags`` /
@@ -5821,6 +5837,10 @@ def gas_edit(
         params["data_tag"] = data_tag
     if calculation_class is not None:
         params["calculation_class"] = calculation_class
+    if execution_class is not None:
+        params["execution_class"] = execution_class
+    if passed_in_tags is not None:
+        params["passed_in_tags"] = passed_in_tags
 
     try:
         response = unreal.send_command("gas_edit", params)

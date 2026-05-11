@@ -792,6 +792,11 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCommand(const FString& Com
     {
         return HandleSetAbilityCueTag(Params);
     }
+    if (Op == TEXT("add_execution") || Op == TEXT("add_execution_calculation")
+        || Op == TEXT("add_exec"))
+    {
+        return HandleAddExecution(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("gas_edit: unsupported op '%s'"), *Op));
 }
@@ -2323,6 +2328,199 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleSetModifierMagnitude(const
     Result->SetStringField(TEXT("magnitude_type"), CanonicalType);
     Result->SetStringField(TEXT("previous_magnitude_type"), PrevCanonical);
     Result->SetObjectField(TEXT("payload"), VariantOut);
+    Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+namespace
+{
+    /** Resolve a class token to a UClass*. Accepts a `/Script/Module.ClassName`
+     *  reflection path, a `/Game/...` BP-class path (the resolver follows
+     *  through to the BP's generated class), and a bare class name fallback
+     *  through TObjectIterator<UClass>. Returns nullptr on miss. */
+    UClass* ResolveClassByToken(const FString& Token)
+    {
+        if (Token.IsEmpty()) return nullptr;
+        FString Norm = Token;
+        Norm.TrimStartAndEndInline();
+
+        if (Norm.StartsWith(TEXT("/Script/")))
+        {
+            return FindObject<UClass>(nullptr, *Norm);
+        }
+        if (Norm.StartsWith(TEXT("/")))
+        {
+            // /Game/.../BP_X or /Game/.../BP_X.BP_X_C
+            UObject* Loaded = UEditorAssetLibrary::LoadAsset(Norm);
+            if (UBlueprint* AsBP = Cast<UBlueprint>(Loaded))
+            {
+                return AsBP->GeneratedClass;
+            }
+            return Cast<UClass>(Loaded);
+        }
+        // Bare class name fallback. Strip a leading U / A prefix if the
+        // candidate name is otherwise unique in the loaded set.
+        FString BareName = Norm;
+        FString WithoutPrefix = Norm;
+        if ((Norm.StartsWith(TEXT("U")) || Norm.StartsWith(TEXT("A")))
+            && Norm.Len() > 1 && FChar::IsUpper(Norm[1]))
+        {
+            WithoutPrefix = Norm.RightChop(1);
+        }
+        UClass* Found = nullptr;
+        for (TObjectIterator<UClass> It; It; ++It)
+        {
+            UClass* Cls = *It;
+            if (!Cls) continue;
+            const FString CName = Cls->GetName();
+            if (CName == BareName || CName == WithoutPrefix)
+            {
+                Found = Cls;
+                break;
+            }
+        }
+        return Found;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleAddExecution(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("effect"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'asset' / 'effect' parameter (path to a UGameplayEffect or its Blueprint)"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not load asset at '%s'"), *AssetPath));
+    }
+    UClass* AssetClass = ResolveAssetClass(Asset);
+    UObject* CDO = ResolveCDO(Asset);
+    UGameplayEffect* Effect = CDO ? Cast<UGameplayEffect>(CDO) : nullptr;
+    if (!Effect)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UGameplayEffect (resolved class: %s)"),
+                *AssetPath, AssetClass ? *AssetClass->GetName() : TEXT("null")));
+    }
+
+    FString ClassToken;
+    if (!Params->TryGetStringField(TEXT("calculation_class"), ClassToken)
+        && !Params->TryGetStringField(TEXT("execution_class"), ClassToken)
+        && !Params->TryGetStringField(TEXT("class"), ClassToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'calculation_class' parameter (path or class name of a UGameplayEffectExecutionCalculation subclass)"));
+    }
+
+    UClass* CalcClass = ResolveClassByToken(ClassToken);
+    if (!CalcClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve calculation_class '%s'"), *ClassToken));
+    }
+    if (!CalcClass->IsChildOf(UGameplayEffectExecutionCalculation::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is not a UGameplayEffectExecutionCalculation subclass"),
+                *CalcClass->GetPathName()));
+    }
+    if (CalcClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is abstract; pick a concrete subclass"),
+                *CalcClass->GetPathName()));
+    }
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Build the new execution definition. CalculationClass + PassedInTags
+    // are the two fields exposed in the editor's "Executions" details
+    // panel; the per-modifier scoped-modifier rows and conditional GE
+    // rows stay on the BACKLOG for follow-on edit ops.
+    FGameplayEffectExecutionDefinition NewDef;
+    NewDef.CalculationClass = TSubclassOf<UGameplayEffectExecutionCalculation>(CalcClass);
+
+    // Optional passed_in_tags surface. Accepts either a JSON array of
+    // tag strings or a single tag string. Unknown tags surface a warning
+    // and skip rather than crash so the call stays best-effort idempotent.
+    TArray<FString> WarningTags;
+    int32 AddedTags = 0;
+    if (Params->HasField(TEXT("passed_in_tags")))
+    {
+        const TSharedPtr<FJsonValue> TagsVal = Params->TryGetField(TEXT("passed_in_tags"));
+        UGameplayTagsManager& TagsManager = UGameplayTagsManager::Get();
+        auto AddOneTag = [&](const FString& TagString)
+        {
+            if (TagString.IsEmpty()) return;
+            const FGameplayTag Tag = TagsManager.RequestGameplayTag(*TagString, /*bErrorIfNotFound=*/false);
+            if (!Tag.IsValid())
+            {
+                WarningTags.Add(TagString);
+                return;
+            }
+            NewDef.PassedInTags.AddTag(Tag);
+            ++AddedTags;
+        };
+        if (TagsVal.IsValid() && TagsVal->Type == EJson::Array)
+        {
+            for (const TSharedPtr<FJsonValue>& V : TagsVal->AsArray())
+            {
+                if (V.IsValid() && V->Type == EJson::String)
+                {
+                    AddOneTag(V->AsString());
+                }
+            }
+        }
+        else if (TagsVal.IsValid() && TagsVal->Type == EJson::String)
+        {
+            AddOneTag(TagsVal->AsString());
+        }
+    }
+
+    Effect->Executions.Add(NewDef);
+    const int32 NewIndex = Effect->Executions.Num() - 1;
+
+    UBlueprint* OwningBP = Cast<UBlueprint>(Asset);
+    if (OwningBP)
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsModified(OwningBP);
+        if (bCompile)
+        {
+            FKismetEditorUtilities::CompileBlueprint(OwningBP);
+        }
+    }
+    Effect->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_execution"));
+    Result->SetStringField(TEXT("path"), Asset->GetPathName());
+    Result->SetStringField(TEXT("calculation_class"), CalcClass->GetPathName());
+    Result->SetNumberField(TEXT("execution_index"), NewIndex);
+    Result->SetNumberField(TEXT("execution_count"), Effect->Executions.Num());
+    Result->SetNumberField(TEXT("tags_added"), AddedTags);
+    if (WarningTags.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> WarnJson;
+        for (const FString& T : WarningTags)
+        {
+            WarnJson.Add(MakeShared<FJsonValueString>(T));
+        }
+        Result->SetArrayField(TEXT("unknown_tags"), WarnJson);
+    }
     Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
