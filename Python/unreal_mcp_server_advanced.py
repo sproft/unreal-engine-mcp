@@ -3926,6 +3926,20 @@ def material_edit(
           "wire this texture up" call still lands. All the
           downstream knobs apply (``coordinates`` / ``connect_to``
           / ``connect_input`` / ``property`` / ``name``).
+        - "add_2d_array_sample": Texture2DArray sibling of
+          ``add_texture_sample`` / ``add_texture_sample_cube``.
+          Takes a material + a UTexture2DArray asset path. With no
+          ``parameter_name`` set the op spawns a plain
+          ``UMaterialExpressionTextureSample`` and binds the array
+          on the new node. With a ``parameter_name`` set the op
+          spawns ``UMaterialExpressionTextureSampleParameter2DArray``
+          (or falls back to
+          ``UMaterialExpressionTextureSampleParameter2D`` for a
+          UTexture2D) so the resulting material exposes a named
+          slot that Material Instances can swap. Auto-detects the
+          spawn class from the resolved asset's class so callers
+          can stay flat. Same downstream knobs as
+          ``add_texture_sample``.
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.

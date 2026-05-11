@@ -125,6 +125,30 @@
  *      attribute; optional `name` renames the spawned expression.
  *      Recompiles + saves on success unless `recompile=false` /
  *      `save=false` is passed.
+ *   - "add_2d_array_sample": Texture2DArray sibling of
+ *      `add_texture_sample` / `add_texture_sample_cube`. Takes a
+ *      material + a UTexture2DArray asset path. With no
+ *      `parameter_name` set the op spawns a plain
+ *      `UMaterialExpressionTextureSample` and binds the
+ *      Texture2DArray asset directly on the new node so the array
+ *      lands without first wiring a parameter. With a
+ *      `parameter_name` set the op spawns
+ *      `UMaterialExpressionTextureSampleParameter2DArray` (or
+ *      falls back to `UMaterialExpressionTextureSampleParameter2D`
+ *      if the resolved asset turns out to be a UTexture2D) and
+ *      lands the FName on the parent
+ *      `UMaterialExpressionTextureSampleParameter::ParameterName`
+ *      slot so the resulting material exposes a named array slot
+ *      that calling Material Instances can swap. Auto-detects the
+ *      spawn class from the resolved asset's IsA<UTexture2DArray>
+ *      so callers can stay flat. Same downstream knobs as
+ *      `add_texture_sample`: optional `coordinates` wires the UV
+ *      input; optional `connect_to` / `connect_input` / `property`
+ *      drops the RGB output downstream; optional `name` renames
+ *      the spawned expression; optional `properties` writes
+ *      additional UPROPERTY values through `ImportText_InContainer`.
+ *      Recompiles + saves on success unless `recompile=false` /
+ *      `save=false` is passed.
  *   - "set_attribute_blendable": flips a per-attribute override toggle
  *      on a UMaterialInstanceConstant's
  *      `FMaterialInstanceBasePropertyOverrides` struct. The
@@ -191,4 +215,5 @@ private:
 
     TSharedPtr<FJsonObject> AddTextureSample(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddTextureSampleCube(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddTexture2DArraySample(const TSharedPtr<FJsonObject>& Params);
 };

@@ -43,9 +43,12 @@
 #include "Materials/MaterialExpressionTextureObjectParameter.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureCube.h"
+#include "Engine/Texture2DArray.h"
 #include "Materials/MaterialExpressionTextureBase.h"
 #include "Materials/MaterialExpressionTextureSample.h"
+#include "Materials/MaterialExpressionTextureSampleParameter.h"
 #include "Materials/MaterialExpressionTextureSampleParameter2D.h"
+#include "Materials/MaterialExpressionTextureSampleParameter2DArray.h"
 #include "Materials/MaterialExpressionTextureSampleParameterCube.h"
 #include "Materials/MaterialExpressionTime.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
@@ -495,9 +498,15 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddTextureSampleCube(Params);
     }
+    if (Operation == TEXT("add_2d_array_sample") || Operation == TEXT("add_texture_2d_array_sample")
+        || Operation == TEXT("add_texture_array_sample") || Operation == TEXT("texture_2d_array_sample")
+        || Operation == TEXT("add_array_sample") || Operation == TEXT("add_texture_2darray"))
+    {
+        return AddTexture2DArraySample(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -2970,6 +2979,327 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddTextureSampleCube(const 
     ResultObj->SetStringField(TEXT("expression_class"), ExpressionClass->GetName());
     ResultObj->SetBoolField(TEXT("is_cube_texture"), bIsCubeTexture);
     ResultObj->SetBoolField(TEXT("fell_back_to_2d"), !bIsCubeTexture);
+    ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
+    ResultObj->SetNumberField(TEXT("sampler_type"), static_cast<int32>(TextureBase->SamplerType.GetValue()));
+    ResultObj->SetBoolField(TEXT("coordinates_wired"), bCoordinatesWired);
+    ResultObj->SetNumberField(TEXT("properties_applied"), PropertiesApplied);
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& S : PropertiesSkipped) { Arr.Add(MakeShared<FJsonValueString>(S)); }
+        ResultObj->SetArrayField(TEXT("properties_skipped"), Arr);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_property"), bConnectedToProperty);
+    if (bConnectedToProperty)
+    {
+        ResultObj->SetStringField(TEXT("property"), PropertyConnected);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_expression"), bConnectedToExpression);
+    if (bConnectedToExpression)
+    {
+        ResultObj->SetStringField(TEXT("connect_to"), ExpressionConnected);
+    }
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddTexture2DArraySample(const TSharedPtr<FJsonObject>& Params)
+{
+    // Resolve the host material.
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+    UObject* MaterialAsset = UEditorAssetLibrary::LoadAsset(MaterialPath);
+    UMaterial* Material = Cast<UMaterial>(MaterialAsset);
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial"), *MaterialPath));
+    }
+
+    // Resolve the texture asset. The helper accepts any UTexture
+    // subclass, so a Texture2DArray path lands as a UTexture pointer
+    // and we narrow against ::IsA below.
+    FString TextureToken;
+    if (!Params->TryGetStringField(TEXT("texture"), TextureToken)
+        && !Params->TryGetStringField(TEXT("texture_path"), TextureToken)
+        && !Params->TryGetStringField(TEXT("texture_asset"), TextureToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'texture' parameter (/Game/... path or unique short name)"));
+    }
+    UTexture* Texture = MaterialEdit_ResolveTexture(TextureToken);
+    if (!Texture)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UTexture '%s' (pass a /Game/... path or a unique short name)"), *TextureToken));
+    }
+
+    // Optional parameter name. When set, the spawned expression is the
+    // texture-sample-parameter variant so the resulting material exposes
+    // a named slot the calling Material Instance can swap. When unset,
+    // we spawn a plain UMaterialExpressionTextureSample and bind the
+    // texture-array asset directly on the new node so a fresh sample
+    // node renders without first wiring a parameter.
+    FString ParameterName;
+    Params->TryGetStringField(TEXT("parameter_name"), ParameterName);
+    if (ParameterName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("parameter"), ParameterName);
+    }
+    const bool bAsParameter = !ParameterName.IsEmpty();
+
+    // Auto-detect the right spawn class from the resolved asset class so
+    // callers can stay flat. Texture2DArray + parameter name asks for
+    // the TextureSampleParameter2DArray slot; Texture2DArray on its own
+    // asks for the plain TextureSample so the engine wires the array
+    // through the standard sampler. If the caller hands us a UTexture2D
+    // instead we fall back to the 2D parameter path so a generic
+    // "wire this texture up" call still lands (mirrors the cube
+    // variant's fallback pattern).
+    const bool bIsTextureArray = Texture->IsA<UTexture2DArray>();
+    UClass* ExpressionClass = nullptr;
+    if (bAsParameter)
+    {
+        ExpressionClass = bIsTextureArray
+            ? static_cast<UClass*>(UMaterialExpressionTextureSampleParameter2DArray::StaticClass())
+            : static_cast<UClass*>(UMaterialExpressionTextureSampleParameter2D::StaticClass());
+    }
+    else
+    {
+        ExpressionClass = UMaterialExpressionTextureSample::StaticClass();
+    }
+
+    // Position cascade through the same helper add_expression /
+    // add_function_call / add_texture_sample use.
+    int32 PosX = 0;
+    int32 PosY = 0;
+    bool bExplicitPos = false;
+    if (Params->HasField(TEXT("position")))
+    {
+        const TSharedPtr<FJsonValue> PosVal = Params->TryGetField(TEXT("position"));
+        if (PosVal.IsValid() && PosVal->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = PosVal->AsArray();
+            if (Arr.Num() >= 2)
+            {
+                PosX = static_cast<int32>(Arr[0]->AsNumber());
+                PosY = static_cast<int32>(Arr[1]->AsNumber());
+                bExplicitPos = true;
+            }
+        }
+        else if (PosVal.IsValid() && PosVal->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject> PosObj = PosVal->AsObject();
+            double X = 0.0;
+            double Y = 0.0;
+            if (PosObj.IsValid()
+                && (PosObj->TryGetNumberField(TEXT("x"), X) || PosObj->TryGetNumberField(TEXT("X"), X))
+                && (PosObj->TryGetNumberField(TEXT("y"), Y) || PosObj->TryGetNumberField(TEXT("Y"), Y)))
+            {
+                PosX = static_cast<int32>(X);
+                PosY = static_cast<int32>(Y);
+                bExplicitPos = true;
+            }
+        }
+    }
+    if (!bExplicitPos)
+    {
+        DeriveDefaultPosition(Material, PosX, PosY);
+    }
+
+    UMaterialExpression* NewExpr = UMaterialEditingLibrary::CreateMaterialExpression(
+        Material, ExpressionClass, PosX, PosY);
+    if (!NewExpr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("CreateMaterialExpression failed for %s"), *ExpressionClass->GetName()));
+    }
+
+    // UMaterialExpressionTextureBase is the shared base for plain
+    // TextureSample and every TextureSampleParameter variant, so the
+    // `Texture` UPROPERTY plus AutoSetSampleType() apply through it
+    // regardless of which spawn class we chose above.
+    UMaterialExpressionTextureBase* TextureBase = Cast<UMaterialExpressionTextureBase>(NewExpr);
+    if (!TextureBase)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("CreateMaterialExpression returned a non-texture-base expression"));
+    }
+    TextureBase->Texture = Texture;
+    TextureBase->AutoSetSampleType();
+
+    // If we spawned the parameter variant, land the FName on the shared
+    // ParameterName UPROPERTY (defined on the parent
+    // UMaterialExpressionTextureSampleParameter). Casting through the
+    // immediate parent covers the 2DArray slot and the 2D fallback case
+    // with a single write.
+    if (bAsParameter)
+    {
+        if (UMaterialExpressionTextureSampleParameter* ParamExpr = Cast<UMaterialExpressionTextureSampleParameter>(NewExpr))
+        {
+            ParamExpr->ParameterName = FName(*ParameterName);
+        }
+    }
+
+    // Optional `coordinates` knob wires a named expression's first
+    // output into the new sample's `Coordinates` input pin. Same
+    // pattern as add_texture_sample / add_texture_sample_cube.
+    bool bCoordinatesWired = false;
+    FString CoordinatesToken;
+    if (Params->TryGetStringField(TEXT("coordinates"), CoordinatesToken)
+        || Params->TryGetStringField(TEXT("uv"), CoordinatesToken)
+        || Params->TryGetStringField(TEXT("uvs"), CoordinatesToken))
+    {
+        if (!CoordinatesToken.IsEmpty())
+        {
+            UMaterialExpression* CoordExpr = FindExpressionByName(Material, CoordinatesToken);
+            if (!CoordExpr)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("coordinates expression '%s' not found on material"), *CoordinatesToken));
+            }
+            FString CoordOutputPin;
+            Params->TryGetStringField(TEXT("coordinates_output"), CoordOutputPin);
+            if (!UMaterialEditingLibrary::ConnectMaterialExpressions(CoordExpr, CoordOutputPin, NewExpr, TEXT("Coordinates")))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("ConnectMaterialExpressions failed wiring '%s' -> %s 'Coordinates'"),
+                        *CoordinatesToken, *ExpressionClass->GetName()));
+            }
+            bCoordinatesWired = true;
+        }
+    }
+
+    // Optional rename so the spawned node picks up a designer-readable
+    // FName, mirroring add_expression / add_texture_sample.
+    FString DesiredName;
+    if (Params->TryGetStringField(TEXT("name"), DesiredName) && !DesiredName.IsEmpty())
+    {
+        NewExpr->Rename(*DesiredName, nullptr, REN_DontCreateRedirectors);
+    }
+
+    // Optional flat properties dict mirrors add_expression so callers
+    // can populate `Group` / `SortPriority` / etc. on the parameter
+    // variant in the same call.
+    int32 PropertiesApplied = 0;
+    TArray<FString> PropertiesSkipped;
+    {
+        const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+        if (Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && PropsObj->IsValid())
+        {
+            for (const auto& KV : (*PropsObj)->Values)
+            {
+                FProperty* Prop = NewExpr->GetClass()->FindPropertyByName(FName(*KV.Key));
+                if (!Prop)
+                {
+                    PropertiesSkipped.Add(KV.Key);
+                    continue;
+                }
+                FString Buf;
+                if (KV.Value.IsValid())
+                {
+                    if (!KV.Value->TryGetString(Buf))
+                    {
+                        TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer
+                            = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Buf);
+                        FJsonSerializer::Serialize(KV.Value.ToSharedRef(), TEXT(""), Writer);
+                    }
+                }
+                const TCHAR* P = *Buf;
+                if (Prop->ImportText_InContainer(P, NewExpr, NewExpr, PPF_None))
+                {
+                    ++PropertiesApplied;
+                }
+                else
+                {
+                    PropertiesSkipped.Add(KV.Key);
+                }
+            }
+        }
+    }
+
+    // Optional one-shot connect to a material attribute / another
+    // expression input, same shape as add_texture_sample.
+    bool bConnectedToProperty = false;
+    bool bConnectedToExpression = false;
+    FString PropertyConnected;
+    FString ExpressionConnected;
+
+    FString PropertyToken;
+    if (Params->TryGetStringField(TEXT("property"), PropertyToken)
+        || Params->TryGetStringField(TEXT("connect_property"), PropertyToken))
+    {
+        EMaterialProperty MaterialProperty;
+        if (!TryParseMaterialProperty(PropertyToken, MaterialProperty))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unknown material property token '%s'. Use BaseColor, Metallic, Roughness, EmissiveColor, etc."), *PropertyToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialProperty(NewExpr, FromOutput, MaterialProperty))
+        {
+            bConnectedToProperty = true;
+            PropertyConnected = PropertyToken;
+        }
+    }
+
+    FString ConnectToToken;
+    FString ConnectInputToken;
+    if (Params->TryGetStringField(TEXT("connect_to"), ConnectToToken)
+        && !ConnectToToken.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("connect_input"), ConnectInputToken);
+        UMaterialExpression* ToExpr = FindExpressionByName(Material, ConnectToToken);
+        if (!ToExpr)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("connect_to expression '%s' not found on material"), *ConnectToToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialExpressions(NewExpr, FromOutput, ToExpr, ConnectInputToken))
+        {
+            bConnectedToExpression = true;
+            ExpressionConnected = ToExpr->GetName();
+        }
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_2d_array_sample"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetStringField(TEXT("texture"), Texture->GetPathName());
+    ResultObj->SetStringField(TEXT("texture_class"), Texture->GetClass()->GetName());
+    ResultObj->SetStringField(TEXT("expression_class"), ExpressionClass->GetName());
+    ResultObj->SetBoolField(TEXT("is_texture_2d_array"), bIsTextureArray);
+    ResultObj->SetBoolField(TEXT("fell_back_to_2d"), !bIsTextureArray && bAsParameter);
+    ResultObj->SetBoolField(TEXT("as_parameter"), bAsParameter);
+    if (bAsParameter)
+    {
+        ResultObj->SetStringField(TEXT("parameter_name"), ParameterName);
+    }
     ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
     ResultObj->SetNumberField(TEXT("sampler_type"), static_cast<int32>(TextureBase->SamplerType.GetValue()));
     ResultObj->SetBoolField(TEXT("coordinates_wired"), bCoordinatesWired);
