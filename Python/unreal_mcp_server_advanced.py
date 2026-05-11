@@ -6956,6 +6956,8 @@ def sequencer_edit(
     force_new_track: Optional[bool] = None,
     keyframes: Optional[List[Any]] = None,
     interpolation: Optional[str] = None,
+    channels: Optional[List[str]] = None,
+    mask: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over a ULevelSequence asset.
@@ -7009,6 +7011,21 @@ def sequencer_edit(
           MovieScene's tick resolution. Pass
           ``force_new_track=True`` to bypass the reuse-existing
           path so each call spawns a fresh track.
+        - ``set_transform_channel_mask``: writes the
+          ``FMovieSceneTransformMask`` on a binding's
+          ``UMovieScene3DTransformSection`` through the documented
+          ``UMovieScene3DTransformSection::SetMask``. Resolves the
+          binding through ``binding`` GUID or ``actor`` /
+          ``possessable`` name, indexes into the track's
+          ``GetAllSections()`` at ``section_index`` (default 0),
+          and writes either a ``channels`` list of channel tokens
+          (``translation_x`` / ``rotation_y`` / ``scale_z`` /
+          ``translation`` / ``rotation`` / ``scale`` /
+          ``all_transform`` / ``weight`` / ``all`` / ``none``,
+          case-insensitive) or a raw ``mask`` integer matching the
+          EMovieSceneTransformChannel bit layout. Useful for
+          layered camera animations where a child section drives
+          only Translation while a parent track drives Rotation.
 
     Args:
         sequence: For inspect / add_possessable / add_track /
@@ -7107,6 +7124,10 @@ def sequencer_edit(
         params["keyframes"] = keyframes
     if interpolation is not None:
         params["interpolation"] = interpolation
+    if channels is not None:
+        params["channels"] = channels
+    if mask is not None:
+        params["mask"] = mask
 
     try:
         response = unreal.send_command("sequencer_edit", params)

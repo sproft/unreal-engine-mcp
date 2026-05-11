@@ -414,6 +414,12 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCommand(const FStrin
     {
         return HandleAddTransformSectionKeys(Params);
     }
+    if (Op == TEXT("set_transform_channel_mask")
+        || Op == TEXT("set_transform_mask")
+        || Op == TEXT("set_channel_mask"))
+    {
+        return HandleSetTransformChannelMask(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("sequencer_edit: unsupported op '%s'"), *Op));
 }
@@ -1815,6 +1821,313 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddTransformSectionK
             KindArr.Add(MakeShared<FJsonValueString>(Kind));
         }
         Result->SetArrayField(TEXT("channel_kinds"), KindArr);
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+namespace
+{
+    /** Resolve a token like `translation_x` / `rotation` / `scale_z` /
+     *  `all_transform` to the matching `EMovieSceneTransformChannel`
+     *  bit. Returns false on an unknown token. Normalises `_` / `.`
+     *  out so callers can spell the token either way. */
+    bool TransformMask_TryParseChannelToken(const FString& InToken, EMovieSceneTransformChannel& OutChannel)
+    {
+        FString T = InToken.ToLower();
+        T.ReplaceInline(TEXT("_"), TEXT(""), ESearchCase::CaseSensitive);
+        T.ReplaceInline(TEXT("."), TEXT(""), ESearchCase::CaseSensitive);
+        T.ReplaceInline(TEXT(" "), TEXT(""), ESearchCase::CaseSensitive);
+        if (T == TEXT("none") || T == TEXT("0"))
+        {
+            OutChannel = EMovieSceneTransformChannel::None;
+            return true;
+        }
+        if (T == TEXT("translationx") || T == TEXT("locationx") || T == TEXT("tx"))
+        {
+            OutChannel = EMovieSceneTransformChannel::TranslationX;
+            return true;
+        }
+        if (T == TEXT("translationy") || T == TEXT("locationy") || T == TEXT("ty"))
+        {
+            OutChannel = EMovieSceneTransformChannel::TranslationY;
+            return true;
+        }
+        if (T == TEXT("translationz") || T == TEXT("locationz") || T == TEXT("tz"))
+        {
+            OutChannel = EMovieSceneTransformChannel::TranslationZ;
+            return true;
+        }
+        if (T == TEXT("translation") || T == TEXT("location") || T == TEXT("position"))
+        {
+            OutChannel = EMovieSceneTransformChannel::Translation;
+            return true;
+        }
+        if (T == TEXT("rotationx") || T == TEXT("rotx") || T == TEXT("roll"))
+        {
+            OutChannel = EMovieSceneTransformChannel::RotationX;
+            return true;
+        }
+        if (T == TEXT("rotationy") || T == TEXT("roty") || T == TEXT("pitch"))
+        {
+            OutChannel = EMovieSceneTransformChannel::RotationY;
+            return true;
+        }
+        if (T == TEXT("rotationz") || T == TEXT("rotz") || T == TEXT("yaw"))
+        {
+            OutChannel = EMovieSceneTransformChannel::RotationZ;
+            return true;
+        }
+        if (T == TEXT("rotation"))
+        {
+            OutChannel = EMovieSceneTransformChannel::Rotation;
+            return true;
+        }
+        if (T == TEXT("scalex") || T == TEXT("sx"))
+        {
+            OutChannel = EMovieSceneTransformChannel::ScaleX;
+            return true;
+        }
+        if (T == TEXT("scaley") || T == TEXT("sy"))
+        {
+            OutChannel = EMovieSceneTransformChannel::ScaleY;
+            return true;
+        }
+        if (T == TEXT("scalez") || T == TEXT("sz"))
+        {
+            OutChannel = EMovieSceneTransformChannel::ScaleZ;
+            return true;
+        }
+        if (T == TEXT("scale"))
+        {
+            OutChannel = EMovieSceneTransformChannel::Scale;
+            return true;
+        }
+        if (T == TEXT("alltransform") || T == TEXT("transform"))
+        {
+            OutChannel = EMovieSceneTransformChannel::AllTransform;
+            return true;
+        }
+        if (T == TEXT("weight"))
+        {
+            OutChannel = EMovieSceneTransformChannel::Weight;
+            return true;
+        }
+        if (T == TEXT("all"))
+        {
+            OutChannel = EMovieSceneTransformChannel::All;
+            return true;
+        }
+        return false;
+    }
+
+    /** Decode the mask bitfield back into an FString array of the
+     *  canonical token spellings so the response echoes a stable
+     *  picture of what the section now drives. We emit individual
+     *  axis bits, not the group rollups, so a caller sees exactly
+     *  which channels animate. */
+    TArray<FString> TransformMask_TokenizeMask(EMovieSceneTransformChannel Mask)
+    {
+        TArray<FString> Out;
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::TranslationX)) Out.Add(TEXT("TranslationX"));
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::TranslationY)) Out.Add(TEXT("TranslationY"));
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::TranslationZ)) Out.Add(TEXT("TranslationZ"));
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::RotationX))    Out.Add(TEXT("RotationX"));
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::RotationY))    Out.Add(TEXT("RotationY"));
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::RotationZ))    Out.Add(TEXT("RotationZ"));
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::ScaleX))       Out.Add(TEXT("ScaleX"));
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::ScaleY))       Out.Add(TEXT("ScaleY"));
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::ScaleZ))       Out.Add(TEXT("ScaleZ"));
+        if (EnumHasAllFlags(Mask, EMovieSceneTransformChannel::Weight))       Out.Add(TEXT("Weight"));
+        return Out;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleSetTransformChannelMask(const TSharedPtr<FJsonObject>& Params)
+{
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    UMovieSceneSequence* Sequence = Cast<UMovieSceneSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMovieSceneSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    // Resolve the binding. Transform tracks always live under a
+    // binding; the engine refuses a master 3D transform track.
+    FGuid BindingGuid;
+    FString BindingGuidString;
+    if (Params->TryGetStringField(TEXT("binding"), BindingGuidString)
+        || Params->TryGetStringField(TEXT("binding_guid"), BindingGuidString))
+    {
+        if (!FGuid::Parse(BindingGuidString, BindingGuid))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Invalid binding GUID '%s'"), *BindingGuidString));
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        FString PossessableName;
+        if (Params->TryGetStringField(TEXT("possessable"), PossessableName)
+            || Params->TryGetStringField(TEXT("actor"), PossessableName))
+        {
+            BindingGuid = FindBindingByName(MovieScene, PossessableName);
+            if (!BindingGuid.IsValid())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("No binding matching '%s' on sequence '%s'"),
+                        *PossessableName, *Sequence->GetName()));
+            }
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing target binding ('binding' GUID or 'actor' / 'possessable' name)"));
+    }
+
+    UMovieSceneTrack* Existing = MovieScene->FindTrack(UMovieScene3DTransformTrack::StaticClass(), BindingGuid);
+    UMovieScene3DTransformTrack* TransformTrack = Cast<UMovieScene3DTransformTrack>(Existing);
+    if (!TransformTrack)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No UMovieScene3DTransformTrack on binding %s"), *BindingGuid.ToString()));
+    }
+
+    // section_index defaults to 0 so the typical "set the mask on the
+    // only section" path is a single arg. We index into GetAllSections()
+    // the same way `move_section` does.
+    int32 SectionIndex = 0;
+    Params->TryGetNumberField(TEXT("section_index"), SectionIndex);
+    const TArray<UMovieSceneSection*>& Sections = TransformTrack->GetAllSections();
+    if (SectionIndex < 0 || SectionIndex >= Sections.Num())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'section_index' %d out of range [0, %d) for the transform track on binding %s"),
+                SectionIndex, Sections.Num(), *BindingGuid.ToString()));
+    }
+    UMovieScene3DTransformSection* Section = Cast<UMovieScene3DTransformSection>(Sections[SectionIndex]);
+    if (!Section)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Section at index %d on the transform track is not a UMovieScene3DTransformSection"),
+                SectionIndex));
+    }
+
+    // Parse the mask. Either pass a raw integer `mask` (EMovieSceneTransformChannel
+    // bit layout) or a flat `channels` list of token names. The token
+    // path resolves the canonical "Translation / Rotation / Scale" rollups
+    // plus the per-axis bits.
+    uint32 MaskBits = 0;
+    bool bMaskSourced = false;
+    TArray<FString> UnknownTokens;
+    if (Params->HasField(TEXT("mask")))
+    {
+        double Raw = 0.0;
+        if (Params->TryGetNumberField(TEXT("mask"), Raw))
+        {
+            // The bit layout maxes out at 0x3FF (All); larger inputs
+            // silently lose the extra bits when SetMask runs. We do not
+            // gate that here so a future engine addition stays forwards-
+            // compatible.
+            MaskBits = static_cast<uint32>(Raw);
+            bMaskSourced = true;
+        }
+    }
+    if (!bMaskSourced)
+    {
+        const TArray<TSharedPtr<FJsonValue>>* ChannelsArr = nullptr;
+        if (Params->TryGetArrayField(TEXT("channels"), ChannelsArr)
+            && ChannelsArr)
+        {
+            for (const TSharedPtr<FJsonValue>& V : *ChannelsArr)
+            {
+                FString Token;
+                if (!V.IsValid() || !V->TryGetString(Token))
+                {
+                    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                        TEXT("'channels' entry is not a string token"));
+                }
+                EMovieSceneTransformChannel Channel = EMovieSceneTransformChannel::None;
+                if (!TransformMask_TryParseChannelToken(Token, Channel))
+                {
+                    UnknownTokens.Add(Token);
+                    continue;
+                }
+                MaskBits |= static_cast<uint32>(Channel);
+            }
+            bMaskSourced = true;
+        }
+    }
+    if (!bMaskSourced)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing mask source: pass either 'mask' (integer) or 'channels' (array of channel tokens)"));
+    }
+    if (UnknownTokens.Num() > 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown channel token(s) in 'channels': %s"),
+                *FString::Join(UnknownTokens, TEXT(", "))));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Capture the previous mask so the response can mirror the
+    // before / after state for the caller.
+    const FMovieSceneTransformMask PreviousMask = Section->GetMask();
+    const uint32 PreviousBits = static_cast<uint32>(PreviousMask.GetChannels());
+
+    // SetMask rebuilds the channel proxy the next time it is asked for
+    // (ChannelProxy = nullptr inside the engine implementation), so the
+    // editor's channel list refreshes on the next inspect.
+    const FMovieSceneTransformMask NewMask(static_cast<EMovieSceneTransformChannel>(MaskBits));
+    Section->Modify();
+    Section->SetMask(NewMask);
+    Section->MarkPackageDirty();
+    Sequence->MarkPackageDirty();
+
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("set_transform_channel_mask"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());
+    Result->SetStringField(TEXT("track_name"), TransformTrack->GetFName().ToString());
+    Result->SetStringField(TEXT("track_class"), TransformTrack->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class"), Section->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class_path"), Section->GetClass()->GetPathName());
+    Result->SetNumberField(TEXT("section_index"), SectionIndex);
+    Result->SetNumberField(TEXT("mask"), MaskBits);
+    Result->SetNumberField(TEXT("previous_mask"), PreviousBits);
+    {
+        const TArray<FString> Tokens = TransformMask_TokenizeMask(NewMask.GetChannels());
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& T : Tokens) { Arr.Add(MakeShared<FJsonValueString>(T)); }
+        Result->SetArrayField(TEXT("channels"), Arr);
+    }
+    {
+        const TArray<FString> Tokens = TransformMask_TokenizeMask(PreviousMask.GetChannels());
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& T : Tokens) { Arr.Add(MakeShared<FJsonValueString>(T)); }
+        Result->SetArrayField(TEXT("previous_channels"), Arr);
     }
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;

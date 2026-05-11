@@ -40,7 +40,23 @@
  *     5.4+ FMovieSceneDoubleChannel storage shape). Each `keyframes`
  *     entry takes `{time_frames, location?, rotation?, scale?}`. The
  *     section's range expands to cover every key time, so the typical
- *     "lay down a camera fly-through" workflow is one call. Resolves the target `USoundBase` (any
+ *     "lay down a camera fly-through" workflow is one call.
+ *   - `set_transform_channel_mask`: writes the `FMovieSceneTransformMask`
+ *     on an existing `UMovieScene3DTransformSection` through the
+ *     documented `UMovieScene3DTransformSection::SetMask` (MOVIESCENETRACKS_API).
+ *     Resolves the target binding + transform track + section the same
+ *     way `add_transform_section_keys` does (`binding` GUID or
+ *     `actor` / `possessable` name; `section_index` defaults to the
+ *     first section on the track). The mask is supplied either as a
+ *     `channels` flat list of `EMovieSceneTransformChannel` token
+ *     names (`translation_x` / `rotation_y` / `scale_z` / `translation`
+ *     / `rotation` / `scale` / `all_transform` / `weight` / `all` /
+ *     `none`, case-insensitive with snake / camel and `_` / `.`
+ *     normalisation) or a raw integer `mask` matching the
+ *     EMovieSceneTransformChannel bit layout (TranslationX = 0x001 ...
+ *     ScaleZ = 0x100 plus Weight = 0x200). Useful for layered camera
+ *     animations where a child section drives only Translation while
+ *     a parent track drives Rotation. Resolves the target `USoundBase` (any
  *     USoundWave / USoundCue / USoundClass derived from the
  *     USoundBase shape; accepts a `/Game/...` path or short name),
  *     finds or creates the track (binding-scoped when `binding` /
@@ -156,4 +172,5 @@ private:
     TSharedPtr<FJsonObject> HandleMoveSection(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddAudioTrack(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddTransformSectionKeys(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetTransformChannelMask(const TSharedPtr<FJsonObject>& Params);
 };
