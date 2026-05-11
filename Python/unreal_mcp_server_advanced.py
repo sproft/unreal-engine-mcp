@@ -3041,6 +3041,8 @@ def widget_edit(
     event: Optional[str] = None,
     handler_function: Optional[str] = None,
     compile: Optional[bool] = None,
+    style: Optional[Dict[str, Any]] = None,
+    style_field: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3143,6 +3145,19 @@ def widget_edit(
           entry point lands on the caller's label.
           ``FindBoundEventForComponent`` is run first so a second
           call returns the existing node rather than doubling up.
+        - "set_widget_style": apply a flat property dict against a
+          child widget's style struct field through reflection.
+          Defaults to the ``WidgetStyle`` UPROPERTY (covers
+          UButton / UProgressBar / UScrollBar / UScrollBox /
+          USlider / UCheckBox / UEditableText / UEditableTextBox /
+          UComboBox etc.); pass ``style_field`` to target a
+          secondary slot (e.g. ``WidgetBarStyle`` on a UScrollBox).
+          Each entry in ``style`` writes through
+          ``FProperty::ImportText_Direct`` against the field on the
+          resolved FXyzStyle struct. Failed entries surface under
+          the response's ``skipped`` array with a reason. After the
+          writes ``PostEditChangeProperty`` fires on the widget so
+          the UMG editor preview refreshes.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3277,6 +3292,10 @@ def widget_edit(
         params["handler_function"] = handler_function
     if compile is not None:
         params["compile"] = compile
+    if style is not None:
+        params["style"] = style
+    if style_field is not None:
+        params["style_field"] = style_field
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite

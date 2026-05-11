@@ -99,6 +99,22 @@
  *      `handler_function` runs `FBlueprintEditorUtils::RenameNode`
  *      on the spawned event so the K2Node's CustomFunctionName
  *      lands on the caller's chosen handler.
+ *   - "set_widget_style": apply a flat property dict to a target
+ *      child widget's style struct field through reflection.
+ *      Defaults to the `WidgetStyle` UPROPERTY (UButton /
+ *      UProgressBar / UScrollBar / UScrollBox / USlider / UCheckBox
+ *      / UEditableText / UEditableTextBox / UComboBox / etc.); an
+ *      optional `style_field` knob lets the caller target other
+ *      style slots (`WidgetBarStyle` on a UScrollBox, etc.). Each
+ *      entry in `style` writes through `FProperty::ImportText_Direct`
+ *      against the field on the resolved style struct so designers
+ *      can rebrand a button's `Normal` brush, a progress bar's
+ *      `FillImage`, or a scrollbar's `Thumb`, without spelling out
+ *      the struct surface by hand. Failed entries surface under
+ *      the response's `skipped` array with a reason. After the
+ *      writes `PostEditChangeProperty` fires on the widget so the
+ *      UMG editor's preview refreshes and the variable's compiled
+ *      default propagates.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - FKismetEditorUtilities::CreateBlueprint for asset creation
@@ -134,4 +150,5 @@ private:
     TSharedPtr<FJsonObject> AddPropertyBinding(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetBindingConversion(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddEventBinding(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetWidgetStyle(const TSharedPtr<FJsonObject>& Params);
 };

@@ -338,9 +338,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return AddEventBinding(Params);
     }
+    if (Operation == TEXT("set_widget_style") || Operation == TEXT("set_style")
+        || Operation == TEXT("apply_widget_style") || Operation == TEXT("apply_style"))
+    {
+        return SetWidgetStyle(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -2548,6 +2553,190 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddEventBinding(const TShared
     ResultObj->SetNumberField(TEXT("node_position_y"), EventNode->NodePosY);
     ResultObj->SetBoolField(TEXT("reused_existing"), bReused);
     ResultObj->SetBoolField(TEXT("compiled"), bCompile && !bReused);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWidgetStyle(const TSharedPtr<FJsonObject>& Params)
+{
+    // Write a flat property dict against a child widget's style
+    // struct field. Defaults to the WidgetStyle UPROPERTY (UButton
+    // / UProgressBar / UScrollBar / UScrollBox / USlider / UCheckBox
+    // / UEditableText etc. all expose a single FXyzStyle field
+    // named WidgetStyle), with an optional style_field knob for the
+    // secondary slots (WidgetBarStyle on a UScrollBox, etc.).
+    // Reflection-driven so the surface picks up any future UMG
+    // widget that adds a new style struct without us spelling out
+    // its fields.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target_widget"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget' parameter (target child widget FName)"));
+    }
+    UWidget* TargetWidget = nullptr;
+    if (UWidgetTree* Tree = WBP->WidgetTree)
+    {
+        Tree->ForEachWidget([&](UWidget* W)
+        {
+            if (TargetWidget) return;
+            if (W && W->GetFName() == FName(*WidgetNameStr))
+            {
+                TargetWidget = W;
+            }
+        });
+    }
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    // Pick the style field on the widget's class. The default
+    // (WidgetStyle) covers the canonical UMG widgets; the
+    // style_field knob lets a caller target WidgetBarStyle on a
+    // UScrollBox, or any future field of FXyzStyle shape that the
+    // engine grows.
+    FString StyleFieldName;
+    Params->TryGetStringField(TEXT("style_field"), StyleFieldName);
+    if (StyleFieldName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("field"), StyleFieldName);
+    }
+    if (StyleFieldName.IsEmpty())
+    {
+        StyleFieldName = TEXT("WidgetStyle");
+    }
+    UClass* WidgetClass = TargetWidget->GetClass();
+    FStructProperty* StyleProp = FindFProperty<FStructProperty>(WidgetClass, *StyleFieldName);
+    if (!StyleProp)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Widget '%s' (%s) has no FStructProperty named '%s' (pass 'style_field' to target a non-default style slot)"),
+                *WidgetNameStr, *WidgetClass->GetPathName(), *StyleFieldName));
+    }
+    void* StyleContainer = StyleProp->ContainerPtrToValuePtr<void>(TargetWidget);
+    UScriptStruct* StyleStruct = StyleProp->Struct;
+    if (!StyleContainer || !StyleStruct)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve style struct on '%s' / '%s'"),
+                *WidgetNameStr, *StyleFieldName));
+    }
+
+    // Pull the property dict. Accepts both `style` (designer-side
+    // shape) and `properties` (the dict shape every other Sproft
+    // edit op accepts) so the caller can reuse one keyword across
+    // tools without remembering which slot wants which name.
+    const TSharedPtr<FJsonObject>* StyleObj = nullptr;
+    if (!Params->TryGetObjectField(TEXT("style"), StyleObj)
+        && !Params->TryGetObjectField(TEXT("properties"), StyleObj)
+        && !Params->TryGetObjectField(TEXT("style_properties"), StyleObj)
+        && !Params->TryGetObjectField(TEXT("values"), StyleObj))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'style' parameter (flat property dict to apply against the style struct)"));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> AppliedRows;
+    TArray<TSharedPtr<FJsonValue>> SkippedRows;
+    int32 AppliedCount = 0;
+    int32 SkippedCount = 0;
+
+    if (StyleObj && (*StyleObj).IsValid())
+    {
+        for (const auto& KV : (*StyleObj)->Values)
+        {
+            const FString& Key = KV.Key;
+            const TSharedPtr<FJsonValue>& Val = KV.Value;
+            FProperty* FieldProp = StyleStruct->FindPropertyByName(*Key);
+            if (!FieldProp)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), Key);
+                Skip->SetStringField(TEXT("reason"), TEXT("not_a_uproperty"));
+                SkippedRows.Add(MakeShared<FJsonValueObject>(Skip));
+                ++SkippedCount;
+                continue;
+            }
+            const FString ImportTextValue = WidgetEdit_JsonValueToImportText(Val);
+            void* FieldAddr = FieldProp->ContainerPtrToValuePtr<void>(StyleContainer);
+            FOutputDeviceNull NullDevice;
+            const TCHAR* ImportPtr = *ImportTextValue;
+            const bool bImported = FieldProp->ImportText_Direct(ImportPtr, FieldAddr, TargetWidget,
+                PPF_None, &NullDevice) != nullptr;
+            if (!bImported)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), Key);
+                Skip->SetStringField(TEXT("reason"), TEXT("import_text_failed"));
+                Skip->SetStringField(TEXT("input"), ImportTextValue);
+                Skip->SetStringField(TEXT("property_class"), FieldProp->GetClass()->GetName());
+                SkippedRows.Add(MakeShared<FJsonValueObject>(Skip));
+                ++SkippedCount;
+                continue;
+            }
+            TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+            Applied->SetStringField(TEXT("name"), Key);
+            Applied->SetStringField(TEXT("cpp_type"), FieldProp->GetCPPType());
+            AppliedRows.Add(MakeShared<FJsonValueObject>(Applied));
+            ++AppliedCount;
+        }
+    }
+
+    // PostEditChangeProperty on the widget so the UMG editor's
+    // preview tree refreshes (button style swap, etc.) and any
+    // bound widget animations / MVVM compiled defaults pick up the
+    // new style on the next compile. Synthesise the event against
+    // the StyleProp itself: the UMG details panel takes the same
+    // path on its slate brush picker.
+    FPropertyChangedEvent PropChanged(StyleProp, EPropertyChangeType::ValueSet);
+    TargetWidget->PostEditChangeProperty(PropChanged);
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+    bool bCompile = false;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_widget_style"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("widget"), WidgetNameStr);
+    ResultObj->SetStringField(TEXT("widget_class"), WidgetClass->GetPathName());
+    ResultObj->SetStringField(TEXT("style_field"), StyleFieldName);
+    ResultObj->SetStringField(TEXT("style_struct"), StyleStruct->GetPathName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedRows);
+    ResultObj->SetArrayField(TEXT("skipped"), SkippedRows);
+    ResultObj->SetNumberField(TEXT("applied_count"), AppliedCount);
+    ResultObj->SetNumberField(TEXT("skipped_count"), SkippedCount);
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }
