@@ -963,8 +963,12 @@ namespace
             || T == TEXT("true")
             || T == TEXT("1"))
         {
-            OutMode = ENiagaraInterpolatedSpawnMode::RunUpdateScriptWithInterpolation;
-            OutCanonical = TEXT("RunUpdateScriptWithInterpolation");
+            // UE 5.7 trimmed the enum tail: the "run update script + value
+            // interpolation" mode now lives under the shorter ::Interpolation
+            // entry. We keep the legacy caller tokens so existing
+            // automation does not break.
+            OutMode = ENiagaraInterpolatedSpawnMode::Interpolation;
+            OutCanonical = TEXT("Interpolation");
             return true;
         }
         return false;
@@ -1107,7 +1111,11 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterFlag(const T
         // The bool field is deprecated; the modern slot is
         // InterpolatedSpawnMode. Read + write the enum so modern
         // emitters stay consistent.
-        bPreviousValue = (EmitterData->InterpolatedSpawnMode == ENiagaraInterpolatedSpawnMode::RunUpdateScriptWithInterpolation
+        // ::Interpolation runs both scripts plus value interpolation;
+        // ::RunUpdateScript runs both scripts without interpolation. Either
+        // one counts as "interpolated spawning is on" from the caller's
+        // point of view.
+        bPreviousValue = (EmitterData->InterpolatedSpawnMode == ENiagaraInterpolatedSpawnMode::Interpolation
             || EmitterData->InterpolatedSpawnMode == ENiagaraInterpolatedSpawnMode::RunUpdateScript);
 
         ENiagaraInterpolatedSpawnMode NewMode = ENiagaraInterpolatedSpawnMode::NoInterpolation;
@@ -1117,7 +1125,7 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterFlag(const T
             if (!ResolveInterpolatedSpawnMode(InterpolatedSpawnToken, NewMode, CanonicalEnum))
             {
                 return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-                    FString::Printf(TEXT("Unsupported InterpolatedSpawnMode '%s' (try no_interpolation / run_update_script / run_update_script_with_interpolation)"),
+                    FString::Printf(TEXT("Unsupported InterpolatedSpawnMode '%s' (try no_interpolation / run_update_script / interpolation)"),
                         *InterpolatedSpawnToken));
             }
             PostWriteCanonicalEnum = CanonicalEnum;
@@ -1125,10 +1133,10 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterFlag(const T
         else
         {
             NewMode = bRequestedValue
-                ? ENiagaraInterpolatedSpawnMode::RunUpdateScriptWithInterpolation
+                ? ENiagaraInterpolatedSpawnMode::Interpolation
                 : ENiagaraInterpolatedSpawnMode::NoInterpolation;
             PostWriteCanonicalEnum = bRequestedValue
-                ? TEXT("RunUpdateScriptWithInterpolation")
+                ? TEXT("Interpolation")
                 : TEXT("NoInterpolation");
         }
         EmitterData->InterpolatedSpawnMode = NewMode;
