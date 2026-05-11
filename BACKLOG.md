@@ -2311,6 +2311,31 @@ ability" alongside `tag_registry_edit`.
   per-row Triggers array (next to Modifiers on
   FEnhancedActionKeyMapping) and per-action Modifier surface on
   the UInputAction asset stay on this list.
+- `animation_edit add_blendspace_sample` (small) — appends a sample
+  to a UBlendSpace or UBlendSpace1D through the documented public
+  editor surface `UBlendSpace::AddSample(UAnimSequence*, FVector)`
+  (`ENGINE_API` gated under `WITH_EDITOR`). `blendspace` (alias
+  `blend_space` / `asset`) is the target asset; `animation` (alias
+  `anim_sequence` / `sequence`) is the UAnimSequence path;
+  `sample_value` (alias `value` / `position`) is a 1-element
+  `[x]` array for UBlendSpace1D or a 2-element `[x, y]` array for
+  UBlendSpace (the engine's FBlendParameter[3] storage carries an
+  unused third axis for both classes so we accept up to three
+  values and pad with zero). Before AddSample runs the op refuses
+  the operation when the animation's skeleton fails
+  `UBlendSpace::IsAnimationCompatibleWithSkeleton`, when the
+  additive type fails `IsAnimationCompatible`, or when the sample
+  value fails `ValidateSampleValue` (range check plus
+  too-close-to-existing-sample probe), so callers see a specific
+  error rather than a silent INDEX_NONE return. The fork ships
+  this op against the canonical UE5 BlendSpace authoring path so
+  the asset stays consistent with the editor's "drop animation
+  in the blend grid" path: AddSample handles the snap-to-grid /
+  validation / SampleData mutation and any open BlendSpace editor
+  refreshes through PostEditChangeProperty on the next selection
+  change. Marks the package dirty and saves on success unless
+  `save=false`. The follow-on edit ops (per-sample replace /
+  delete / edit_value / blend-axis remap) stay on this list.
 
 ## Blueprint authoring (medium to large each)
 

@@ -7,6 +7,8 @@
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimSequenceBase.h"
+#include "Animation/BlendSpace.h"
+#include "Animation/BlendSpace1D.h"
 #include "AnimationBlueprintLibrary.h"
 #include "EditorAssetLibrary.h"
 #include "Engine/Blueprint.h"
@@ -245,8 +247,14 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleAddSyncMarker(Params);
     }
+    if (Op == TEXT("add_blendspace_sample")
+        || Op == TEXT("add_blend_space_sample")
+        || Op == TEXT("add_sample"))
+    {
+        return HandleAddBlendSpaceSample(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_sync_marker'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_sync_marker', 'add_blendspace_sample'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -894,6 +902,151 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddSyncMarker(const 
     Result->SetStringField(TEXT("marker_name"), MarkerParam);
     Result->SetNumberField(TEXT("time"), StartTime);
     Result->SetNumberField(TEXT("sync_marker_count"), SyncMarkerCount);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddBlendSpaceSample(const TSharedPtr<FJsonObject>& Params)
+{
+    // BlendSpace path resolves through either `blendspace` (preferred) or
+    // `asset`; the latter keeps the surface consistent with the other
+    // animation_edit ops that key off `asset`.
+    FString BlendSpaceParam;
+    if (!Params->TryGetStringField(TEXT("blendspace"), BlendSpaceParam)
+        && !Params->TryGetStringField(TEXT("blend_space"), BlendSpaceParam)
+        && !Params->TryGetStringField(TEXT("asset"), BlendSpaceParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_blendspace_sample: missing 'blendspace' (asset path)"));
+    }
+    if (BlendSpaceParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_blendspace_sample: 'blendspace' must be non-empty"));
+    }
+
+    FString AnimParam;
+    if (!Params->TryGetStringField(TEXT("animation"), AnimParam)
+        && !Params->TryGetStringField(TEXT("anim_sequence"), AnimParam)
+        && !Params->TryGetStringField(TEXT("sequence"), AnimParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_blendspace_sample: missing 'animation' (UAnimSequence path)"));
+    }
+    if (AnimParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_blendspace_sample: 'animation' must be non-empty"));
+    }
+
+    // sample_value is `[x]` (1D) or `[x, y]` (2D). Z stays at zero; the
+    // engine's FBlendParameter[3] storage carries an unused third slot
+    // for both BlendSpace and BlendSpace1D.
+    const TArray<TSharedPtr<FJsonValue>>* SampleArr = nullptr;
+    if (!Params->TryGetArrayField(TEXT("sample_value"), SampleArr)
+        && !Params->TryGetArrayField(TEXT("value"), SampleArr)
+        && !Params->TryGetArrayField(TEXT("position"), SampleArr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_blendspace_sample: missing 'sample_value' array ([x] or [x, y])"));
+    }
+    if (!SampleArr || SampleArr->Num() == 0 || SampleArr->Num() > 3)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_blendspace_sample: 'sample_value' must be an array of 1, 2, or 3 numbers"));
+    }
+    FVector SampleValue = FVector::ZeroVector;
+    for (int32 i = 0; i < SampleArr->Num(); ++i)
+    {
+        const TSharedPtr<FJsonValue>& Comp = (*SampleArr)[i];
+        if (!Comp.IsValid() || Comp->Type != EJson::Number)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("add_blendspace_sample: 'sample_value[%d]' is not a number"), i));
+        }
+        SampleValue.Component(i) = Comp->AsNumber();
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Resolve the BlendSpace asset.
+    UObject* BlendSpaceAsset = UEditorAssetLibrary::LoadAsset(BlendSpaceParam);
+    UBlendSpace* BlendSpace = Cast<UBlendSpace>(BlendSpaceAsset);
+    if (!BlendSpace)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_blendspace_sample: '%s' is not a UBlendSpace / UBlendSpace1D"), *BlendSpaceParam));
+    }
+
+    // Resolve the sequence and refuse a sequence whose skeleton or
+    // additive type does not match the blendspace's existing samples.
+    UObject* AnimAsset = UEditorAssetLibrary::LoadAsset(AnimParam);
+    UAnimSequence* AnimSequence = Cast<UAnimSequence>(AnimAsset);
+    if (!AnimSequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_blendspace_sample: 'animation' '%s' is not a UAnimSequence"), *AnimParam));
+    }
+
+    // The engine's IsAnimationCompatibleWithSkeleton tests both the
+    // skeleton compatibility (USkeleton::IsCompatible) and the additive
+    // chain match. UBlendSpace::ValidateAnimationSequence wraps both
+    // and the additive-only fork; we surface either failure as a clear
+    // error so the caller does not silently end up with a sample the
+    // engine then rejects on play.
+    if (!BlendSpace->IsAnimationCompatibleWithSkeleton(AnimSequence))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_blendspace_sample: animation skeleton does not match blendspace target skeleton")));
+    }
+    if (!BlendSpace->IsAnimationCompatible(AnimSequence))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_blendspace_sample: animation additive type does not match existing samples")));
+    }
+
+    // Range check. Each FBlendParameter carries Min / Max for its axis.
+    // ValidateSampleValue runs the same range check + close-to-existing
+    // probe; we run it before AddSample so callers get a specific error
+    // instead of a silent -1 return.
+    if (!BlendSpace->ValidateSampleValue(SampleValue))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_blendspace_sample: sample value [%f, %f, %f] is out of range or too close to an existing sample"),
+                SampleValue.X, SampleValue.Y, SampleValue.Z));
+    }
+
+    const int32 PreviousSampleCount = BlendSpace->GetBlendSamples().Num();
+    const int32 NewSampleIndex = BlendSpace->AddSample(AnimSequence, SampleValue);
+    if (NewSampleIndex == INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_blendspace_sample: UBlendSpace::AddSample refused the sample"));
+    }
+    BlendSpace->MarkPackageDirty();
+
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(BlendSpace->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    const bool bIs1D = BlendSpace->IsA<UBlendSpace1D>();
+    const int32 AxisCount = bIs1D ? 1 : 2;
+    const int32 NewSampleCount = BlendSpace->GetBlendSamples().Num();
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("add_blendspace_sample"));
+    Result->SetStringField(TEXT("asset"), BlendSpace->GetName());
+    Result->SetStringField(TEXT("path"), BlendSpace->GetPathName());
+    Result->SetStringField(TEXT("class"), BlendSpace->GetClass()->GetName());
+    Result->SetStringField(TEXT("animation_path"), AnimSequence->GetPathName());
+    Result->SetStringField(TEXT("animation_name"), AnimSequence->GetName());
+    Result->SetNumberField(TEXT("axis_count"), AxisCount);
+
+    TArray<TSharedPtr<FJsonValue>> SampleJson;
+    SampleJson.Add(MakeShared<FJsonValueNumber>(SampleValue.X));
+    if (AxisCount >= 2) SampleJson.Add(MakeShared<FJsonValueNumber>(SampleValue.Y));
+    if (AxisCount >= 3) SampleJson.Add(MakeShared<FJsonValueNumber>(SampleValue.Z));
+    Result->SetArrayField(TEXT("sample_value"), SampleJson);
+
+    Result->SetNumberField(TEXT("sample_index"), NewSampleIndex);
+    Result->SetNumberField(TEXT("previous_sample_count"), PreviousSampleCount);
+    Result->SetNumberField(TEXT("sample_count"), NewSampleCount);
     Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }

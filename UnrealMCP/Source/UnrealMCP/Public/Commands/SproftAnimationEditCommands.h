@@ -44,6 +44,14 @@
  *     `UAnimationBlueprintLibrary::AddAnimationSyncMarker`. The named
  *     notify track is auto-created through `AddAnimationNotifyTrack`
  *     when missing, mirroring the `add_notify` shape.
+ *   - `add_blendspace_sample`: append a sample to a UBlendSpace or
+ *     UBlendSpace1D through `UBlendSpace::AddSample(AnimSequence,
+ *     SampleValue)`. `blendspace` is the target blendspace asset path;
+ *     `animation` is a UAnimSequence path; `sample_value` is a 1D
+ *     `[x]` array for UBlendSpace1D or a 2D `[x, y]` array for
+ *     UBlendSpace. Refuses values outside the axis range and refuses
+ *     animations whose additive type does not match the existing
+ *     samples.
  *
  * Inputs (set_rate_scale):
  *   - asset: short asset name or `/Game/...` UAnimSequenceBase path.
@@ -120,4 +128,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddNotify(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddCurve(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddSyncMarker(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
 };

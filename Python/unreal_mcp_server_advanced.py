@@ -7377,7 +7377,7 @@ def pie_test_scene(
 @mcp.tool()
 def animation_edit(
     op: str,
-    asset: str,
+    asset: Optional[str] = None,
     rate_scale: Optional[float] = None,
     additive_type: Optional[str] = None,
     ref_pose_type: Optional[str] = None,
@@ -7394,6 +7394,9 @@ def animation_edit(
     keyframes: Optional[List[Any]] = None,
     metadata_curve: Optional[bool] = None,
     marker_name: Optional[str] = None,
+    blendspace: Optional[str] = None,
+    animation: Optional[str] = None,
+    sample_value: Optional[List[float]] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
@@ -7431,6 +7434,13 @@ def animation_edit(
           track FName (auto-created when missing); ``marker_name``
           is the new marker's FName; ``frame`` (int, wins) or
           ``time`` (float seconds) places the marker on the timeline.
+        - ``add_blendspace_sample``: append a sample to a UBlendSpace
+          or UBlendSpace1D through ``UBlendSpace::AddSample(AnimSequence,
+          SampleValue)``. ``blendspace`` is the target blendspace path,
+          ``animation`` is a UAnimSequence path, ``sample_value`` is
+          ``[x]`` for 1D blendspaces or ``[x, y]`` for 2D. Refuses
+          incompatible skeletons, mismatched additive types, and values
+          outside the axis range.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -7463,6 +7473,10 @@ def animation_edit(
         metadata_curve: Optional bool for ``add_curve``; when true
             the curve is registered as a metadata-only curve.
         marker_name: FName for ``add_sync_marker``.
+        blendspace: BlendSpace asset path for ``add_blendspace_sample``.
+        animation: UAnimSequence path for ``add_blendspace_sample``.
+        sample_value: ``[x]`` (1D) or ``[x, y]`` (2D) coordinate for
+            ``add_blendspace_sample``.
         save: Persist the asset on success. Default True.
 
     Returns:
@@ -7476,7 +7490,9 @@ def animation_edit(
     if not unreal:
         return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
-    params: Dict[str, Any] = {"op": op, "asset": asset}
+    params: Dict[str, Any] = {"op": op}
+    if asset is not None:
+        params["asset"] = asset
     if rate_scale is not None:
         params["rate_scale"] = rate_scale
     if additive_type is not None:
@@ -7509,6 +7525,12 @@ def animation_edit(
         params["metadata_curve"] = metadata_curve
     if marker_name is not None:
         params["marker_name"] = marker_name
+    if blendspace is not None:
+        params["blendspace"] = blendspace
+    if animation is not None:
+        params["animation"] = animation
+    if sample_value is not None:
+        params["sample_value"] = sample_value
     if save is not None:
         params["save"] = save
 
