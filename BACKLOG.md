@@ -9,6 +9,67 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped four deepening additions across
+existing tools: `behavior_tree` gains `change_blackboard_key_type`
+(swaps the UBlackboardKeyType instance on an own key entry of a
+target Blackboard for a freshly NewObject'd instance of the
+requested class, outered to the Blackboard so the new subobject
+saves with the asset; reuses the same short-token resolver
+(`bool` / `int` / `float` / `string` / `name` / `vector` /
+`rotator` / `object` / `class` / `enum` / `struct`) and the
+inner-type hint trio (`base_class` for Object / Class,
+`enum_path` for Enum, `struct_path` for Struct) that
+`add_blackboard_key` uses; refuses parent-inherited keys and
+missing own keys; fires PreEditChange + PostEditChangeChainProperty
+on the Keys array's KeyType subfield so the FBlackboardDataChanged
+broadcast hits editor pickers; UpdateIfHasSynchronizedKeys +
+UpdateKeyIDs + PropagateKeyChangesToDerivedBlackboardAssets keep
+derived Blackboards consistent; reuses the same
+IAssetRegistry::GetReferencers Hard-only walk
+`rename_blackboard_key` uses to flag every consumer asset whose
+FBlackboardKeySelector targets this key under `consumer_assets`,
+without silently rewriting consumer pin shapes), `pie_test_scene`
+gains the `actor_distance` kind (two-target proximity assertion:
+`target` resolves the first actor, `target_b` / `other` the
+second, `max_distance` / `expected` is the upper bound in cm,
+optional `tolerance` defaults to 0.0; pass condition is
+`FVector::Dist(A.Loc, B.Loc) <= max_distance + tolerance`;
+editor-world only, no PIE drive, useful for proximity assertions
+in level setup tests), `niagara_edit` gains `set_emitter_loop`
+(writes the per-version emitter data's `EmitterState` loop fields
+on a UNiagaraSystem; the runtime path stores loop configuration on
+FVersionedNiagaraEmitterData's `EmitterState` UPROPERTY (a
+FNiagaraEmitterStateData struct) which holds an ENiagaraLoopBehavior
+enum (`Once` / `Infinite` / `Multiple`) plus an int32 `LoopCount`
+used when Multiple is selected; the op resolves the emitter handle
+through the same name / source-name match every other per-emitter
+op uses, then walks the FVersionedNiagaraEmitterData UScriptStruct's
+reflected EmitterState property to reach the nested
+FNiagaraEmitterStateData; LoopBehavior is read / written through
+either FByteProperty (TEnumAsByte form) or FEnumProperty (modern
+UENUM form) so the writer tolerates either header layout; LoopCount
+goes through FIntProperty; the response carries the resolved mode +
+count, the previous mode + count for diff, and a `saved` flag), and
+`material_edit` gains `add_constant` (single-call wrapper for the
+common literal-constant case; pass `material` and `value` (a JSON
+number for a 1-channel `UMaterialExpressionConstant`, a 2-element
+array for `UMaterialExpressionConstant2Vector`, a 3-element array
+for `UMaterialExpressionConstant3Vector`, or a 4-element array for
+`UMaterialExpressionConstant4Vector`); the op auto-picks the
+matching expression class and lands the literal on the matching
+node fields (`R` for the 1- and 2-channel variants, `Constant`
+(FLinearColor) for the 3- and 4-channel variants); reuses the same
+DeriveDefaultPosition cascade, MaterialEdit_ApplyPropertyDict,
+FindExpressionByName, and TryParseMaterialProperty helpers
+add_expression already uses; same downstream knobs (`position` /
+`properties` / `property` / `connect_to` / `connect_input` /
+`recompile` / `save`)). The four deepenings together close the
+Blackboard key-type-change half of the "Blackboard rename /
+type-change ops" follow-on, the proximity-assertion gap on the
+pie_test_scene side, the per-emitter loop-behaviour writer gap on
+the Niagara side, and the literal-constant authoring gap on the
+material_edit side.
+
+The pass before that shipped four deepening additions across
 existing tools: `behavior_tree` gains `set_root_decorator`
 (appends a UBTDecorator to `UBehaviorTree::RootDecorators`, the
 tree-level chain the BT editor exposes under "Add Decorator" on
@@ -1201,6 +1262,82 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `behavior_tree change_blackboard_key_type` (small) — replace
+  the UBlackboardKeyType instance on an own key entry of a
+  target Blackboard with a freshly NewObject'd instance of the
+  requested class, outered to the Blackboard so the new
+  subobject saves with the asset. Reuses the same short-token
+  resolver (`bool` / `int` / `float` / `string` / `name` /
+  `vector` / `rotator` / `object` / `class` / `enum` /
+  `struct`) and the inner-type hint trio (`base_class` for
+  Object / Class, `enum_path` for Enum, `struct_path` for
+  Struct) that `add_blackboard_key` uses. Refuses parent-
+  inherited keys (the parent's BB has to do its own retype) and
+  missing own keys. Fires PreEditChange +
+  PostEditChangeChainProperty on the Keys array's KeyType
+  subfield so the FBlackboardDataChanged broadcast hits editor
+  pickers; UpdateIfHasSynchronizedKeys + UpdateKeyIDs +
+  PropagateKeyChangesToDerivedBlackboardAssets keep derived
+  Blackboards consistent. Reuses the same
+  IAssetRegistry::GetReferencers Hard-only walk
+  `rename_blackboard_key` uses to flag every consumer asset
+  whose FBlackboardKeySelector targets this key under
+  `consumer_assets`. We do not silently rewrite consumer pin
+  shapes (the FName stays the same; only the type slot swaps),
+  but a consumer that filters on AllowedTypes may need a manual
+  revisit and the response calls that surface area out. Closes
+  the type-change half of the "Blackboard rename / type-change
+  ops" follow-on.
+- `pie_test_scene actor_distance` (small) — two-target
+  proximity assertion kind. `target` resolves the first actor
+  (same name / label lookup the other kinds use); `target_b`
+  (alias `other` / `b`) resolves the second; `max_distance`
+  (alias `expected`) is the upper bound in cm; optional
+  `tolerance` defaults to 0.0. Pass condition:
+  `FVector::Dist(A.Loc, B.Loc) <= max_distance + tolerance`.
+  Response carries `location_a` / `location_b` / `distance` /
+  `max_distance` / `tolerance` plus a human-readable message;
+  an unresolved second actor surfaces `target_b` so the
+  failure mode is obvious. Editor-world only; no PIE drive.
+  Useful for proximity assertions in level setup tests (player
+  start within N cm of spawn marker, patrol target within
+  range of AI home).
+- `niagara_edit set_emitter_loop` (small) — writes the
+  per-version emitter data's `EmitterState` loop fields on a
+  UNiagaraSystem. The runtime path stores loop configuration on
+  FVersionedNiagaraEmitterData's `EmitterState` UPROPERTY (a
+  FNiagaraEmitterStateData struct) which holds an
+  ENiagaraLoopBehavior enum (`Once` / `Infinite` / `Multiple`)
+  plus an int32 `LoopCount` used when Multiple is selected.
+  The op resolves the emitter handle through the same name /
+  source-name match every other per-emitter op uses, then walks
+  the FVersionedNiagaraEmitterData UScriptStruct's reflected
+  EmitterState property to reach the nested
+  FNiagaraEmitterStateData; LoopBehavior is read / written
+  through either FByteProperty (TEnumAsByte form) or
+  FEnumProperty (modern UENUM form) so the writer tolerates
+  either header layout; LoopCount goes through FIntProperty.
+  Inputs: `system`, `emitter` (handle name), `loop_mode`
+  (`once` / `infinite` / `multiple`), `loop_count` (required
+  when `multiple`, clamped to 1 minimum). Response carries the
+  resolved mode + count, the previous mode + count, and a
+  `saved` flag.
+- `material_edit add_constant` (small) — single-call wrapper
+  for the common literal-constant case. Pass `material` and
+  `value` (a JSON number for a 1-channel
+  `UMaterialExpressionConstant`, a 2-element array for
+  `UMaterialExpressionConstant2Vector`, a 3-element array for
+  `UMaterialExpressionConstant3Vector`, or a 4-element array
+  for `UMaterialExpressionConstant4Vector`); the op auto-picks
+  the matching expression class and lands the literal on the
+  matching node fields (`R` for the 1- and 2-channel variants,
+  `Constant` (FLinearColor) for the 3- and 4-channel
+  variants). Reuses the same DeriveDefaultPosition cascade,
+  MaterialEdit_ApplyPropertyDict, FindExpressionByName, and
+  TryParseMaterialProperty helpers `add_expression` already
+  uses; same downstream knobs (`position` / `properties` /
+  `property` / `connect_to` / `connect_input` / `recompile` /
+  `save`).
 - `editor_actions` (small) — save / undo / redo / focus selection / play / stop play.
 - `window_capture` (small) — synchronous PNG screenshot of the active viewport.
 - `asset_factory` (small) — create DataTable / Enum / Struct / DataAsset /
@@ -3491,9 +3628,9 @@ slice. The next set should pick up:
 11. `gas_edit` remaining ops — rebind cost / cooldown classes on a
     UGameplayAbility through the CDO, and a GameplayCue authoring
     slice (cue-tag set + level range + magnitude attribute).
-12. `behavior_tree` heavier edit ops — Blackboard key type-change
-    op and parent-Blackboard re-bind. The `rename_blackboard_key`
-    and `set_root_decorator` ops shipped in the most recent pass.
+12. `behavior_tree` heavier edit ops — parent-Blackboard re-bind.
+    The `rename_blackboard_key`, `change_blackboard_key_type`, and
+    `set_root_decorator` ops shipped in the most recent passes.
 13. `sequencer_edit` remaining edit ops — spawnable creation and
     per-row edits. The `move_section` op shipped in the most
     recent pass.
