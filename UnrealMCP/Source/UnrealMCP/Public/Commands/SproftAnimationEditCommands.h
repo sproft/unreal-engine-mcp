@@ -52,6 +52,18 @@
  *     UBlendSpace. Refuses values outside the axis range and refuses
  *     animations whose additive type does not match the existing
  *     samples.
+ *   - `replace_blendspace_sample`: swap the UAnimSequence on an
+ *     existing sample at `sample_index` through
+ *     `UBlendSpace::ReplaceSampleAnimation`. Pass `animation` (a
+ *     `/Game/...` UAnimSequence path) to bind a new sequence; pass
+ *     `clear=true` or an empty / `none` animation string to unbind.
+ *     The replacement sequence's skeleton must match the blendspace's
+ *     target skeleton (UBlendSpace::IsAnimationCompatibleWithSkeleton)
+ *     and its additive type must match the existing samples
+ *     (UBlendSpace::IsAnimationCompatible).
+ *   - `delete_blendspace_sample`: remove the sample at `sample_index`
+ *     through `UBlendSpace::DeleteSample`. Bounds-checked against the
+ *     blendspace's current sample count.
  *
  * Inputs (set_rate_scale):
  *   - asset: short asset name or `/Game/...` UAnimSequenceBase path.
@@ -129,4 +141,6 @@ private:
     TSharedPtr<FJsonObject> HandleAddCurve(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddSyncMarker(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleReplaceBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleDeleteBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
 };

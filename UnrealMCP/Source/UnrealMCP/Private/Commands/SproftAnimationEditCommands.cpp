@@ -253,8 +253,22 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleAddBlendSpaceSample(Params);
     }
+    if (Op == TEXT("replace_blendspace_sample")
+        || Op == TEXT("replace_blend_space_sample")
+        || Op == TEXT("replace_sample"))
+    {
+        return HandleReplaceBlendSpaceSample(Params);
+    }
+    if (Op == TEXT("delete_blendspace_sample")
+        || Op == TEXT("delete_blend_space_sample")
+        || Op == TEXT("delete_sample")
+        || Op == TEXT("remove_blendspace_sample")
+        || Op == TEXT("remove_sample"))
+    {
+        return HandleDeleteBlendSpaceSample(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_sync_marker', 'add_blendspace_sample'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -1047,6 +1061,226 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddBlendSpaceSample(
     Result->SetNumberField(TEXT("sample_index"), NewSampleIndex);
     Result->SetNumberField(TEXT("previous_sample_count"), PreviousSampleCount);
     Result->SetNumberField(TEXT("sample_count"), NewSampleCount);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleReplaceBlendSpaceSample(const TSharedPtr<FJsonObject>& Params)
+{
+    // Same resolver shape as add_blendspace_sample for the asset side.
+    FString BlendSpaceParam;
+    if (!Params->TryGetStringField(TEXT("blendspace"), BlendSpaceParam)
+        && !Params->TryGetStringField(TEXT("blend_space"), BlendSpaceParam)
+        && !Params->TryGetStringField(TEXT("asset"), BlendSpaceParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("replace_blendspace_sample: missing 'blendspace' (asset path)"));
+    }
+    if (BlendSpaceParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("replace_blendspace_sample: 'blendspace' must be non-empty"));
+    }
+
+    // sample_index is required; the API takes an int32 BlendSampleIndex.
+    int32 SampleIndex = INDEX_NONE;
+    if (!Params->TryGetNumberField(TEXT("sample_index"), SampleIndex)
+        && !Params->TryGetNumberField(TEXT("index"), SampleIndex))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("replace_blendspace_sample: missing 'sample_index' (int)"));
+    }
+
+    // Resolve the blendspace asset before the sample-index bounds check
+    // so the response can also surface the asset path on error.
+    UObject* BlendSpaceAsset = UEditorAssetLibrary::LoadAsset(BlendSpaceParam);
+    UBlendSpace* BlendSpace = Cast<UBlendSpace>(BlendSpaceAsset);
+    if (!BlendSpace)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("replace_blendspace_sample: '%s' is not a UBlendSpace / UBlendSpace1D"), *BlendSpaceParam));
+    }
+
+    const int32 SampleCount = BlendSpace->GetBlendSamples().Num();
+    if (!BlendSpace->IsValidBlendSampleIndex(SampleIndex))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("replace_blendspace_sample: 'sample_index' %d is out of range [0, %d)"), SampleIndex, SampleCount));
+    }
+
+    // Read previous sequence so the response can report what we replaced.
+    const FBlendSample& PreviousSample = BlendSpace->GetBlendSample(SampleIndex);
+    UAnimSequence* PreviousAnimation = PreviousSample.Animation;
+    const FString PreviousPath = PreviousAnimation ? PreviousAnimation->GetPathName() : FString();
+    const FString PreviousName = PreviousAnimation ? PreviousAnimation->GetName() : FString();
+
+    // Animation token resolution: an empty / "none" string (or
+    // `clear=true`) unbinds the sample's UAnimSequence; otherwise we
+    // resolve the new sequence and run the same skeleton + additive
+    // compatibility checks AddSample uses so the asset never lands in
+    // a state the engine refuses to play.
+    bool bClear = false;
+    Params->TryGetBoolField(TEXT("clear"), bClear);
+
+    FString AnimParam;
+    Params->TryGetStringField(TEXT("animation"), AnimParam);
+    if (AnimParam.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("anim_sequence"), AnimParam);
+    }
+    if (AnimParam.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("sequence"), AnimParam);
+    }
+
+    UAnimSequence* AnimSequence = nullptr;
+    const bool bRequestedClear = bClear
+        || AnimParam.IsEmpty()
+        || AnimParam.Equals(TEXT("none"), ESearchCase::IgnoreCase);
+    if (!bRequestedClear)
+    {
+        UObject* AnimAsset = UEditorAssetLibrary::LoadAsset(AnimParam);
+        AnimSequence = Cast<UAnimSequence>(AnimAsset);
+        if (!AnimSequence)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("replace_blendspace_sample: 'animation' '%s' is not a UAnimSequence"), *AnimParam));
+        }
+        if (!BlendSpace->IsAnimationCompatibleWithSkeleton(AnimSequence))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("replace_blendspace_sample: animation skeleton does not match blendspace target skeleton")));
+        }
+        if (!BlendSpace->IsAnimationCompatible(AnimSequence))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("replace_blendspace_sample: animation additive type does not match existing samples")));
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // ReplaceSampleAnimation accepts a null pointer to unbind the
+    // sample's sequence; that matches the editor's "Clear" picker.
+    const bool bReplaced = BlendSpace->ReplaceSampleAnimation(SampleIndex, AnimSequence);
+    if (!bReplaced)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("replace_blendspace_sample: UBlendSpace::ReplaceSampleAnimation refused the swap at index %d"), SampleIndex));
+    }
+    BlendSpace->MarkPackageDirty();
+
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(BlendSpace->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("replace_blendspace_sample"));
+    Result->SetStringField(TEXT("asset"), BlendSpace->GetName());
+    Result->SetStringField(TEXT("path"), BlendSpace->GetPathName());
+    Result->SetStringField(TEXT("class"), BlendSpace->GetClass()->GetName());
+    Result->SetNumberField(TEXT("sample_index"), SampleIndex);
+    Result->SetBoolField(TEXT("cleared"), bRequestedClear);
+    if (AnimSequence)
+    {
+        Result->SetStringField(TEXT("animation_path"), AnimSequence->GetPathName());
+        Result->SetStringField(TEXT("animation_name"), AnimSequence->GetName());
+    }
+    if (!PreviousPath.IsEmpty())
+    {
+        Result->SetStringField(TEXT("previous_animation_path"), PreviousPath);
+        Result->SetStringField(TEXT("previous_animation_name"), PreviousName);
+    }
+    Result->SetNumberField(TEXT("sample_count"), SampleCount);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleDeleteBlendSpaceSample(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlendSpaceParam;
+    if (!Params->TryGetStringField(TEXT("blendspace"), BlendSpaceParam)
+        && !Params->TryGetStringField(TEXT("blend_space"), BlendSpaceParam)
+        && !Params->TryGetStringField(TEXT("asset"), BlendSpaceParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("delete_blendspace_sample: missing 'blendspace' (asset path)"));
+    }
+    if (BlendSpaceParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("delete_blendspace_sample: 'blendspace' must be non-empty"));
+    }
+
+    int32 SampleIndex = INDEX_NONE;
+    if (!Params->TryGetNumberField(TEXT("sample_index"), SampleIndex)
+        && !Params->TryGetNumberField(TEXT("index"), SampleIndex))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("delete_blendspace_sample: missing 'sample_index' (int)"));
+    }
+
+    UObject* BlendSpaceAsset = UEditorAssetLibrary::LoadAsset(BlendSpaceParam);
+    UBlendSpace* BlendSpace = Cast<UBlendSpace>(BlendSpaceAsset);
+    if (!BlendSpace)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("delete_blendspace_sample: '%s' is not a UBlendSpace / UBlendSpace1D"), *BlendSpaceParam));
+    }
+
+    const int32 PreviousSampleCount = BlendSpace->GetBlendSamples().Num();
+    if (!BlendSpace->IsValidBlendSampleIndex(SampleIndex))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("delete_blendspace_sample: 'sample_index' %d is out of range [0, %d)"), SampleIndex, PreviousSampleCount));
+    }
+
+    // Capture the about-to-go sample so the response can echo what we
+    // removed (helpful for callers reading the surface back).
+    const FBlendSample& Removed = BlendSpace->GetBlendSample(SampleIndex);
+    UAnimSequence* RemovedAnimation = Removed.Animation;
+    const FString RemovedPath = RemovedAnimation ? RemovedAnimation->GetPathName() : FString();
+    const FString RemovedName = RemovedAnimation ? RemovedAnimation->GetName() : FString();
+    const FVector RemovedValue = Removed.SampleValue;
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    const bool bDeleted = BlendSpace->DeleteSample(SampleIndex);
+    if (!bDeleted)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("delete_blendspace_sample: UBlendSpace::DeleteSample refused the delete at index %d"), SampleIndex));
+    }
+    BlendSpace->MarkPackageDirty();
+
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(BlendSpace->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    const bool bIs1D = BlendSpace->IsA<UBlendSpace1D>();
+    const int32 AxisCount = bIs1D ? 1 : 2;
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("delete_blendspace_sample"));
+    Result->SetStringField(TEXT("asset"), BlendSpace->GetName());
+    Result->SetStringField(TEXT("path"), BlendSpace->GetPathName());
+    Result->SetStringField(TEXT("class"), BlendSpace->GetClass()->GetName());
+    Result->SetNumberField(TEXT("sample_index"), SampleIndex);
+    Result->SetNumberField(TEXT("axis_count"), AxisCount);
+    if (!RemovedPath.IsEmpty())
+    {
+        Result->SetStringField(TEXT("removed_animation_path"), RemovedPath);
+        Result->SetStringField(TEXT("removed_animation_name"), RemovedName);
+    }
+    {
+        TArray<TSharedPtr<FJsonValue>> SampleJson;
+        SampleJson.Add(MakeShared<FJsonValueNumber>(RemovedValue.X));
+        if (AxisCount >= 2) SampleJson.Add(MakeShared<FJsonValueNumber>(RemovedValue.Y));
+        if (AxisCount >= 3) SampleJson.Add(MakeShared<FJsonValueNumber>(RemovedValue.Z));
+        Result->SetArrayField(TEXT("removed_sample_value"), SampleJson);
+    }
+    Result->SetNumberField(TEXT("previous_sample_count"), PreviousSampleCount);
+    Result->SetNumberField(TEXT("sample_count"), BlendSpace->GetBlendSamples().Num());
     Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }

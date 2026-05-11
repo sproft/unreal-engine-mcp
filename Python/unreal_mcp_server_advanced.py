@@ -7459,6 +7459,8 @@ def animation_edit(
     blendspace: Optional[str] = None,
     animation: Optional[str] = None,
     sample_value: Optional[List[float]] = None,
+    sample_index: Optional[int] = None,
+    clear: Optional[bool] = None,
     save: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
@@ -7503,6 +7505,18 @@ def animation_edit(
           ``[x]`` for 1D blendspaces or ``[x, y]`` for 2D. Refuses
           incompatible skeletons, mismatched additive types, and values
           outside the axis range.
+        - ``replace_blendspace_sample``: swap the UAnimSequence on an
+          existing sample at ``sample_index`` through
+          ``UBlendSpace::ReplaceSampleAnimation``. Pass ``animation``
+          (a ``/Game/...`` UAnimSequence path) to bind a new sequence;
+          pass ``clear=True`` or an empty / ``none`` animation string
+          to unbind. The replacement sequence's skeleton must match
+          the blendspace's target skeleton and its additive type must
+          match the existing samples.
+        - ``delete_blendspace_sample``: remove the sample at
+          ``sample_index`` through ``UBlendSpace::DeleteSample``.
+          Bounds-checked against the blendspace's current sample
+          count.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -7535,10 +7549,16 @@ def animation_edit(
         metadata_curve: Optional bool for ``add_curve``; when true
             the curve is registered as a metadata-only curve.
         marker_name: FName for ``add_sync_marker``.
-        blendspace: BlendSpace asset path for ``add_blendspace_sample``.
-        animation: UAnimSequence path for ``add_blendspace_sample``.
+        blendspace: BlendSpace asset path for the blendspace ops.
+        animation: UAnimSequence path for ``add_blendspace_sample`` /
+            ``replace_blendspace_sample``.
         sample_value: ``[x]`` (1D) or ``[x, y]`` (2D) coordinate for
             ``add_blendspace_sample``.
+        sample_index: Integer sample slot for
+            ``replace_blendspace_sample`` and
+            ``delete_blendspace_sample``.
+        clear: When True, ``replace_blendspace_sample`` unbinds the
+            sample's UAnimSequence instead of swapping it.
         save: Persist the asset on success. Default True.
 
     Returns:
@@ -7593,6 +7613,10 @@ def animation_edit(
         params["animation"] = animation
     if sample_value is not None:
         params["sample_value"] = sample_value
+    if sample_index is not None:
+        params["sample_index"] = sample_index
+    if clear is not None:
+        params["clear"] = clear
     if save is not None:
         params["save"] = save
 
