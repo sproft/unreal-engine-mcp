@@ -7818,6 +7818,9 @@ def animation_edit(
     start_frame: Optional[int] = None,
     start_time: Optional[float] = None,
     duration_frames: Optional[int] = None,
+    compression_codec: Optional[str] = None,
+    compression_settings: Optional[str] = None,
+    request_compile: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Targeted UAnimSequence / UAnimMontage edits (small variant).
@@ -7916,6 +7919,27 @@ def animation_edit(
           ``duration_frames`` (int) wins over ``duration`` (float
           seconds). The frame-to-seconds conversion uses the
           asset's sampling frame rate when present.
+        - ``set_compression_scheme``: writes the compression slot
+          on a UAnimSequence. UE5 routes compression through
+          ``UAnimSequence::BoneCompressionSettings`` (a
+          UAnimBoneCompressionSettings DataAsset whose ``Codecs``
+          array holds the UAnimBoneCompressionCodec subclass
+          instances the engine runs in turn). Pass one of two
+          shapes: ``compression_settings`` for a
+          ``/Game/...`` UAnimBoneCompressionSettings DataAsset
+          path written into the slot directly, or
+          ``compression_codec`` (alias ``compression_scheme`` /
+          ``scheme``) for a codec class path or short class name
+          (the legacy ``UAnimCompress_BitwiseCompressOnly`` /
+          ``UAnimCompress_RemoveLinearKeys`` /
+          ``UAnimCompress_RemoveTrivialKeys`` codecs derive from
+          UAnimBoneCompressionCodec). Codec-class shape NewObject's
+          a per-sequence UAnimBoneCompressionSettings outered to
+          the sequence so the choice does not bleed into other
+          sequences. The optional ``request_compile`` flag (alias
+          ``recompile``) triggers
+          ``UAnimSequence::RequestAnimCompression`` so the saved
+          asset reflects the new scheme.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -8036,6 +8060,12 @@ def animation_edit(
         params["start_time"] = start_time
     if duration_frames is not None:
         params["duration_frames"] = duration_frames
+    if compression_codec is not None:
+        params["compression_codec"] = compression_codec
+    if compression_settings is not None:
+        params["compression_settings"] = compression_settings
+    if request_compile is not None:
+        params["request_compile"] = request_compile
 
     try:
         response = unreal.send_command("animation_edit", params)

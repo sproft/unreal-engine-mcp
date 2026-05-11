@@ -1,12 +1,16 @@
 #include "Commands/SproftAnimationEditCommands.h"
 #include "Commands/EpicUnrealMCPCommonUtils.h"
 
+#include "Animation/AnimBoneCompressionCodec.h"
+#include "Animation/AnimBoneCompressionSettings.h"
+#include "Animation/AnimCompressionTypes.h"
 #include "Animation/AnimCurveTypes.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimSequenceBase.h"
+#include "Animation/AnimationSettings.h"
 #include "Animation/BlendSpace.h"
 #include "Animation/BlendSpace1D.h"
 #include "Animation/Skeleton.h"
@@ -19,6 +23,7 @@
 #include "Misc/FrameTime.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace
 {
@@ -283,8 +288,13 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleAddNotifyState(Params);
     }
+    if (Op == TEXT("set_compression_scheme") || Op == TEXT("set_compression")
+        || Op == TEXT("set_compression_codec") || Op == TEXT("set_compression_settings"))
+    {
+        return HandleSetCompressionScheme(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion', 'set_compression_scheme'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -1942,6 +1952,215 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddNotifyState(const
     }
     Result->SetStringField(TEXT("notify_object"), CreatedNotify->GetName());
     Result->SetNumberField(TEXT("notify_count"), SeqBase->Notifies.Num());
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetCompressionScheme(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writes the per-sequence compression slot. UE5.x routes compression
+    // through `UAnimSequence::BoneCompressionSettings` (a
+    // UAnimBoneCompressionSettings DataAsset). The settings asset holds a
+    // `Codecs` array of UAnimBoneCompressionCodec subclasses; the engine
+    // runs the codecs in turn and picks the best one for each clip per
+    // its quality / error metrics.
+    //
+    // The legacy UAnimCompress_* (UAnimCompress_BitwiseCompressOnly,
+    // UAnimCompress_RemoveLinearKeys, UAnimCompress_RemoveTrivialKeys,
+    // etc.) survived the 5.x refactor as UAnimBoneCompressionCodec
+    // subclasses so callers can still pass these tokens. Resolves
+    // either: (1) an existing UAnimBoneCompressionSettings DataAsset
+    // path on the project, written into the BoneCompressionSettings
+    // slot directly, or (2) a UAnimBoneCompressionCodec subclass that
+    // we wrap into a per-sequence settings subobject before assigning.
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        if (!Params->TryGetStringField(TEXT("sequence"), AssetParam)
+            && !Params->TryGetStringField(TEXT("path"), AssetParam))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("set_compression_scheme: missing 'asset' parameter"));
+        }
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    UAnimSequence* Seq = Cast<UAnimSequence>(Asset);
+    if (!Seq)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_compression_scheme: '%s' is not a UAnimSequence (compression settings live on UAnimSequence)"), *AssetParam));
+    }
+
+    // Capture the previous slot for the diff field on the response.
+    UAnimBoneCompressionSettings* PreviousSettings = Seq->BoneCompressionSettings;
+    FString PreviousSettingsPath;
+    if (PreviousSettings)
+    {
+        PreviousSettingsPath = PreviousSettings->GetPathName();
+    }
+
+    UAnimBoneCompressionSettings* NewSettings = nullptr;
+    FString ResolvedCodecClassPath;
+    FString ResolvedCodecClassName;
+    bool bCodecAuthored = false;
+
+    // Path 1: caller supplied a `/Game/...` UAnimBoneCompressionSettings
+    // DataAsset path directly. Resolve through UEditorAssetLibrary and
+    // refuse anything that is not the expected class.
+    FString SettingsPath;
+    if (Params->TryGetStringField(TEXT("compression_settings"), SettingsPath)
+        || Params->TryGetStringField(TEXT("settings"), SettingsPath)
+        || Params->TryGetStringField(TEXT("settings_path"), SettingsPath))
+    {
+        if (!SettingsPath.IsEmpty())
+        {
+            UObject* SettingsAsset = UEditorAssetLibrary::LoadAsset(SettingsPath);
+            NewSettings = Cast<UAnimBoneCompressionSettings>(SettingsAsset);
+            if (!NewSettings)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_compression_scheme: 'compression_settings' path '%s' is not a UAnimBoneCompressionSettings DataAsset"), *SettingsPath));
+            }
+        }
+    }
+
+    // Path 2: caller supplied a codec class name / path. We NewObject
+    // a per-sequence UAnimBoneCompressionSettings, outered to the
+    // sequence so the new subobject saves alongside the sequence
+    // package, and assign one fresh codec subobject of the requested
+    // class into the Codecs array. Per-sequence settings isolate the
+    // choice from any other sequence on the project, mirroring the
+    // editor's "Convert to Custom" right-click on the asset.
+    FString CodecToken;
+    if (!NewSettings)
+    {
+        if (Params->TryGetStringField(TEXT("compression_codec"), CodecToken)
+            || Params->TryGetStringField(TEXT("compression_scheme"), CodecToken)
+            || Params->TryGetStringField(TEXT("compression_class"), CodecToken)
+            || Params->TryGetStringField(TEXT("scheme"), CodecToken)
+            || Params->TryGetStringField(TEXT("codec"), CodecToken))
+        {
+            if (CodecToken.IsEmpty())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_compression_scheme: 'compression_codec' / 'scheme' must not be empty"));
+            }
+            UClass* CodecClass = ResolveNotifyClass(CodecToken, UAnimBoneCompressionCodec::StaticClass());
+            if (!CodecClass)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_compression_scheme: could not resolve UAnimBoneCompressionCodec subclass from '%s' (try UAnimCompress_BitwiseCompressOnly / UAnimCompress_RemoveLinearKeys / UAnimCompress_RemoveTrivialKeys)"), *CodecToken));
+            }
+            if (CodecClass->HasAnyClassFlags(CLASS_Abstract))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_compression_scheme: codec class '%s' is abstract"), *CodecClass->GetName()));
+            }
+
+            // Outer the new per-sequence settings to the sequence's
+            // package so the subobject lands in the sequence file
+            // rather than the transient package. The editor uses the
+            // same shape for "custom" per-sequence settings.
+            UAnimBoneCompressionSettings* Authored = NewObject<UAnimBoneCompressionSettings>(
+                Seq->GetOutermost(), MakeUniqueObjectName(Seq->GetOutermost(), UAnimBoneCompressionSettings::StaticClass(), TEXT("BoneCompressionSettings_Custom")),
+                RF_Public | RF_Standalone | RF_Transactional);
+            if (!Authored)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_compression_scheme: NewObject<UAnimBoneCompressionSettings> failed"));
+            }
+            UAnimBoneCompressionCodec* CodecInstance = NewObject<UAnimBoneCompressionCodec>(
+                Authored, CodecClass, NAME_None,
+                RF_Public | RF_Transactional);
+            if (!CodecInstance)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_compression_scheme: NewObject<%s> failed"), *CodecClass->GetName()));
+            }
+            Authored->Codecs.Add(CodecInstance);
+            NewSettings = Authored;
+            ResolvedCodecClassPath = CodecClass->GetPathName();
+            ResolvedCodecClassName = CodecClass->GetName();
+            bCodecAuthored = true;
+        }
+    }
+
+    if (!NewSettings)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_compression_scheme: pass either 'compression_settings' (DataAsset path) or 'compression_codec' (codec class)"));
+    }
+
+    // Modify before the write so any open editor undo records the
+    // change, then assign the slot. PostEditChangeProperty fires on the
+    // sequence so a Persona-side viewmodel listener picks the swap up.
+    Seq->Modify();
+    Seq->BoneCompressionSettings = NewSettings;
+#if WITH_EDITOR
+    if (FProperty* BCSProp = FindFProperty<FProperty>(UAnimSequence::StaticClass(), TEXT("BoneCompressionSettings")))
+    {
+        FPropertyChangedEvent Event(BCSProp, EPropertyChangeType::ValueSet);
+        Seq->PostEditChangeProperty(Event);
+    }
+#endif
+
+    // Optional sync compression refresh. The public NIAGARA-style
+    // engine call is UAnimSequence::RequestAnimCompression with a
+    // FRequestAnimCompressionParams instance. The default-constructed
+    // params run synchronously; we forward through the public NOOP
+    // overload that takes the params struct, so the DDC bake reruns
+    // with the new codec before we save.
+    bool bRequestCompile = false;
+    Params->TryGetBoolField(TEXT("request_compile"), bRequestCompile);
+    if (!bRequestCompile)
+    {
+        Params->TryGetBoolField(TEXT("recompile"), bRequestCompile);
+    }
+    if (!bRequestCompile)
+    {
+        Params->TryGetBoolField(TEXT("request_compression"), bRequestCompile);
+    }
+    bool bRequestedCompile = false;
+#if WITH_EDITOR
+    if (bRequestCompile)
+    {
+        // FRequestAnimCompressionParams takes a UAnimSequence pointer in
+        // the documented public ctor; the default-constructed value is
+        // safe and uses the engine's current platform settings.
+        FRequestAnimCompressionParams CompressionParams(Seq);
+        Seq->RequestAnimCompression(CompressionParams);
+        bRequestedCompile = true;
+    }
+#endif
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    Seq->MarkPackageDirty();
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(Seq->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("set_compression_scheme"));
+    Result->SetStringField(TEXT("asset"), AssetParam);
+    Result->SetStringField(TEXT("path"), Seq->GetPathName());
+    Result->SetStringField(TEXT("class"), Seq->GetClass()->GetName());
+    Result->SetStringField(TEXT("settings_path"), NewSettings->GetPathName());
+    Result->SetStringField(TEXT("settings_class"), NewSettings->GetClass()->GetName());
+    Result->SetBoolField(TEXT("settings_authored"), bCodecAuthored);
+    if (!ResolvedCodecClassPath.IsEmpty())
+    {
+        Result->SetStringField(TEXT("codec_class"), ResolvedCodecClassName);
+        Result->SetStringField(TEXT("codec_class_path"), ResolvedCodecClassPath);
+        Result->SetNumberField(TEXT("codec_count"), NewSettings->Codecs.Num());
+    }
+    if (!PreviousSettingsPath.IsEmpty())
+    {
+        Result->SetStringField(TEXT("previous_settings_path"), PreviousSettingsPath);
+    }
+    Result->SetBoolField(TEXT("requested_compile"), bRequestedCompile);
     Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }

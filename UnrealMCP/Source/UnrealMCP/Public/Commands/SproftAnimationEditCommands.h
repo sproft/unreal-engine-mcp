@@ -84,6 +84,34 @@
  *     auto-creates through `AddAnimationNotifyTrack` when missing.
  *     The resolved class must derive from UAnimNotifyState (the
  *     UAnimNotify branch belongs on `add_notify`).
+ *   - `set_compression_scheme`: writes the compression slot on a
+ *     UAnimSequence. The modern UE5 compression pipeline keys off
+ *     `UAnimSequence::BoneCompressionSettings` (a
+ *     UAnimBoneCompressionSettings DataAsset whose `Codecs` array
+ *     holds the UAnimBoneCompressionCodec subclass instances the
+ *     engine runs in turn). Callers pass one of two shapes:
+ *       - `compression_settings`: a `/Game/...` path to an existing
+ *         UAnimBoneCompressionSettings DataAsset, written into the
+ *         BoneCompressionSettings slot directly.
+ *       - `compression_codec` (alias `compression_scheme` /
+ *         `scheme`): a class path or short class name for a
+ *         UAnimBoneCompressionCodec subclass (the legacy
+ *         `UAnimCompress_BitwiseCompressOnly` /
+ *         `UAnimCompress_RemoveLinearKeys` /
+ *         `UAnimCompress_RemoveTrivialKeys` codecs derive from this
+ *         interface). We NewObject a UAnimBoneCompressionSettings as
+ *         a per-sequence subobject (outered to the sequence's
+ *         package) and assign one codec subobject of the requested
+ *         class into the `Codecs` array. The per-sequence settings
+ *         object isolates the codec choice from any other sequence
+ *         on the project so flipping the slot does not change every
+ *         other animation.
+ *     The optional `request_compile` flag (alias `recompile`)
+ *     triggers `UAnimSequence::RequestAnimCompression` with the
+ *     default FRequestAnimCompressionParams (synchronous) so the
+ *     saved asset reflects the new scheme; without it the engine
+ *     resamples lazily through the derived data cache. Saves the
+ *     sequence on success unless `save=false`.
  *
  * Inputs (set_rate_scale):
  *   - asset: short asset name or `/Game/...` UAnimSequenceBase path.
@@ -166,4 +194,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddMetadataCurve(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetRootMotion(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddNotifyState(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetCompressionScheme(const TSharedPtr<FJsonObject>& Params);
 };
