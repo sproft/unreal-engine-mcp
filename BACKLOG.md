@@ -2485,13 +2485,25 @@ helpers.
   `min` / `max` 3-element arrays describe the region, optional
   `divisions` `[X, Y, Z]` int triple drives the cell grid through
   `FPlanarCells(FBox, FIntVector)`, optional `transform_index`
-  picks the target transform). Open follow-ons: the dataflow
-  driver under the asset's `DataflowInstance`, per-instance
-  damage threshold override, fracture-level mutate / re-cluster
-  ops, per-bone damage propagation tweaks, and the heavier
-  fracture entry points (`CutMultipleWithPlanarCells` with
-  multi-transform selection, `CutWithMesh` for arbitrary cutting
-  meshes).
+  picks the target transform), plus `set_damage_threshold`
+  (writes the asset's `DamageThreshold` `TArray<float>` /
+  per-fracture-level threshold table; accepts either a `thresholds`
+  per-level float array or a single uniform `threshold` /
+  `value`; optional `set_damage_model=true` flips
+  `DamageModel` over to UserDefined so the per-level threshold
+  actually drives the runtime strain; optional
+  `clear_size_specific=true` clears
+  `bUseSizeSpecificDamageThreshold` so the per-level table
+  applies; invalidates the collection on success). Open
+  follow-ons: the dataflow driver under the asset's
+  `DataflowAsset` (the inner FDataflowNode `DamageThresholds`
+  is not a UPROPERTY on the UDataflowEdNode wrapper so the
+  write needs the editor-only DATAFLOWENGINE dependency in this
+  module), per-instance damage threshold override,
+  fracture-level mutate / re-cluster ops, per-bone damage
+  propagation tweaks, and the heavier fracture entry points
+  (`CutMultipleWithPlanarCells` with multi-transform selection,
+  `CutWithMesh` for arbitrary cutting meshes).
 
 ## Animation (large each)
 

@@ -8378,6 +8378,10 @@ def chaos_edit(
     random_seed: Optional[int] = None,
     include_outside_cell: Optional[bool] = None,
     split_islands: Optional[bool] = None,
+    thresholds: Optional[List[float]] = None,
+    threshold: Optional[float] = None,
+    set_damage_model: Optional[bool] = None,
+    clear_size_specific: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Inspect or mutate a UGeometryCollection asset (read + edit slice).
@@ -8417,6 +8421,25 @@ def chaos_edit(
           ``collision_sample_spacing`` / ``include_outside_cell`` /
           ``split_islands`` for the canonical
           ``CutWithPlanarCells`` knobs.
+        - ``set_damage_threshold``: writes the asset's
+          ``DamageThreshold`` ``TArray<float>``
+          (per-fracture-level damage thresholds for the
+          UserDefined_Damage_Threshold damage model). Either
+          pass ``thresholds`` (an array of per-level floats; the
+          array is copied verbatim into
+          ``UGeometryCollection::DamageThreshold``) or
+          ``threshold`` (a single uniform float; the asset's
+          current ``DamageThreshold`` array length is preserved
+          and every entry is overwritten with that value,
+          defaulting to a single-entry array when the asset has
+          none). Pass ``set_damage_model=True`` to flip
+          ``DamageModel`` over to UserDefined so the per-level
+          threshold actually drives the runtime strain. Pass
+          ``clear_size_specific=True`` to clear
+          ``bUseSizeSpecificDamageThreshold`` so the per-level
+          table applies (the EditCondition on
+          ``DamageThreshold`` gates on the negation of that
+          flag). Invalidates the collection on success.
 
     Args:
         collection: Path or short name of a UGeometryCollection
@@ -8497,6 +8520,14 @@ def chaos_edit(
         params["include_outside_cell"] = include_outside_cell
     if split_islands is not None:
         params["split_islands"] = split_islands
+    if thresholds is not None:
+        params["thresholds"] = thresholds
+    if threshold is not None:
+        params["threshold"] = threshold
+    if set_damage_model is not None:
+        params["set_damage_model"] = set_damage_model
+    if clear_size_specific is not None:
+        params["clear_size_specific"] = clear_size_specific
 
     try:
         response = unreal.send_command("chaos_edit", params)

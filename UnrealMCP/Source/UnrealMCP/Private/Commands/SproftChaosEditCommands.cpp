@@ -137,8 +137,15 @@ TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleCommand(const FString& C
     {
         return HandleFractureBox(Params);
     }
+    if (Op.Equals(TEXT("set_damage_threshold"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_damage_thresholds"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("damage_threshold"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("damage_thresholds"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetDamageThreshold(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("chaos_edit: unsupported op '%s'. Supported: inspect, set_simulation_settings, import_static_mesh, fracture_box"), *Op));
+        FString::Printf(TEXT("chaos_edit: unsupported op '%s'. Supported: inspect, set_simulation_settings, import_static_mesh, fracture_box, set_damage_threshold"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleInspect(const TSharedPtr<FJsonObject>& Params)
@@ -832,6 +839,138 @@ TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleFractureBox(const TShare
     Out->SetNumberField(TEXT("random_seed"), RandomSeed);
     Out->SetBoolField(TEXT("include_outside_cell"), bIncludeOutsideCell);
     Out->SetBoolField(TEXT("split_islands"), bSplitIslands);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleSetDamageThreshold(const TSharedPtr<FJsonObject>& Params)
+{
+    UGeometryCollection* Collection = ResolveCollection(Params);
+    if (!Collection)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve UGeometryCollection (provide 'collection' or 'path' as /Game/... or short name)"));
+    }
+
+    // The op accepts either a per-fracture-level float array
+    // (`thresholds`) or a single uniform float (`threshold` /
+    // `value`). When the per-level array is present it wins; the
+    // uniform variant maps onto the asset's existing array length
+    // (or a single-entry array when the asset has none).
+    TArray<float> NewThresholds;
+    bool bHaveUniform = false;
+    float UniformValue = 0.0f;
+
+    const TArray<TSharedPtr<FJsonValue>>* ArrayPtr = nullptr;
+    if (Params->TryGetArrayField(TEXT("thresholds"), ArrayPtr)
+        || Params->TryGetArrayField(TEXT("damage_thresholds"), ArrayPtr)
+        || Params->TryGetArrayField(TEXT("values"), ArrayPtr)
+        || Params->TryGetArrayField(TEXT("levels"), ArrayPtr))
+    {
+        if (ArrayPtr)
+        {
+            for (const TSharedPtr<FJsonValue>& V : *ArrayPtr)
+            {
+                if (V.IsValid() && V->Type == EJson::Number)
+                {
+                    NewThresholds.Add(static_cast<float>(V->AsNumber()));
+                }
+            }
+        }
+    }
+    else
+    {
+        double Tmp = 0.0;
+        if (Params->TryGetNumberField(TEXT("threshold"), Tmp)
+            || Params->TryGetNumberField(TEXT("value"), Tmp)
+            || Params->TryGetNumberField(TEXT("damage_threshold"), Tmp))
+        {
+            bHaveUniform = true;
+            UniformValue = static_cast<float>(Tmp);
+        }
+    }
+
+    if (NewThresholds.Num() == 0 && !bHaveUniform)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_damage_threshold: pass 'thresholds' (per-level float array) or 'threshold' / 'value' (single uniform float)"));
+    }
+
+    const TArray<float> PreviousThresholds = Collection->DamageThreshold;
+
+    if (NewThresholds.Num() == 0 && bHaveUniform)
+    {
+        // Fill the asset's existing array length with the uniform
+        // value. When the asset has no thresholds yet, seed a
+        // single-entry array (matching the engine's default shape
+        // for a fresh UserDefined_Damage_Threshold asset).
+        const int32 TargetLen = Collection->DamageThreshold.Num() > 0
+            ? Collection->DamageThreshold.Num()
+            : 1;
+        NewThresholds.Init(UniformValue, TargetLen);
+    }
+
+    Collection->DamageThreshold = NewThresholds;
+
+    // Optional: flip DamageModel over to UserDefined so the
+    // per-level threshold actually drives the runtime strain.
+    bool bSetDamageModel = false;
+    Params->TryGetBoolField(TEXT("set_damage_model"), bSetDamageModel);
+    bool bFlippedModel = false;
+    EDamageModelTypeEnum PreviousModel = Collection->DamageModel;
+    if (bSetDamageModel
+        && Collection->DamageModel != EDamageModelTypeEnum::Chaos_Damage_Model_UserDefined_Damage_Threshold)
+    {
+        Collection->DamageModel = EDamageModelTypeEnum::Chaos_Damage_Model_UserDefined_Damage_Threshold;
+        bFlippedModel = true;
+    }
+
+    // Optional: clear the size-specific override so the per-level
+    // table actually applies (the EditCondition on DamageThreshold
+    // gates on `!bUseSizeSpecificDamageThreshold`).
+    bool bClearSizeSpecific = false;
+    Params->TryGetBoolField(TEXT("clear_size_specific"), bClearSizeSpecific);
+    const bool bPreviousSizeSpecific = Collection->bUseSizeSpecificDamageThreshold;
+    if (bClearSizeSpecific && Collection->bUseSizeSpecificDamageThreshold)
+    {
+        Collection->bUseSizeSpecificDamageThreshold = false;
+    }
+
+    // Invalidate the cached simulation data so the next sim or
+    // display tick picks the writes up.
+    Collection->InvalidateCollection();
+    Collection->MarkPackageDirty();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Collection->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_damage_threshold"));
+    Out->SetStringField(TEXT("collection"), Collection->GetPathName());
+    {
+        TArray<TSharedPtr<FJsonValue>> PrevArr;
+        for (float V : PreviousThresholds) PrevArr.Add(MakeShared<FJsonValueNumber>(V));
+        Out->SetArrayField(TEXT("previous_thresholds"), PrevArr);
+    }
+    {
+        TArray<TSharedPtr<FJsonValue>> NewArr;
+        for (float V : Collection->DamageThreshold) NewArr.Add(MakeShared<FJsonValueNumber>(V));
+        Out->SetArrayField(TEXT("thresholds"), NewArr);
+    }
+    Out->SetNumberField(TEXT("level_count"), Collection->DamageThreshold.Num());
+    Out->SetStringField(TEXT("damage_model"), DamageModelToString(Collection->DamageModel));
+    Out->SetStringField(TEXT("previous_damage_model"), DamageModelToString(PreviousModel));
+    Out->SetBoolField(TEXT("damage_model_flipped"), bFlippedModel);
+    if (bHaveUniform)
+    {
+        Out->SetNumberField(TEXT("uniform_value"), UniformValue);
+    }
+    Out->SetBoolField(TEXT("use_size_specific_damage_threshold"), Collection->bUseSizeSpecificDamageThreshold);
+    Out->SetBoolField(TEXT("previous_use_size_specific_damage_threshold"), bPreviousSizeSpecific);
     Out->SetBoolField(TEXT("saved"), bSave);
     return Out;
 }

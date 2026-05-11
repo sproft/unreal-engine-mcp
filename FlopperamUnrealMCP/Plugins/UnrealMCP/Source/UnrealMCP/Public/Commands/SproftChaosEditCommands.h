@@ -63,6 +63,26 @@
  *     `root_index`). After the cut runs `InvalidateCollection` +
  *     `UpdateGeometryDependentProperties` so the cached simulation
  *     data and renderer-side fields rebuild on the next access.
+ *   - `set_damage_threshold`: writes the asset's
+ *     `DamageThreshold` TArray<float> (per-fracture-level damage
+ *     thresholds for the UserDefined_Damage_Threshold damage
+ *     model). Either pass `thresholds` (an array of per-level
+ *     floats; the array is copied verbatim into
+ *     `UGeometryCollection::DamageThreshold`) or `value` /
+ *     `threshold` (a single uniform float; the asset's current
+ *     `DamageThreshold` array length is preserved and every entry
+ *     is overwritten with that value, defaulting to a single-entry
+ *     array when the asset has none). The op also flips
+ *     `DamageModel` over to UserDefined when the caller asks via
+ *     `set_damage_model=true` so the threshold value actually
+ *     drives the runtime strain. Invalidates the collection on
+ *     success; saves the asset unless `save=false`. The
+ *     `DataflowAsset` driver side stays in [BACKLOG.md](BACKLOG.md):
+ *     the inner FDataflowNode that hosts the Dataflow surface
+ *     `DamageThresholds` field is not a UPROPERTY on the
+ *     UDataflowEdNode wrapper, so the reflective write path
+ *     would need the editor-only DATAFLOWENGINE dependency in
+ *     this module which the small variant stays clear of.
  *
  * Inputs:
  *   - collection / path / asset / asset_path: required. Accepts a
@@ -115,4 +135,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetSimulationSettings(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleImportStaticMesh(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleFractureBox(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetDamageThreshold(const TSharedPtr<FJsonObject>& Params);
 };
