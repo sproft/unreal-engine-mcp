@@ -238,6 +238,23 @@
  *      setting two properties via `set_expression_property` (one
  *      for `Exponent`, one for `BaseReflectFraction`) round-trips
  *      when one call should suffice.
+ *   - "set_blend_mode": rebinds the master UMaterial's `BlendMode`
+ *      UPROPERTY plus the paired `OpacityMaskClipValue` knob. The
+ *      `blend_mode` token (alias `mode`) accepts `Opaque` / `Masked` /
+ *      `Translucent` / `Additive` / `Modulate` / `AlphaComposite` /
+ *      `AlphaHoldout`, case-insensitive, with or without the `BLEND_`
+ *      prefix. Optional `opacity_mask_clip_value` (alias
+ *      `opacity_clip` / `clip`) writes the matching float (the engine
+ *      only consults this on Masked). Routes through PreEditChange
+ *      / PostEditChangeProperty against the BlendMode UPROPERTY so
+ *      the static permutation recompiles for the new translucency
+ *      pass. The op surfaces the previous + new BlendMode tokens and
+ *      the previous + new opacity-mask clip values so the caller gets
+ *      a before / after pair on a single round trip. Refuses
+ *      non-UMaterial assets (Material Instances flow through
+ *      `set_attribute_blendable` instead since the override surface is
+ *      on the FMaterialInstanceBasePropertyOverrides struct, not on
+ *      the MIC's UPROPERTY directly).
  *   - "set_attribute_blendable": flips a per-attribute override toggle
  *      on a UMaterialInstanceConstant's
  *      `FMaterialInstanceBasePropertyOverrides` struct. The
@@ -310,4 +327,5 @@ private:
     TSharedPtr<FJsonObject> AddUVNode(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddDynamicParameter(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddFresnel(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetBlendMode(const TSharedPtr<FJsonObject>& Params);
 };

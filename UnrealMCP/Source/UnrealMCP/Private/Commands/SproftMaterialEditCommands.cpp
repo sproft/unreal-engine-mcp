@@ -542,9 +542,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddFresnel(Params);
     }
+    if (Operation == TEXT("set_blend_mode") || Operation == TEXT("set_blendmode")
+        || Operation == TEXT("blend_mode") || Operation == TEXT("set_material_blend_mode"))
+    {
+        return SetBlendMode(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter, add_fresnel"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter, add_fresnel, set_blend_mode"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -5028,6 +5033,211 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddFresnel(const TSharedPtr
     {
         ResultObj->SetStringField(TEXT("connect_to"), ExpressionConnected);
     }
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Resolve a user-supplied blend-mode token to the EBlendMode enum
+     *  the master UMaterial stores. Case-insensitive; accepts both the
+     *  bare token (`Opaque`, `Masked`, etc.) and the engine's
+     *  fully-qualified UPROPERTY meta form (`BLEND_Opaque` etc.). The
+     *  set mirrors the engine's EBlendMode declarations through
+     *  UE 5.7 (the alpha-composite / alpha-holdout pair landed in 5.0
+     *  and the rest are pre-4.0). */
+    bool ResolveBlendModeToken(const FString& InToken, EBlendMode& OutMode, FString& OutCanonical)
+    {
+        FString T = InToken.TrimStartAndEnd().ToLower();
+        if (T.StartsWith(TEXT("blend_")))
+        {
+            T = T.RightChop(6);
+        }
+        T = T.Replace(TEXT("_"), TEXT(""));
+        T = T.Replace(TEXT(" "), TEXT(""));
+        T = T.Replace(TEXT("-"), TEXT(""));
+
+        if (T == TEXT("opaque"))
+        {
+            OutMode = BLEND_Opaque;
+            OutCanonical = TEXT("Opaque");
+            return true;
+        }
+        if (T == TEXT("masked") || T == TEXT("mask"))
+        {
+            OutMode = BLEND_Masked;
+            OutCanonical = TEXT("Masked");
+            return true;
+        }
+        if (T == TEXT("translucent"))
+        {
+            OutMode = BLEND_Translucent;
+            OutCanonical = TEXT("Translucent");
+            return true;
+        }
+        if (T == TEXT("additive"))
+        {
+            OutMode = BLEND_Additive;
+            OutCanonical = TEXT("Additive");
+            return true;
+        }
+        if (T == TEXT("modulate"))
+        {
+            OutMode = BLEND_Modulate;
+            OutCanonical = TEXT("Modulate");
+            return true;
+        }
+        if (T == TEXT("alphacomposite") || T == TEXT("premultiplied"))
+        {
+            OutMode = BLEND_AlphaComposite;
+            OutCanonical = TEXT("AlphaComposite");
+            return true;
+        }
+        if (T == TEXT("alphaholdout") || T == TEXT("holdout"))
+        {
+            OutMode = BLEND_AlphaHoldout;
+            OutCanonical = TEXT("AlphaHoldout");
+            return true;
+        }
+        return false;
+    }
+
+    FString BlendModeToCanonicalToken(EBlendMode Mode)
+    {
+        switch (Mode)
+        {
+        case BLEND_Opaque: return TEXT("Opaque");
+        case BLEND_Masked: return TEXT("Masked");
+        case BLEND_Translucent: return TEXT("Translucent");
+        case BLEND_Additive: return TEXT("Additive");
+        case BLEND_Modulate: return TEXT("Modulate");
+        case BLEND_AlphaComposite: return TEXT("AlphaComposite");
+        case BLEND_AlphaHoldout: return TEXT("AlphaHoldout");
+        default: return FString::Printf(TEXT("Unknown(%d)"), static_cast<int32>(Mode));
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetBlendMode(const TSharedPtr<FJsonObject>& Params)
+{
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(MaterialPath);
+    UMaterial* Material = Cast<UMaterial>(Asset);
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial (Material Instances route through set_attribute_blendable)"), *MaterialPath));
+    }
+
+    FString BlendToken;
+    if (!Params->TryGetStringField(TEXT("blend_mode"), BlendToken)
+        && !Params->TryGetStringField(TEXT("blendmode"), BlendToken)
+        && !Params->TryGetStringField(TEXT("mode"), BlendToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'blend_mode' parameter (Opaque / Masked / Translucent / Additive / Modulate / AlphaComposite / AlphaHoldout)"));
+    }
+
+    EBlendMode NewMode;
+    FString CanonicalToken;
+    if (!ResolveBlendModeToken(BlendToken, NewMode, CanonicalToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown blend mode '%s'. Supported: Opaque, Masked, Translucent, Additive, Modulate, AlphaComposite, AlphaHoldout"), *BlendToken));
+    }
+
+    // Capture the previous values so the response carries the
+    // before / after pair on a single round trip.
+    const EBlendMode PreviousMode = Material->BlendMode;
+    const float PreviousClipValue = Material->OpacityMaskClipValue;
+    const FString PreviousToken = BlendModeToCanonicalToken(PreviousMode);
+
+    // Resolve the BlendMode UPROPERTY so PreEditChange / PostEditChange
+    // route the static-permutation refresh through the right slot. The
+    // engine recompiles the static permutation shaders when the blend
+    // mode flips since the translucency pass / depth pass selection
+    // changes per blend mode.
+    FProperty* BlendModeProperty = Material->GetClass()->FindPropertyByName(TEXT("BlendMode"));
+    if (!BlendModeProperty)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Reflection database does not expose 'BlendMode' on UMaterial"));
+    }
+
+    // Optional `opacity_mask_clip_value` (alias `opacity_clip` / `clip`).
+    // The engine consults this only on Masked, but a caller authoring
+    // a Masked + clip-value pair in one round trip wants both knobs on
+    // the same op.
+    bool bClipProvided = false;
+    double ClipValue = 0.0;
+    if (Params->TryGetNumberField(TEXT("opacity_mask_clip_value"), ClipValue)
+        || Params->TryGetNumberField(TEXT("opacity_clip_value"), ClipValue)
+        || Params->TryGetNumberField(TEXT("opacity_clip"), ClipValue)
+        || Params->TryGetNumberField(TEXT("clip"), ClipValue)
+        || Params->TryGetNumberField(TEXT("OpacityMaskClipValue"), ClipValue))
+    {
+        bClipProvided = true;
+    }
+
+    Material->PreEditChange(BlendModeProperty);
+    Material->BlendMode = NewMode;
+    if (bClipProvided)
+    {
+        Material->OpacityMaskClipValue = static_cast<float>(ClipValue);
+    }
+
+    // PostEditChangeProperty on BlendMode rebuilds the cached shader
+    // permutation map, which is what we need to land here.
+    FPropertyChangedEvent ChangeEvent(BlendModeProperty, EPropertyChangeType::ValueSet);
+    Material->PostEditChangeProperty(ChangeEvent);
+
+    // If the caller supplied an opacity-mask clip and we did not bundle
+    // it into the BlendMode PostEditChange call (the engine groups them
+    // in the editor UI), still fire a second PostEditChange against the
+    // clip-value UPROPERTY so the displayed value refreshes too.
+    if (bClipProvided)
+    {
+        if (FProperty* ClipProperty = Material->GetClass()->FindPropertyByName(TEXT("OpacityMaskClipValue")))
+        {
+            FPropertyChangedEvent ClipChange(ClipProperty, EPropertyChangeType::ValueSet);
+            Material->PostEditChangeProperty(ClipChange);
+        }
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_blend_mode"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetStringField(TEXT("blend_mode"), CanonicalToken);
+    ResultObj->SetStringField(TEXT("previous_blend_mode"), PreviousToken);
+    ResultObj->SetNumberField(TEXT("opacity_mask_clip_value"), Material->OpacityMaskClipValue);
+    ResultObj->SetNumberField(TEXT("previous_opacity_mask_clip_value"), PreviousClipValue);
+    ResultObj->SetBoolField(TEXT("clip_value_written"), bClipProvided);
     ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
     ResultObj->SetBoolField(TEXT("saved"), bSave);
     return ResultObj;

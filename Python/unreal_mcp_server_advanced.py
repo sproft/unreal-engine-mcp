@@ -3903,6 +3903,8 @@ def material_edit(
     base_reflect_fraction: Optional[float] = None,
     normal: Optional[str] = None,
     camera_vector: Optional[str] = None,
+    blend_mode: Optional[str] = None,
+    opacity_mask_clip_value: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -4121,6 +4123,25 @@ def material_edit(
           knobs as ``add_math`` / ``add_uv_node`` (``position``,
           ``name``, ``properties``, ``property`` / ``connect_to`` /
           ``connect_input``, ``recompile``, ``save``).
+        - "set_blend_mode": writes the master ``UMaterial``'s
+          ``BlendMode`` UPROPERTY plus the paired
+          ``OpacityMaskClipValue`` knob. ``blend_mode`` (alias
+          ``mode``) accepts ``Opaque`` / ``Masked`` / ``Translucent``
+          / ``Additive`` / ``Modulate`` / ``AlphaComposite`` /
+          ``AlphaHoldout``, case-insensitive, with or without the
+          ``BLEND_`` prefix. Optional ``opacity_mask_clip_value``
+          (alias ``opacity_clip`` / ``clip``) writes the matching
+          float (the engine only consults this on Masked). Routes
+          through PreEditChange / PostEditChangeProperty against the
+          BlendMode UPROPERTY so the static permutation recompiles
+          for the new translucency pass. The response carries the
+          previous + new BlendMode tokens and the previous + new
+          opacity-mask clip values so the caller gets a before /
+          after pair on a single round trip. Refuses non-UMaterial
+          assets (Material Instances flow through
+          ``set_attribute_blendable`` instead since the override
+          surface is on the FMaterialInstanceBasePropertyOverrides
+          struct, not on the MIC's UPROPERTY directly).
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.
@@ -4301,6 +4322,10 @@ def material_edit(
         params["normal"] = normal
     if camera_vector is not None:
         params["camera_vector"] = camera_vector
+    if blend_mode is not None:
+        params["blend_mode"] = blend_mode
+    if opacity_mask_clip_value is not None:
+        params["opacity_mask_clip_value"] = opacity_mask_clip_value
 
     try:
         response = unreal.send_command("material_edit", params)
