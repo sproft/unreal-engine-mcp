@@ -25,6 +25,14 @@
  *     `GetNodeName()` (composite walk). Optionally takes a flat
  *     property dict applied through `FProperty::ImportText` on the
  *     new decorator.
+ *   - `set_root_decorator` (aliases `add_root_decorator`): append a
+ *     UBTDecorator to the tree-level `RootDecorators` array on the
+ *     UBehaviorTree asset itself (the same chain the BT editor
+ *     surfaces when the user right-clicks the root composite and
+ *     chooses "Add Decorator"). The decorator outers under the tree
+ *     and wires through `InitializeFromAsset`; the class must derive
+ *     from `UBTDecorator`. Optionally takes a flat property dict
+ *     applied through `FProperty::ImportText` on the new decorator.
  *   - `add_blackboard_decorator`: declarative one-call shortcut for
  *     the Blackboard decorator the editor's add-decorator picker
  *     spawns most often. Spawns a UBTDecorator_Blackboard under a
@@ -114,6 +122,17 @@
  *   - target:              child node by `GetNodeName()` substring.
  *                          Required (decorators attach to a composite
  *                          child slot, not the composite itself).
+ *   - decorator_class:     UClass for the decorator. Short token
+ *                          (e.g. `blackboard`, `cooldown`, `loop`)
+ *                          plus full path forms. Required.
+ *   - properties:          optional flat property dict applied
+ *                          through `FProperty::ImportText` on the new
+ *                          decorator.
+ *   - save:                save the asset after the edit. Default
+ *                          true.
+ *
+ * Inputs (set_root_decorator):
+ *   - tree:                BT asset path / short name. Required.
  *   - decorator_class:     UClass for the decorator. Short token
  *                          (e.g. `blackboard`, `cooldown`, `loop`)
  *                          plus full path forms. Required.
@@ -213,6 +232,7 @@ private:
     TSharedPtr<FJsonObject> HandleAddRootComposite(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddChildTask(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddDecorator(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetRootDecorator(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddBlackboardDecorator(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddService(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetBlackboard(const TSharedPtr<FJsonObject>& Params);

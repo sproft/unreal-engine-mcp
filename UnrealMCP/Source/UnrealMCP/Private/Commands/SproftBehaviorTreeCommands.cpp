@@ -593,6 +593,10 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCommand(const FString
     {
         return HandleAddDecorator(Params);
     }
+    if (Op == TEXT("set_root_decorator") || Op == TEXT("add_root_decorator"))
+    {
+        return HandleSetRootDecorator(Params);
+    }
     if (Op == TEXT("add_blackboard_decorator") || Op == TEXT("add_bb_decorator"))
     {
         return HandleAddBlackboardDecorator(Params);
@@ -1165,6 +1169,86 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddDecorator(const TS
     Result->SetStringField(TEXT("decorator_name"), NewDecorator->GetNodeName());
     Result->SetStringField(TEXT("object_name"), NewDecorator->GetName());
     Result->SetNumberField(TEXT("decorator_index"), Slot.Decorators.Num() - 1);
+    if (bHasProperties)
+    {
+        Result->SetArrayField(TEXT("applied_properties"), AppliedJson);
+        Result->SetArrayField(TEXT("skipped_properties"), SkippedJson);
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleSetRootDecorator(const TSharedPtr<FJsonObject>& Params)
+{
+    // Tree-level decorators live on `UBehaviorTree::RootDecorators`,
+    // a TArray<TObjectPtr<UBTDecorator>> on the asset itself rather
+    // than on the root composite. The BT editor exposes this chain
+    // under "Add Decorator" on the root composite node; the runtime
+    // gates the subtree on the same chain when the BT is referenced
+    // through a `RunBehavior` task.
+    FString TreeError;
+    UBehaviorTree* Tree = LoadTargetTree(Params, TreeError);
+    if (!Tree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TreeError);
+    }
+
+    FString DecoratorClassToken;
+    if (!Params->TryGetStringField(TEXT("decorator_class"), DecoratorClassToken)
+        && !Params->TryGetStringField(TEXT("class"), DecoratorClassToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'decorator_class' parameter"));
+    }
+    UClass* DecoratorClass = ResolveBTNodeClass(DecoratorClassToken, UBTDecorator::StaticClass());
+    if (!DecoratorClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UBTDecorator class '%s'"), *DecoratorClassToken));
+    }
+    if (DecoratorClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is abstract"), *DecoratorClass->GetPathName()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+    const bool bHasProperties = Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid();
+
+    UBTDecorator* NewDecorator = NewObject<UBTDecorator>(Tree, DecoratorClass, NAME_None, RF_Transactional);
+    if (!NewDecorator)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to NewObject UBTDecorator of class '%s'"), *DecoratorClass->GetName()));
+    }
+    NewDecorator->InitializeFromAsset(*Tree);
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    if (bHasProperties)
+    {
+        ApplyFlatProperties(NewDecorator, PropsObj, AppliedJson, SkippedJson);
+    }
+
+    Tree->RootDecorators.Add(NewDecorator);
+
+    Tree->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Tree->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("set_root_decorator"));
+    Result->SetStringField(TEXT("tree"), Tree->GetPathName());
+    Result->SetStringField(TEXT("class"), DecoratorClass->GetName());
+    Result->SetStringField(TEXT("class_path"), DecoratorClass->GetPathName());
+    Result->SetStringField(TEXT("decorator_name"), NewDecorator->GetNodeName());
+    Result->SetStringField(TEXT("object_name"), NewDecorator->GetName());
+    Result->SetNumberField(TEXT("decorator_index"), Tree->RootDecorators.Num() - 1);
+    Result->SetNumberField(TEXT("root_decorator_count"), Tree->RootDecorators.Num());
     if (bHasProperties)
     {
         Result->SetArrayField(TEXT("applied_properties"), AppliedJson);

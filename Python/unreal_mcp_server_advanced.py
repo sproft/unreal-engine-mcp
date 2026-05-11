@@ -6418,6 +6418,10 @@ def behavior_tree(
           named composite.
         - ``add_decorator``: append a UBTDecorator to a target child
           slot's decorator chain.
+        - ``set_root_decorator``: append a UBTDecorator to the tree-
+          level ``RootDecorators`` array on the UBehaviorTree asset
+          itself (the chain the BT editor surfaces under "Add
+          Decorator" on the root composite).
         - ``add_blackboard_decorator``: append a UBTDecorator_Blackboard
           to a target child slot's decorator chain in one call. Takes
           a Blackboard ``key`` name + ``condition`` (``IsSet`` /
