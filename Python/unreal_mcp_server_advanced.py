@@ -6727,6 +6727,7 @@ def gas_edit(
     passed_in_tags: Optional[List[str]] = None,
     execution_index: Optional[int] = None,
     required_source_tags: Optional[List[str]] = None,
+    attributes: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over Gameplay Ability System assets.
@@ -6749,6 +6750,16 @@ def gas_edit(
         - ``create_gameplay_ability`` / ``create_gameplay_effect``:
           NewObject's a UBlueprint at a ``/Game/...`` path with a
           parent class derived from UGameplayAbility / UGameplayEffect.
+        - ``create_attribute_set``: NewObject's a UBlueprint at a
+          ``/Game/...`` path with a UAttributeSet-derived parent
+          class (default ``/Script/GameplayAbilities.AttributeSet``).
+          Optional ``attributes`` list of attribute names lays each
+          one down as a typed ``FGameplayAttributeData`` member
+          variable on the Blueprint through
+          ``FBlueprintEditorUtils::AddMemberVariable``. Compile +
+          save the BP after the writes so the new attribute set's
+          CDO carries the typed UPROPERTYs that
+          ``FGameplayAttribute::IsSupportedProperty`` sweeps for.
         - ``set_gameplay_tags``: tag-container mutation on either asset
           shape, routing through the reflected UPROPERTY fields on
           UGameplayAbility and the asset / target / blocked-ability GE
@@ -6963,6 +6974,8 @@ def gas_edit(
         params["execution_index"] = execution_index
     if required_source_tags is not None:
         params["required_source_tags"] = required_source_tags
+    if attributes is not None:
+        params["attributes"] = attributes
 
     try:
         response = unreal.send_command("gas_edit", params)

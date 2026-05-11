@@ -181,4 +181,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddExecution(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddCalculationModifier(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddConditionalEffect(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleCreateAttributeSet(const TSharedPtr<FJsonObject>& Params);
 };

@@ -1330,6 +1330,35 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `gas_edit create_attribute_set` (small) — NewObject's a
+  UBlueprint subclass of `UAttributeSet` at a `/Game/...`
+  path with an optional list of named attributes added as
+  typed `FGameplayAttributeData` member variables on the
+  Blueprint. `parent_class` defaults to
+  `/Script/GameplayAbilities.AttributeSet`; subclasses
+  (`/Game/...` Blueprint class paths or
+  `/Script/Module.ClassName` paths) resolve through the
+  same `ResolveCreateParentClass` helper
+  `create_gameplay_ability` / `create_gameplay_effect`
+  already use. The optional `attributes` list accepts string
+  entries or `{name}` object entries (the object form lets a
+  future surface hang follow-on metadata off each row), and
+  each name lands as a struct UPROPERTY whose
+  `PinSubCategoryObject` is the canonical
+  `FGameplayAttributeData::StaticStruct()`. The variable add
+  routes through `FBlueprintEditorUtils::AddMemberVariable`,
+  which is the same path `bp_variable add` uses for the
+  `struct:/Script/GameplayAbilities.GameplayAttributeData`
+  token shape. Duplicate names against the existing variable
+  set surface under the response's `skipped` array (with a
+  reason) so a re-run with the same attribute list stays
+  idempotent. After the writes `MarkBlueprintAsStructurallyModified`
+  fires, then the BP compiles + saves so the new attribute
+  set's CDO carries the typed UPROPERTYs that
+  `FGameplayAttribute::IsSupportedProperty` sweeps for at
+  runtime. Aliases: `create_attribute_set` /
+  `create_attributeset` / `create_attribute_set_bp` /
+  `create_attributes`.
 - `animation_edit set_root_motion` (small) — writes the four
   canonical root-motion UPROPERTYs on a UAnimSequence:
   `bEnableRootMotion` (required `enable` boolean),

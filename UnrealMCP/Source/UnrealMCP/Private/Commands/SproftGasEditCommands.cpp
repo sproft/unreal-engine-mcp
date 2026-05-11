@@ -808,6 +808,11 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCommand(const FString& Com
     {
         return HandleAddConditionalEffect(Params);
     }
+    if (Op == TEXT("create_attribute_set") || Op == TEXT("create_attributeset")
+        || Op == TEXT("create_attribute_set_bp") || Op == TEXT("create_attributes"))
+    {
+        return HandleCreateAttributeSet(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("gas_edit: unsupported op '%s'"), *Op));
 }
@@ -2850,6 +2855,188 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleAddConditionalEffect(const
         Result->SetArrayField(TEXT("unknown_tags"), WarnJson);
     }
     Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCreateAttributeSet(const TSharedPtr<FJsonObject>& Params)
+{
+    // Spawn a UBlueprint subclass of UAttributeSet at a `/Game/...`
+    // path with an optional list of named attributes added as
+    // FGameplayAttributeData UPROPERTYs through
+    // FBlueprintEditorUtils::AddMemberVariable. The variable type is
+    // a struct pin whose UScriptStruct is the canonical
+    // FGameplayAttributeData (from
+    // /Script/GameplayAbilities.GameplayAttributeData), which is the
+    // exact shape FGameplayAttribute::IsSupportedProperty checks for
+    // when sweeping a UAttributeSet CDO. Compile + save the BP after.
+    FString PackagePath;
+    if (!Params->TryGetStringField(TEXT("path"), PackagePath)
+        && !Params->TryGetStringField(TEXT("asset"), PackagePath)
+        && !Params->TryGetStringField(TEXT("asset_path"), PackagePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'path' parameter"));
+    }
+
+    FString ParentInput;
+    Params->TryGetStringField(TEXT("parent_class"), ParentInput);
+    if (ParentInput.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("parent"), ParentInput);
+    }
+
+    UClass* DefaultParent = LoadClass<UObject>(nullptr, TEXT("/Script/GameplayAbilities.AttributeSet"));
+    if (!DefaultParent)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not load /Script/GameplayAbilities.AttributeSet (is the GameplayAbilities plugin enabled?)"));
+    }
+    UClass* ParentClass = ResolveCreateParentClass(ParentInput, DefaultParent);
+    if (!ParentClass || !ParentClass->IsChildOf(UAttributeSet::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Parent class '%s' is not a UAttributeSet subclass"),
+                ParentClass ? *ParentClass->GetPathName() : *ParentInput));
+    }
+
+    bool bOverwrite = false;
+    Params->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    FString Error;
+    UBlueprint* NewBP = CreateGasBlueprint(PackagePath, ParentClass, bOverwrite, Error);
+    if (!NewBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(Error);
+    }
+
+    // Resolve the FGameplayAttributeData UScriptStruct once. The
+    // attribute storage struct is the canonical typed slot every
+    // engine attribute (UHealthSet / UCombatSet / etc.) uses; the
+    // FGameplayAttribute::IsSupportedProperty check in
+    // GameplayAttributeData.h walks for FStructProperty whose Struct
+    // is exactly FGameplayAttributeData (or a subclass).
+    UScriptStruct* AttributeDataStruct = FGameplayAttributeData::StaticStruct();
+    if (!AttributeDataStruct)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve FGameplayAttributeData::StaticStruct() (link error against GameplayAbilities?)"));
+    }
+
+    // Walk the attributes list and add each as a typed FGameplayAttributeData
+    // member variable on the new BP. The struct pin path mirrors what
+    // bp_variable add does for `struct:/Script/GameplayAbilities.GameplayAttributeData`.
+    TArray<FString> AttributeNames;
+    if (Params->HasField(TEXT("attributes")))
+    {
+        const TSharedPtr<FJsonValue> AttrsVal = Params->TryGetField(TEXT("attributes"));
+        if (AttrsVal.IsValid() && AttrsVal->Type == EJson::Array)
+        {
+            for (const TSharedPtr<FJsonValue>& Entry : AttrsVal->AsArray())
+            {
+                if (Entry.IsValid() && Entry->Type == EJson::String)
+                {
+                    const FString Trim = Entry->AsString().TrimStartAndEnd();
+                    if (!Trim.IsEmpty())
+                    {
+                        AttributeNames.Add(Trim);
+                    }
+                }
+                else if (Entry.IsValid() && Entry->Type == EJson::Object)
+                {
+                    // Object form: `{name}` is the supported shape so
+                    // callers can hang follow-on metadata (default value,
+                    // category, etc.) on the entry as the surface grows.
+                    FString N;
+                    if (Entry->AsObject()->TryGetStringField(TEXT("name"), N))
+                    {
+                        const FString Trim = N.TrimStartAndEnd();
+                        if (!Trim.IsEmpty())
+                        {
+                            AttributeNames.Add(Trim);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    int32 VariablesAdded = 0;
+    TArray<TSharedPtr<FJsonValue>> AttributesJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    for (const FString& AttrName : AttributeNames)
+    {
+        const FName AttrFName(*AttrName);
+
+        // Refuse duplicates against the existing variable set so the
+        // op stays idempotent on a re-run with the same attribute list.
+        bool bExists = false;
+        for (const FBPVariableDescription& Var : NewBP->NewVariables)
+        {
+            if (Var.VarName == AttrFName)
+            {
+                bExists = true;
+                break;
+            }
+        }
+        if (bExists)
+        {
+            TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+            Row->SetStringField(TEXT("name"), AttrName);
+            Row->SetStringField(TEXT("reason"), TEXT("variable already exists on the Blueprint"));
+            SkippedJson.Add(MakeShared<FJsonValueObject>(Row));
+            continue;
+        }
+
+        FEdGraphPinType PinType;
+        PinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+        PinType.PinSubCategoryObject = AttributeDataStruct;
+
+        if (!FBlueprintEditorUtils::AddMemberVariable(NewBP, AttrFName, PinType))
+        {
+            TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+            Row->SetStringField(TEXT("name"), AttrName);
+            Row->SetStringField(TEXT("reason"), TEXT("FBlueprintEditorUtils::AddMemberVariable refused the add"));
+            SkippedJson.Add(MakeShared<FJsonValueObject>(Row));
+            continue;
+        }
+
+        ++VariablesAdded;
+        TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+        Row->SetStringField(TEXT("name"), AttrName);
+        Row->SetStringField(TEXT("struct"), AttributeDataStruct->GetName());
+        AttributesJson.Add(MakeShared<FJsonValueObject>(Row));
+    }
+
+    if (VariablesAdded > 0)
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(NewBP);
+    }
+
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(NewBP);
+    }
+    const FString FinalPath = NewBP->GetPathName();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(FinalPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("create_attribute_set"));
+    Result->SetStringField(TEXT("name"), NewBP->GetName());
+    Result->SetStringField(TEXT("path"), FinalPath);
+    Result->SetStringField(TEXT("class"), NewBP->GetClass()->GetName());
+    Result->SetStringField(TEXT("parent_class"), ParentClass->GetPathName());
+    Result->SetStringField(TEXT("parent_class_short"), ParentClass->GetName());
+    Result->SetNumberField(TEXT("attributes_added"), VariablesAdded);
+    Result->SetArrayField(TEXT("attributes"), AttributesJson);
+    Result->SetArrayField(TEXT("skipped"), SkippedJson);
+    Result->SetBoolField(TEXT("compiled"), bCompile);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }
