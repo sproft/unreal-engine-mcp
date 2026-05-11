@@ -1330,6 +1330,33 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `sequencer_edit add_event_track` (small) — declarative one-call
+  wrapper that lays a `UMovieSceneEventTrack` plus a default
+  `UMovieSceneEventTriggerSection` (the modern section subclass the
+  engine's `UMovieSceneEventTrack::CreateNewSection` returns since
+  the 5.1 refactor that moved the legacy `UMovieSceneEventSection`
+  aside) down in a single pass. Useful for triggering Blueprint
+  events at specific times in a sequence. Master tracks (the
+  common case for sequence-wide hooks) ride the no-binding
+  `UMovieScene::AddTrack` overload; pass `binding` GUID or
+  `actor` / `possessable` name to scope the track under a
+  possessable / spawnable instead. The track is reused on the
+  matching scope by default (idempotent re-runs), unless
+  `force_new_track=true` is passed. `start_frame` defaults to the
+  MovieScene's playback range start when omitted;
+  `duration_frames` defaults to the playback range length, with
+  a single-tick fallback for sequences whose playback range is
+  still open. The section attaches through the canonical
+  `CreateNewSection` + `AddSection` pair so the track's modern
+  subclass landing logic stays the engine's own. Optional
+  `event_callback_function` lands on the track's
+  `UMovieSceneNameableTrack::SetDisplayName` slot so designers
+  can navigate to the new section by name in Sequencer before
+  authoring the per-key event endpoints (those still flow through
+  the sequence director Blueprint's K2 graph; this op stops at
+  the track + section pair so the cpp stays clean of editor-only
+  K2 surface). Saves on success unless `save=false`. Aliases:
+  `add_event_track` / `event_track` / `add_event`.
 - `animation_edit add_notify_state` (small) — pairs with the
   existing `add_notify` op which already handles point notifies
   (UAnimNotify). The new op accepts the canonical state-notify

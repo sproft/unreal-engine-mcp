@@ -7155,6 +7155,7 @@ def sequencer_edit(
     visible: Optional[bool] = None,
     fade_in_seconds: Optional[float] = None,
     fade_out_seconds: Optional[float] = None,
+    event_callback_function: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over a ULevelSequence asset.
@@ -7234,6 +7235,25 @@ def sequencer_edit(
           ``[start_frame, start_frame + duration_frames)``) with the
           bool channel default set to ``visible`` (default True).
           Pass ``force_new_track=True`` to bypass the reuse path.
+        - ``add_event_track``: declarative one-call wrapper that
+          lays a ``UMovieSceneEventTrack`` plus a default
+          ``UMovieSceneEventTriggerSection`` (the section subclass
+          the engine's ``UMovieSceneEventTrack::CreateNewSection``
+          returns) down in a single pass. Useful for triggering
+          Blueprint events at specific times in a sequence. Master
+          tracks (the common case) ride the no-binding ``AddTrack``
+          overload; pass ``binding`` GUID or ``actor`` /
+          ``possessable`` to scope the track under a possessable /
+          spawnable. ``start_frame`` defaults to the playback range
+          start; ``duration_frames`` defaults to the playback range
+          length, falling back to a single second when the playback
+          range is open. Optional
+          ``event_callback_function`` lands on the track's display
+          name so the section is navigable in Sequencer before the
+          actual event endpoint exists; per-key endpoint authoring
+          still flows through the sequence director Blueprint. Pass
+          ``force_new_track=True`` to bypass the reuse-existing
+          path.
         - ``add_audio_fade``: writes a fade-in / fade-out volume
           ramp on an existing ``UMovieSceneAudioSection`` by writing
           a 4-key envelope through the section's
@@ -7362,6 +7382,8 @@ def sequencer_edit(
         params["fade_in_seconds"] = fade_in_seconds
     if fade_out_seconds is not None:
         params["fade_out_seconds"] = fade_out_seconds
+    if event_callback_function is not None:
+        params["event_callback_function"] = event_callback_function
 
     try:
         response = unreal.send_command("sequencer_edit", params)

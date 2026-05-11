@@ -22,9 +22,11 @@
 #include "Sections/MovieScene3DTransformSection.h"
 #include "Sections/MovieSceneAudioSection.h"
 #include "Sections/MovieSceneBoolSection.h"
+#include "Sections/MovieSceneEventSectionBase.h"
 #include "Sound/SoundBase.h"
 #include "Tracks/MovieScene3DTransformTrack.h"
 #include "Tracks/MovieSceneAudioTrack.h"
+#include "Tracks/MovieSceneEventTrack.h"
 #include "Tracks/MovieSceneSpawnTrack.h"
 #include "Tracks/MovieSceneVisibilityTrack.h"
 #include "UObject/Class.h"
@@ -434,6 +436,11 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCommand(const FStrin
         || Op == TEXT("add_fade") || Op == TEXT("set_audio_fade"))
     {
         return HandleAddAudioFade(Params);
+    }
+    if (Op == TEXT("add_event_track") || Op == TEXT("event_track")
+        || Op == TEXT("add_event"))
+    {
+        return HandleAddEventTrack(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("sequencer_edit: unsupported op '%s'"), *Op));
@@ -2591,6 +2598,230 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddAudioFade(const T
     Result->SetNumberField(TEXT("fade_out_frames"), FadeOutFrames);
     Result->SetNumberField(TEXT("keys_written"), KeysWritten);
     Result->SetNumberField(TEXT("previous_key_count"), PreviousKeyCount);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddEventTrack(const TSharedPtr<FJsonObject>& Params)
+{
+    // Declarative one-call wrapper that lays a `UMovieSceneEventTrack`
+    // plus a default `UMovieSceneEventTriggerSection` (the section
+    // subclass the engine's `UMovieSceneEventTrack::CreateNewSection`
+    // returns since the 5.1 refactor that moved the legacy
+    // `UMovieSceneEventSection` aside) down in a single pass. Useful
+    // for triggering Blueprint events at specific times in a sequence;
+    // the per-key event endpoint authoring still flows through the
+    // sequence director Blueprint, but the track + section pair lands
+    // here so a follow-on UI / Python step can populate keys.
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_event_track: missing 'sequence' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    UMovieSceneSequence* Sequence = Cast<UMovieSceneSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_event_track: asset at '%s' is not a UMovieSceneSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_event_track: sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    // Optional binding. Master tracks (the common case for event
+    // hooks that drive sequence-wide behaviour) ride on the no-binding
+    // AddTrack overload; binding-scoped event tracks attach under a
+    // possessable / spawnable through the binding GUID.
+    FGuid BindingGuid;
+    FString BindingGuidString;
+    if (Params->TryGetStringField(TEXT("binding"), BindingGuidString)
+        || Params->TryGetStringField(TEXT("binding_guid"), BindingGuidString))
+    {
+        if (!FGuid::Parse(BindingGuidString, BindingGuid))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("add_event_track: invalid binding GUID '%s'"), *BindingGuidString));
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        FString PossessableName;
+        if (Params->TryGetStringField(TEXT("possessable"), PossessableName)
+            || Params->TryGetStringField(TEXT("actor"), PossessableName))
+        {
+            BindingGuid = FindBindingByName(MovieScene, PossessableName);
+            if (!BindingGuid.IsValid())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("add_event_track: no binding matching '%s' on sequence '%s'"),
+                        *PossessableName, *Sequence->GetName()));
+            }
+        }
+    }
+
+    // Reuse an existing event track on the matching scope unless
+    // `force_new_track` is set; mirrors HandleAddAudioTrack's idempotent
+    // shape.
+    UMovieSceneEventTrack* EventTrack = nullptr;
+    bool bReusedExisting = false;
+    if (BindingGuid.IsValid())
+    {
+        if (UMovieSceneTrack* Existing = MovieScene->FindTrack(UMovieSceneEventTrack::StaticClass(), BindingGuid))
+        {
+            EventTrack = Cast<UMovieSceneEventTrack>(Existing);
+            bReusedExisting = (EventTrack != nullptr);
+        }
+    }
+    else
+    {
+        for (UMovieSceneTrack* T : MovieScene->GetTracks())
+        {
+            if (UMovieSceneEventTrack* Cand = Cast<UMovieSceneEventTrack>(T))
+            {
+                EventTrack = Cand;
+                bReusedExisting = true;
+                break;
+            }
+        }
+    }
+
+    bool bForceNewTrack = false;
+    Params->TryGetBoolField(TEXT("force_new_track"), bForceNewTrack);
+    if (bForceNewTrack)
+    {
+        EventTrack = nullptr;
+        bReusedExisting = false;
+    }
+
+    if (!EventTrack)
+    {
+        UMovieSceneTrack* NewTrack = nullptr;
+        if (BindingGuid.IsValid())
+        {
+            NewTrack = MovieScene->AddTrack(UMovieSceneEventTrack::StaticClass(), BindingGuid);
+        }
+        else
+        {
+            NewTrack = MovieScene->AddTrack(UMovieSceneEventTrack::StaticClass());
+        }
+        EventTrack = Cast<UMovieSceneEventTrack>(NewTrack);
+        if (!EventTrack)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("add_event_track: failed to add a UMovieSceneEventTrack"));
+        }
+    }
+
+    // Default the section's range to the MovieScene's playback range
+    // when the caller omits explicit frames. Matches HandleAddAudioTrack.
+    int32 StartFrameInt = 0;
+    bool bStartProvided = Params->TryGetNumberField(TEXT("start_frame"), StartFrameInt);
+    if (!bStartProvided)
+    {
+        const TRange<FFrameNumber> Playback = MovieScene->GetPlaybackRange();
+        if (Playback.GetLowerBound().IsClosed())
+        {
+            StartFrameInt = Playback.GetLowerBoundValue().Value;
+        }
+    }
+
+    int32 DurationFramesInt = 0;
+    bool bDurationProvided = Params->TryGetNumberField(TEXT("duration_frames"), DurationFramesInt);
+    if (!bDurationProvided)
+    {
+        Params->TryGetNumberField(TEXT("duration"), DurationFramesInt);
+        if (DurationFramesInt != 0) bDurationProvided = true;
+    }
+    if (!bDurationProvided)
+    {
+        const TRange<FFrameNumber> Playback = MovieScene->GetPlaybackRange();
+        if (Playback.GetLowerBound().IsClosed() && Playback.GetUpperBound().IsClosed())
+        {
+            DurationFramesInt = Playback.GetUpperBoundValue().Value - Playback.GetLowerBoundValue().Value;
+        }
+    }
+    if (DurationFramesInt <= 0)
+    {
+        // Fall back to a single tick so the section has a non-empty
+        // range; designers seed real key times through follow-on calls.
+        const FFrameRate TickRate = MovieScene->GetTickResolution();
+        DurationFramesInt = FMath::Max(1, FMath::RoundToInt(TickRate.AsDecimal()));
+    }
+
+    // CreateNewSection on UMovieSceneEventTrack returns a fresh
+    // UMovieSceneEventTriggerSection (the modern subclass that carries
+    // an FMovieSceneEventChannel). AddSection wires it onto the
+    // track's Sections array.
+    UMovieSceneSection* NewSection = EventTrack->CreateNewSection();
+    if (!NewSection)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_event_track: UMovieSceneEventTrack::CreateNewSection returned null"));
+    }
+    const FFrameNumber StartFrame(StartFrameInt);
+    const FFrameNumber EndFrame(StartFrameInt + DurationFramesInt);
+    NewSection->SetRange(TRange<FFrameNumber>(
+        TRangeBound<FFrameNumber>::Inclusive(StartFrame),
+        TRangeBound<FFrameNumber>::Exclusive(EndFrame)));
+    EventTrack->AddSection(*NewSection);
+
+    // Optional event-callback hint. The runtime endpoint binding lives
+    // on the sequence director Blueprint's K2 graph and requires the
+    // user to author a UFunction the channel can call; storing a
+    // designer-readable label on the track makes the section navigable
+    // in the editor's Sequencer panel even before the endpoint exists.
+    // The track is a `UMovieSceneNameableTrack` subclass, so a custom
+    // display name lands the chosen label without us reaching into the
+    // section's private channel data.
+    FString EventCallbackHint;
+    bool bHintProvided = Params->TryGetStringField(TEXT("event_callback_function"), EventCallbackHint)
+        || Params->TryGetStringField(TEXT("event_function"), EventCallbackHint)
+        || Params->TryGetStringField(TEXT("callback"), EventCallbackHint);
+#if WITH_EDITORONLY_DATA
+    if (bHintProvided && !EventCallbackHint.IsEmpty())
+    {
+        EventTrack->SetDisplayName(FText::FromString(EventCallbackHint));
+    }
+#endif
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    Sequence->MarkPackageDirty();
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_event_track"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("track_name"), EventTrack->GetFName().ToString());
+    Result->SetStringField(TEXT("track_class"), EventTrack->GetClass()->GetName());
+    Result->SetStringField(TEXT("track_class_path"), EventTrack->GetClass()->GetPathName());
+#if WITH_EDITORONLY_DATA
+    Result->SetStringField(TEXT("display_name"), EventTrack->GetDisplayName().ToString());
+#endif
+    Result->SetStringField(TEXT("section_class"), NewSection->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class_path"), NewSection->GetClass()->GetPathName());
+    Result->SetNumberField(TEXT("start_frame"), StartFrame.Value);
+    Result->SetNumberField(TEXT("end_frame"), EndFrame.Value);
+    Result->SetNumberField(TEXT("duration_frames"), DurationFramesInt);
+    Result->SetBoolField(TEXT("reused_existing_track"), bReusedExisting);
+    if (BindingGuid.IsValid())
+    {
+        Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());
+    }
+    if (bHintProvided)
+    {
+        Result->SetStringField(TEXT("event_callback_function"), EventCallbackHint);
+    }
     Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }
