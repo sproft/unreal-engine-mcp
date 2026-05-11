@@ -7679,6 +7679,7 @@ def animation_edit(
     sample_index: Optional[int] = None,
     clear: Optional[bool] = None,
     save: Optional[bool] = None,
+    metadata_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Targeted UAnimSequence / UAnimMontage edits (small variant).
@@ -7710,6 +7711,23 @@ def animation_edit(
           ``[time, location, rotation, scale]`` (each component an
           ``[x, y, z]`` array; rotation in Euler degrees) for
           Transform curves.
+        - ``add_metadata_curve``: declare a typed metadata curve on
+          a UAnimSequenceBase. Covers the typed metadata curves
+          AnimBPs use as runtime triggers, paired off the canonical
+          Float / Vector / Transform shapes ``add_curve`` already
+          covers. ``curve_name`` is required; ``metadata_type``
+          (or ``type``) is one of ``Material`` / ``Morph`` /
+          ``Attribute``. Routes through
+          ``UAnimationBlueprintLibrary::AddCurve`` with
+          ``bMetaDataCurve=True`` so the asset-side curve carries
+          the ``AACF_Metadata`` flag, then writes the per-skeleton
+          ``FCurveMetaData`` Material / MorphTarget flags through
+          ``USkeleton::AddCurveMetaData`` +
+          ``SetCurveMetaDataMaterial`` /
+          ``SetCurveMetaDataMorphTarget``. The Attribute case
+          clears both bits so the curve flows through the engine's
+          "no typed driver" path. Optional ``keyframes`` is a list
+          of ``[time, value]`` float pairs.
         - ``add_sync_marker``: append an FAnimSyncMarker to a
           UAnimSequence's notify track. ``track`` is the notify
           track FName (auto-created when missing); ``marker_name``
@@ -7836,6 +7854,8 @@ def animation_edit(
         params["clear"] = clear
     if save is not None:
         params["save"] = save
+    if metadata_type is not None:
+        params["metadata_type"] = metadata_type
 
     try:
         response = unreal.send_command("animation_edit", params)

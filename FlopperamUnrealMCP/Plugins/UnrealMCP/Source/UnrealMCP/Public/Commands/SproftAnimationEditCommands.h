@@ -143,4 +143,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleReplaceBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleDeleteBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddMetadataCurve(const TSharedPtr<FJsonObject>& Params);
 };

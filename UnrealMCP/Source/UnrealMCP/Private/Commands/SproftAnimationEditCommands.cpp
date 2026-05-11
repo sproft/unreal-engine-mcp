@@ -9,6 +9,7 @@
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/BlendSpace.h"
 #include "Animation/BlendSpace1D.h"
+#include "Animation/Skeleton.h"
 #include "AnimationBlueprintLibrary.h"
 #include "EditorAssetLibrary.h"
 #include "Engine/Blueprint.h"
@@ -259,6 +260,11 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleReplaceBlendSpaceSample(Params);
     }
+    if (Op == TEXT("add_metadata_curve") || Op == TEXT("add_meta_curve")
+        || Op == TEXT("add_typed_metadata_curve"))
+    {
+        return HandleAddMetadataCurve(Params);
+    }
     if (Op == TEXT("delete_blendspace_sample")
         || Op == TEXT("delete_blend_space_sample")
         || Op == TEXT("delete_sample")
@@ -268,7 +274,7 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
         return HandleDeleteBlendSpaceSample(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -1282,5 +1288,220 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleDeleteBlendSpaceSamp
     Result->SetNumberField(TEXT("previous_sample_count"), PreviousSampleCount);
     Result->SetNumberField(TEXT("sample_count"), BlendSpace->GetBlendSamples().Num());
     Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddMetadataCurve(const TSharedPtr<FJsonObject>& Params)
+{
+    // Adds a typed metadata curve to a UAnimSequenceBase. The earlier
+    // `add_curve` op covered the canonical Float / Vector / Transform
+    // shapes that drive timeline values. This op covers the typed
+    // metadata curves AnimBPs use as runtime triggers:
+    //
+    //   - Material:  per-skeleton FCurveMetaData::Type.bMaterial    set.
+    //   - Morph:     per-skeleton FCurveMetaData::Type.bMorphtarget set.
+    //   - Attribute: a plain metadata curve, neither bit set (the
+    //                "Attribute / Misc" bucket for game-side flags).
+    //
+    // In all three cases the asset-side curve is a Float curve flagged
+    // with AACF_Metadata so the timeline stores a sparse boolean
+    // trigger marker rather than a smooth scalar; the typing lives on
+    // the USkeleton's per-curve FCurveMetaData (the legacy
+    // AACF_DriveMaterial / AACF_DriveMorphTarget flags moved here in
+    // 5.x and are marked Hidden on the asset side).
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("add_metadata_curve: missing 'asset'"));
+    }
+    FString CurveNameParam;
+    if (!Params->TryGetStringField(TEXT("curve_name"), CurveNameParam)
+        && !Params->TryGetStringField(TEXT("name"), CurveNameParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_metadata_curve: missing 'curve_name'"));
+    }
+    if (CurveNameParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_metadata_curve: 'curve_name' must be non-empty"));
+    }
+
+    FString TypeToken;
+    if (!Params->TryGetStringField(TEXT("type"), TypeToken)
+        && !Params->TryGetStringField(TEXT("metadata_type"), TypeToken)
+        && !Params->TryGetStringField(TEXT("curve_type"), TypeToken)
+        && !Params->TryGetStringField(TEXT("kind"), TypeToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("add_metadata_curve: missing 'type' (one of Material / Morph / Attribute)"));
+    }
+
+    enum class EMetadataKind { Material, Morph, Attribute };
+    EMetadataKind Kind = EMetadataKind::Attribute;
+    FString CanonicalKindToken;
+    const FString TypeLower = TypeToken.ToLower();
+    if (TypeLower == TEXT("material") || TypeLower == TEXT("mat"))
+    {
+        Kind = EMetadataKind::Material;
+        CanonicalKindToken = TEXT("Material");
+    }
+    else if (TypeLower == TEXT("morph") || TypeLower == TEXT("morphtarget")
+        || TypeLower == TEXT("morph_target"))
+    {
+        Kind = EMetadataKind::Morph;
+        CanonicalKindToken = TEXT("Morph");
+    }
+    else if (TypeLower == TEXT("attribute") || TypeLower == TEXT("attr")
+        || TypeLower == TEXT("misc") || TypeLower == TEXT("metadata"))
+    {
+        Kind = EMetadataKind::Attribute;
+        CanonicalKindToken = TEXT("Attribute");
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_metadata_curve: unknown 'type' '%s'; expected Material / Morph / Attribute"),
+                *TypeToken));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    UAnimSequenceBase* SeqBase = Cast<UAnimSequenceBase>(Asset);
+    if (!SeqBase)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_metadata_curve: '%s' is not a UAnimSequenceBase"), *AssetParam));
+    }
+    USkeleton* Skeleton = SeqBase->GetSkeleton();
+    if (!Skeleton)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("add_metadata_curve: '%s' has no Skeleton; cannot register typed metadata"),
+                *SeqBase->GetName()));
+    }
+
+    const FName CurveFName(*CurveNameParam);
+
+    // Per-asset side: register the curve through the documented BP
+    // library entry point with `bMetaDataCurve=true`. The Float type
+    // is the only one that supports the metadata flag; the engine
+    // treats a metadata curve as a Float curve whose AACF_Metadata
+    // bit is set on the asset.
+    UAnimationBlueprintLibrary::AddCurve(SeqBase, CurveFName, ERawCurveTrackTypes::RCT_Float, /*bMetaDataCurve=*/true);
+
+    // Optional keyframe list. Each row is `[time, value]` where value
+    // is a float; metadata curves are typically driven 0/1, but the
+    // editor lets designers tune the curve so we forward whatever the
+    // caller passes through the same AddFloatCurveKeys writer
+    // `add_curve` uses for Float curves.
+    int32 KeyframeCount = 0;
+    int32 KeyframeFailures = 0;
+    TArray<TSharedPtr<FJsonValue>> KeyframeErrors;
+
+    const TArray<TSharedPtr<FJsonValue>>* KeyframesArr = nullptr;
+    if (Params->TryGetArrayField(TEXT("keyframes"), KeyframesArr) && KeyframesArr)
+    {
+        TArray<float> Times;
+        TArray<float> Values;
+        for (int32 RowIdx = 0; RowIdx < KeyframesArr->Num(); ++RowIdx)
+        {
+            const TSharedPtr<FJsonValue>& RowVal = (*KeyframesArr)[RowIdx];
+            if (!RowVal.IsValid() || RowVal->Type != EJson::Array)
+            {
+                KeyframeErrors.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("row %d is not an array"), RowIdx)));
+                ++KeyframeFailures;
+                continue;
+            }
+            const TArray<TSharedPtr<FJsonValue>>& Row = RowVal->AsArray();
+            if (Row.Num() < 2 || Row[1]->Type != EJson::Number)
+            {
+                KeyframeErrors.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("row %d expected [time, value]"), RowIdx)));
+                ++KeyframeFailures;
+                continue;
+            }
+            Times.Add(static_cast<float>(Row[0]->AsNumber()));
+            Values.Add(static_cast<float>(Row[1]->AsNumber()));
+            ++KeyframeCount;
+        }
+        if (Times.Num() > 0)
+        {
+            UAnimationBlueprintLibrary::AddFloatCurveKeys(SeqBase, CurveFName, Times, Values);
+        }
+    }
+
+    // Per-skeleton side: register the curve's metadata entry on the
+    // USkeleton (idempotent; returns false when the entry already
+    // exists) and flip the Material / MorphTarget bits to match the
+    // requested kind. The Attribute case clears both bits so the
+    // curve flows through the engine's "no typed driver" path.
+    bool bMetadataEntryAdded = false;
+    bool bMaterialFlag = false;
+    bool bMorphFlag = false;
+
+#if WITH_EDITOR
+    bMetadataEntryAdded = Skeleton->AddCurveMetaData(CurveFName, /*bTransact=*/true);
+    switch (Kind)
+    {
+        case EMetadataKind::Material:
+            Skeleton->SetCurveMetaDataMaterial(CurveFName, true);
+            Skeleton->SetCurveMetaDataMorphTarget(CurveFName, false);
+            bMaterialFlag = true;
+            break;
+        case EMetadataKind::Morph:
+            Skeleton->SetCurveMetaDataMaterial(CurveFName, false);
+            Skeleton->SetCurveMetaDataMorphTarget(CurveFName, true);
+            bMorphFlag = true;
+            break;
+        case EMetadataKind::Attribute:
+            Skeleton->SetCurveMetaDataMaterial(CurveFName, false);
+            Skeleton->SetCurveMetaDataMorphTarget(CurveFName, false);
+            break;
+    }
+#else
+    // Non-editor builds expose the public AccumulateCurveMetaData hot
+    // path. We fall through it so the runtime stays consistent.
+    Skeleton->AccumulateCurveMetaData(CurveFName,
+        /*bMaterialSet=*/ Kind == EMetadataKind::Material,
+        /*bMorphtargetSet=*/ Kind == EMetadataKind::Morph);
+    bMaterialFlag = (Kind == EMetadataKind::Material);
+    bMorphFlag = (Kind == EMetadataKind::Morph);
+#endif
+
+    SeqBase->MarkPackageDirty();
+    Skeleton->MarkPackageDirty();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    bool bSavedSeq = false;
+    bool bSavedSkel = false;
+    if (bSave)
+    {
+        bSavedSeq = UEditorAssetLibrary::SaveAsset(SeqBase->GetPathName(), /*bOnlyIfIsDirty=*/false);
+        bSavedSkel = UEditorAssetLibrary::SaveAsset(Skeleton->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("add_metadata_curve"));
+    Result->SetStringField(TEXT("asset"), SeqBase->GetName());
+    Result->SetStringField(TEXT("path"), SeqBase->GetPathName());
+    Result->SetStringField(TEXT("class"), SeqBase->GetClass()->GetName());
+    Result->SetStringField(TEXT("curve_name"), CurveNameParam);
+    Result->SetStringField(TEXT("curve_type"), TEXT("float"));
+    Result->SetStringField(TEXT("metadata_type"), CanonicalKindToken);
+    Result->SetBoolField(TEXT("metadata_curve"), true);
+    Result->SetStringField(TEXT("skeleton"), Skeleton->GetPathName());
+    Result->SetBoolField(TEXT("skeleton_entry_added"), bMetadataEntryAdded);
+    Result->SetBoolField(TEXT("material_flag"), bMaterialFlag);
+    Result->SetBoolField(TEXT("morph_flag"), bMorphFlag);
+    Result->SetNumberField(TEXT("keyframes_added"), KeyframeCount);
+    Result->SetNumberField(TEXT("keyframe_failures"), KeyframeFailures);
+    if (KeyframeErrors.Num() > 0)
+    {
+        Result->SetArrayField(TEXT("keyframe_errors"), KeyframeErrors);
+    }
+    Result->SetBoolField(TEXT("saved"), bSavedSeq);
+    Result->SetBoolField(TEXT("saved_skeleton"), bSavedSkel);
     return Result;
 }
