@@ -3,6 +3,8 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BehaviorTreeTypes.h"
+#include "BehaviorTree/BlackboardAssetProvider.h"
 #include "BehaviorTree/BTCompositeNode.h"
 #include "BehaviorTree/BTDecorator.h"
 #include "BehaviorTree/BTNode.h"
@@ -40,6 +42,7 @@
 #include "Misc/OutputDeviceNull.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
 
 namespace
@@ -616,6 +619,10 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCommand(const FString
     if (Op == TEXT("remove_blackboard_key"))
     {
         return HandleRemoveBlackboardKey(Params);
+    }
+    if (Op == TEXT("rename_blackboard_key") || Op == TEXT("rename_key"))
+    {
+        return HandleRenameBlackboardKey(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("behavior_tree: unsupported op '%s'"), *Op));
@@ -2276,6 +2283,257 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleRemoveBlackboardKey(c
     Result->SetStringField(TEXT("key_name"), KeyName.ToString());
     Result->SetNumberField(TEXT("removed_index"), RemoveIndex);
     Result->SetNumberField(TEXT("key_count"), BBData->Keys.Num());
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleRenameBlackboardKey(const TSharedPtr<FJsonObject>& Params)
+{
+    // Walks UBlackboardData::Keys, mutates the matching
+    // FBlackboardEntry::EntryName, and then propagates the new name
+    // to every UBTNode subobject that holds a FBlackboardKeySelector
+    // referencing the old name. The propagation walks each Hard-
+    // referencer package of the Blackboard, loads any asset that
+    // implements IBlackboardAssetProvider and whose GetBlackboardAsset
+    // matches the target, and updates each FStructProperty of the
+    // FBlackboardKeySelector type whose SelectedKeyName equals the
+    // old name. The walk matches the BT editor's
+    // SBehaviorTreeBlackboardView::UpdateExternalBlackboardKeyReferences
+    // path, re-implemented against the public AIModule + AssetRegistry
+    // API so we do not pull the editor-only BehaviorTreeEditor module.
+    FString ResolveError;
+    UBlackboardData* BBData = ResolveBlackboardArg(Params, ResolveError);
+    if (!BBData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    FString OldNameStr;
+    if (!Params->TryGetStringField(TEXT("old_name"), OldNameStr)
+        && !Params->TryGetStringField(TEXT("old_key_name"), OldNameStr)
+        && !Params->TryGetStringField(TEXT("from"), OldNameStr)
+        && !Params->TryGetStringField(TEXT("key_name"), OldNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'old_name' parameter (the existing key name to rename)"));
+    }
+    FString NewNameStr;
+    if (!Params->TryGetStringField(TEXT("new_name"), NewNameStr)
+        && !Params->TryGetStringField(TEXT("new_key_name"), NewNameStr)
+        && !Params->TryGetStringField(TEXT("to"), NewNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'new_name' parameter (the new FName to land on the entry)"));
+    }
+    if (OldNameStr.IsEmpty() || NewNameStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("'old_name' and 'new_name' must both be non-empty"));
+    }
+    if (NewNameStr.Len() >= NAME_SIZE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'new_name' too long (max %d chars)"), NAME_SIZE));
+    }
+    const FName OldName(*OldNameStr);
+    const FName NewName(*NewNameStr);
+    if (OldName == NewName)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("'old_name' and 'new_name' are identical; nothing to do"));
+    }
+
+    // Refuse duplicate names (own keys or parent-inherited keys).
+    // Matches the editor's OnNameTextVerifyChanged guard.
+    int32 RenameIndex = INDEX_NONE;
+    for (int32 Idx = 0; Idx < BBData->Keys.Num(); ++Idx)
+    {
+        if (BBData->Keys[Idx].EntryName == OldName)
+        {
+            RenameIndex = Idx;
+        }
+        else if (BBData->Keys[Idx].EntryName == NewName)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Blackboard '%s' already has a key named '%s'"),
+                    *BBData->GetName(), *NewNameStr));
+        }
+    }
+    if (RenameIndex == INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blackboard '%s' has no own key '%s' to rename"),
+                *BBData->GetName(), *OldNameStr));
+    }
+    for (const FBlackboardEntry& ParentKey : BBData->ParentKeys)
+    {
+        if (ParentKey.EntryName == NewName)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Blackboard '%s' inherits a parent key '%s'; rename refused"),
+                    *BBData->GetName(), *NewNameStr));
+        }
+    }
+
+    // Land the new name on the entry. The asset's PreEditChange /
+    // PostEditChangeChainProperty pair refreshes the editor cache and
+    // fires the FBlackboardDataChanged broadcast that key pickers
+    // listen on; without that, BT pickers in an already-open BT
+    // editor keep painting the old name.
+    BBData->Modify();
+    BBData->Keys[RenameIndex].EntryName = NewName;
+
+#if WITH_EDITOR
+    FProperty* KeysArrayProperty = FindFProperty<FProperty>(
+        UBlackboardData::StaticClass(), GET_MEMBER_NAME_CHECKED(UBlackboardData, Keys));
+    FProperty* NameProperty = FindFProperty<FProperty>(
+        FBlackboardEntry::StaticStruct(), GET_MEMBER_NAME_CHECKED(FBlackboardEntry, EntryName));
+    if (KeysArrayProperty && NameProperty)
+    {
+        FEditPropertyChain PropertyChain;
+        PropertyChain.AddHead(KeysArrayProperty);
+        PropertyChain.AddTail(NameProperty);
+        PropertyChain.SetActiveMemberPropertyNode(KeysArrayProperty);
+        PropertyChain.SetActivePropertyNode(NameProperty);
+        BBData->PreEditChange(PropertyChain);
+
+        FPropertyChangedEvent PropertyChangedEvent(NameProperty, EPropertyChangeType::ValueSet);
+        FPropertyChangedChainEvent PropertyChangedChainEvent(PropertyChain, PropertyChangedEvent);
+        BBData->PostEditChangeChainProperty(PropertyChangedChainEvent);
+    }
+#endif
+
+    // Per-BB house-keeping (matches the BT editor's flow after a key
+    // mutation): cached IDs refresh + derived-BB asset chain stays
+    // consistent so subclasses of this BB pick the new name up.
+    BBData->UpdateIfHasSynchronizedKeys();
+    BBData->UpdateKeyIDs();
+    BBData->PropagateKeyChangesToDerivedBlackboardAssets();
+
+    // Propagation walk: find every asset that Hard-references this
+    // Blackboard package, load each one, and update any
+    // FBlackboardKeySelector subobject that points at the old name.
+    TArray<TSharedPtr<FJsonValue>> UpdatedAssetsJson;
+    int32 TotalSelectorRewrites = 0;
+
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+    IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+    TArray<FName> ReferencerPackages;
+    {
+        UE::AssetRegistry::FDependencyQuery HardOnly;
+        HardOnly.Required = UE::AssetRegistry::EDependencyProperty::Hard;
+        AssetRegistry.GetReferencers(
+            BBData->GetOutermost()->GetFName(),
+            ReferencerPackages,
+            UE::AssetRegistry::EDependencyCategory::Package,
+            HardOnly);
+    }
+
+    // Pre-compute the set of UClass entries that implement
+    // IBlackboardAssetProvider so we skip assets that cannot host a
+    // BB selector. Matches the editor walk.
+    TArray<const UClass*> BlackboardOwnerClasses;
+    for (TObjectIterator<UClass> ClassIt; ClassIt; ++ClassIt)
+    {
+        UClass* Class = *ClassIt;
+        if (Class && Class->ImplementsInterface(UBlackboardAssetProvider::StaticClass()))
+        {
+            BlackboardOwnerClasses.Add(Class);
+        }
+    }
+
+    TSet<UObject*> AssetsToUpdate;
+    for (const FName& ReferencerPackage : ReferencerPackages)
+    {
+        TArray<FAssetData> Assets;
+        AssetRegistry.GetAssetsByPackageName(ReferencerPackage, Assets);
+        for (const FAssetData& Asset : Assets)
+        {
+            if (BlackboardOwnerClasses.Find(Asset.GetClass()) == INDEX_NONE)
+            {
+                continue;
+            }
+            UObject* AssetObject = Asset.GetAsset();
+            if (!AssetObject)
+            {
+                continue;
+            }
+            const IBlackboardAssetProvider* Provider = Cast<const IBlackboardAssetProvider>(AssetObject);
+            if (Provider && Provider->GetBlackboardAsset() == BBData)
+            {
+                AssetsToUpdate.Add(AssetObject);
+            }
+        }
+    }
+
+    // For each candidate asset, walk every subobject under that
+    // package and rewrite any FBlackboardKeySelector that selects the
+    // old name. We compare against `FBlackboardKeySelector` via the
+    // FStructProperty's `Struct` pointer (faster than the editor's
+    // GetCPPType-substring check and immune to namespace renames).
+    UScriptStruct* SelectorStruct = FBlackboardKeySelector::StaticStruct();
+    for (UObject* Asset : AssetsToUpdate)
+    {
+        TArray<UObject*> Objects;
+        GetObjectsWithOuter(Asset->GetOutermost(), Objects);
+        int32 PerAssetRewrites = 0;
+        for (UObject* SubObject : Objects)
+        {
+            if (!SubObject) continue;
+            for (TFieldIterator<FStructProperty> It(SubObject->GetClass()); It; ++It)
+            {
+                if (It->Struct != SelectorStruct)
+                {
+                    continue;
+                }
+                FBlackboardKeySelector* SelectorPtr =
+                    It->ContainerPtrToValuePtr<FBlackboardKeySelector>(SubObject);
+                if (SelectorPtr && SelectorPtr->SelectedKeyName == OldName)
+                {
+                    SubObject->Modify();
+                    SelectorPtr->SelectedKeyName = NewName;
+                    ++PerAssetRewrites;
+                    ++TotalSelectorRewrites;
+                }
+            }
+        }
+        if (PerAssetRewrites > 0)
+        {
+            Asset->MarkPackageDirty();
+            TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+            Row->SetStringField(TEXT("path"), Asset->GetPathName());
+            Row->SetStringField(TEXT("class"), Asset->GetClass()->GetName());
+            Row->SetNumberField(TEXT("selector_rewrites"), PerAssetRewrites);
+            UpdatedAssetsJson.Add(MakeShared<FJsonValueObject>(Row));
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveBlackboardIfRequested(BBData, bSave);
+    if (bSave)
+    {
+        // Save the referencers we touched so the new selector value
+        // sticks to disk.
+        for (UObject* Asset : AssetsToUpdate)
+        {
+            if (Asset && Asset->GetOutermost()->IsDirty())
+            {
+                UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+            }
+        }
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("rename_blackboard_key"));
+    Result->SetStringField(TEXT("blackboard"), BBData->GetPathName());
+    Result->SetStringField(TEXT("old_name"), OldName.ToString());
+    Result->SetStringField(TEXT("new_name"), NewName.ToString());
+    Result->SetNumberField(TEXT("renamed_index"), RenameIndex);
+    Result->SetNumberField(TEXT("referencer_packages_scanned"), ReferencerPackages.Num());
+    Result->SetNumberField(TEXT("referencer_assets_updated"), UpdatedAssetsJson.Num());
+    Result->SetNumberField(TEXT("selector_rewrites"), TotalSelectorRewrites);
+    Result->SetArrayField(TEXT("updated_assets"), UpdatedAssetsJson);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }

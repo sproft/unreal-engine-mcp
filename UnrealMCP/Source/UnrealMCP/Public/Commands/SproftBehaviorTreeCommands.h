@@ -66,6 +66,22 @@
  *     keys) when the caller passes the corresponding parameter.
  *   - `remove_blackboard_key`: remove a key from a target
  *     Blackboard's `Keys` array by FName.
+ *   - `rename_blackboard_key`: rename a key on a target Blackboard
+ *     by FName. Walks `UBlackboardData::Keys`, mutates the matching
+ *     `FBlackboardEntry::EntryName`, and then runs the documented
+ *     key-rename propagation so every UBTNode subobject that holds a
+ *     `FBlackboardKeySelector` referencing the old key name lands on
+ *     the new key name. The walk pulls each Hard-referencer package
+ *     of the Blackboard through `IAssetRegistry::GetReferencers`,
+ *     loads any asset that implements `IBlackboardAssetProvider` and
+ *     whose `GetBlackboardAsset()` matches the target Blackboard,
+ *     iterates every subobject under that package, and updates each
+ *     `FStructProperty` of the FBlackboardKeySelector type whose
+ *     `SelectedKeyName` equals the old name. Refuses duplicate
+ *     names (own keys or parent-inherited keys) and refuses an
+ *     empty new name. `UpdateIfHasSynchronizedKeys` + `UpdateKeyIDs`
+ *     + `PropagateKeyChangesToDerivedBlackboardAssets` fix-up runs
+ *     after the rename so derived Blackboards stay consistent.
  *
  * Inputs (inspect):
  *   - tree:                short asset name or full `/Game/...` path
@@ -238,4 +254,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetBlackboard(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddBlackboardKey(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRemoveBlackboardKey(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRenameBlackboardKey(const TSharedPtr<FJsonObject>& Params);
 };

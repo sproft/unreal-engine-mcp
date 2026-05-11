@@ -6400,6 +6400,8 @@ def behavior_tree(
     condition: Optional[str] = None,
     value: Optional[Any] = None,
     notify_observer: Optional[str] = None,
+    old_name: Optional[str] = None,
+    new_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over a UBehaviorTree asset (read + edit slice).
@@ -6440,6 +6442,12 @@ def behavior_tree(
           / ``object`` / ``class`` / ``enum`` / ``struct``.
         - ``remove_blackboard_key``: remove a key from the target
           Blackboard by FName.
+        - ``rename_blackboard_key``: rename an own key on the target
+          Blackboard and propagate the new name to every
+          FBlackboardKeySelector across every Behavior Tree (or
+          other IBlackboardAssetProvider asset) that Hard-references
+          the Blackboard's package. ``old_name`` / ``new_name`` are
+          required.
 
     Args:
         tree: Short asset name or full ``/Game/...`` Behavior Tree
@@ -6552,6 +6560,10 @@ def behavior_tree(
         params["value"] = value
     if notify_observer is not None:
         params["notify_observer"] = notify_observer
+    if old_name is not None:
+        params["old_name"] = old_name
+    if new_name is not None:
+        params["new_name"] = new_name
 
     try:
         response = unreal.send_command("behavior_tree", params)
