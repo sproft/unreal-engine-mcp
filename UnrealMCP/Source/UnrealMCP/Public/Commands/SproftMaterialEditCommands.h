@@ -272,6 +272,31 @@
  *      `FProperty::ImportText_Direct`. PostEditChangeProperty fires
  *      on the MIC so `UpdateStaticPermutation` rebuilds the static
  *      permutation shaders. Saves on success unless `save=false`.
+ *   - "set_translucency_settings": reflection-driven writer for the
+ *      translucency knobs on a UMaterial. `settings` (alias
+ *      `properties` / `values`) is a flat dict from field name to
+ *      value covering the documented translucency surface:
+ *      `TranslucencyLightingMode` (enum token; accepts the engine
+ *      spelling such as `VolumetricNonDirectional` /
+ *      `SurfaceForwardShading` plus the `TLM_` prefix variants,
+ *      case-insensitive), `TranslucentShadowDensityScale` (float),
+ *      `TranslucentSelfShadowDensityScale` (float),
+ *      `TranslucentBackscatteringExponent` (float),
+ *      `bScreenSpaceReflections` (bool), and
+ *      `bUseTranslucencyVertexFog` (bool). Each entry routes
+ *      through FindPropertyByName + the matching FBoolProperty /
+ *      FByteProperty (TEnumAsByte<ETranslucencyLightingMode>) /
+ *      FFloatProperty setter. Failures (unknown field, type
+ *      mismatch, missing UPROPERTY) land on the response's
+ *      `skipped` array with a reason rather than aborting the
+ *      whole call. Recompiles the material once after the writes
+ *      when at least one knob landed (override with
+ *      `recompile=false`). Saves on success unless `save=false`.
+ *      Refuses Material Instances since the override surface
+ *      lives on `FMaterialInstanceBasePropertyOverrides` and
+ *      routes through `set_attribute_blendable` for the
+ *      blend-mode side; the translucency block does not surface
+ *      a paired override struct on the MIC.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UMaterialFactoryNew / UMaterialInstanceConstantFactoryNew /
@@ -330,4 +355,5 @@ private:
     TSharedPtr<FJsonObject> SetBlendMode(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetMaterialFlags(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetShadingModel(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetTranslucencySettings(const TSharedPtr<FJsonObject>& Params);
 };

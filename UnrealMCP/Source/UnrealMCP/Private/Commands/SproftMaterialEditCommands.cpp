@@ -557,9 +557,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return SetShadingModel(Params);
     }
+    if (Operation == TEXT("set_translucency_settings") || Operation == TEXT("set_translucency")
+        || Operation == TEXT("translucency_settings") || Operation == TEXT("set_material_translucency"))
+    {
+        return SetTranslucencySettings(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter, add_fresnel, set_blend_mode, set_material_flags, set_shading_model"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter, add_fresnel, set_blend_mode, set_material_flags, set_shading_model, set_translucency_settings"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -5723,6 +5728,371 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetShadingModel(const TShar
     ResultObj->SetStringField(TEXT("shading_model"), CanonicalToken);
     ResultObj->SetStringField(TEXT("previous_shading_model"), PreviousToken);
     ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Normalise a user-supplied translucency knob name onto the canonical
+     *  UMaterial UPROPERTY spelling. The reflection lookup is case-sensitive
+     *  so we keep the engine spelling (from
+     *  `Engine/Source/Runtime/Engine/Classes/Materials/Material.h`) and map
+     *  common shortcuts to it. Entries that resolve to a missing UPROPERTY
+     *  (the field got renamed in a future engine version) land on the
+     *  response's `skipped` array rather than aborting the whole call. */
+    bool TranslucencySettings_ResolveFieldName(const FString& InName, FString& OutCanonical)
+    {
+        const FString T = InName.TrimStartAndEnd();
+        struct FFieldAlias
+        {
+            const TCHAR* Alias;
+            const TCHAR* Canonical;
+        };
+        static const FFieldAlias Aliases[] =
+        {
+            { TEXT("TranslucencyLightingMode"),               TEXT("TranslucencyLightingMode") },
+            { TEXT("translucency_lighting_mode"),             TEXT("TranslucencyLightingMode") },
+            { TEXT("lighting_mode"),                          TEXT("TranslucencyLightingMode") },
+
+            { TEXT("TranslucentShadowDensityScale"),          TEXT("TranslucentShadowDensityScale") },
+            { TEXT("translucent_shadow_density_scale"),       TEXT("TranslucentShadowDensityScale") },
+            { TEXT("shadow_density_scale"),                   TEXT("TranslucentShadowDensityScale") },
+
+            { TEXT("TranslucentSelfShadowDensityScale"),      TEXT("TranslucentSelfShadowDensityScale") },
+            { TEXT("translucent_self_shadow_density_scale"),  TEXT("TranslucentSelfShadowDensityScale") },
+            { TEXT("self_shadow_density_scale"),              TEXT("TranslucentSelfShadowDensityScale") },
+
+            { TEXT("TranslucentBackscatteringExponent"),      TEXT("TranslucentBackscatteringExponent") },
+            { TEXT("translucent_backscattering_exponent"),    TEXT("TranslucentBackscatteringExponent") },
+            { TEXT("backscattering_exponent"),                TEXT("TranslucentBackscatteringExponent") },
+
+            { TEXT("bScreenSpaceReflections"),                TEXT("bScreenSpaceReflections") },
+            { TEXT("ScreenSpaceReflections"),                 TEXT("bScreenSpaceReflections") },
+            { TEXT("screen_space_reflections"),               TEXT("bScreenSpaceReflections") },
+            { TEXT("ssr"),                                    TEXT("bScreenSpaceReflections") },
+
+            { TEXT("bUseTranslucencyVertexFog"),              TEXT("bUseTranslucencyVertexFog") },
+            { TEXT("UseTranslucencyVertexFog"),               TEXT("bUseTranslucencyVertexFog") },
+            { TEXT("use_translucency_vertex_fog"),            TEXT("bUseTranslucencyVertexFog") },
+            { TEXT("vertex_fog"),                             TEXT("bUseTranslucencyVertexFog") },
+        };
+        for (const FFieldAlias& Entry : Aliases)
+        {
+            if (T.Equals(Entry.Alias, ESearchCase::IgnoreCase))
+            {
+                OutCanonical = Entry.Canonical;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Resolve a user-supplied translucency-lighting-mode token onto the
+     *  ETranslucencyLightingMode enum value the engine stores in
+     *  TEnumAsByte<ETranslucencyLightingMode> on UMaterial. The token set
+     *  mirrors the engine's ETranslucencyLightingMode declarations through
+     *  UE 5.7 (`Engine/Source/Runtime/Engine/Classes/Engine/EngineTypes.h`).
+     *  Accepts the bare token plus the `TLM_` prefix variant; the match
+     *  runs case-insensitively after stripping underscores / spaces /
+     *  dashes so casual snake_case lands on the same enum value. */
+    bool ResolveTranslucencyLightingModeToken(const FString& InToken, uint8& OutByteValue, FString& OutCanonical)
+    {
+        FString T = InToken.TrimStartAndEnd().ToLower();
+        if (T.StartsWith(TEXT("tlm_")))
+        {
+            T = T.RightChop(4);
+        }
+        T = T.Replace(TEXT("_"), TEXT(""));
+        T = T.Replace(TEXT(" "), TEXT(""));
+        T = T.Replace(TEXT("-"), TEXT(""));
+
+        if (T == TEXT("volumetricnondirectional"))
+        {
+            OutByteValue = static_cast<uint8>(TLM_VolumetricNonDirectional);
+            OutCanonical = TEXT("VolumetricNonDirectional");
+            return true;
+        }
+        if (T == TEXT("volumetricdirectional"))
+        {
+            OutByteValue = static_cast<uint8>(TLM_VolumetricDirectional);
+            OutCanonical = TEXT("VolumetricDirectional");
+            return true;
+        }
+        if (T == TEXT("volumetricpervertexnondirectional"))
+        {
+            OutByteValue = static_cast<uint8>(TLM_VolumetricPerVertexNonDirectional);
+            OutCanonical = TEXT("VolumetricPerVertexNonDirectional");
+            return true;
+        }
+        if (T == TEXT("volumetricpervertexdirectional"))
+        {
+            OutByteValue = static_cast<uint8>(TLM_VolumetricPerVertexDirectional);
+            OutCanonical = TEXT("VolumetricPerVertexDirectional");
+            return true;
+        }
+        if (T == TEXT("surface") || T == TEXT("surfacenondirectional"))
+        {
+            OutByteValue = static_cast<uint8>(TLM_Surface);
+            OutCanonical = TEXT("Surface");
+            return true;
+        }
+        if (T == TEXT("surfaceperpixellighting"))
+        {
+            OutByteValue = static_cast<uint8>(TLM_SurfacePerPixelLighting);
+            OutCanonical = TEXT("SurfacePerPixelLighting");
+            return true;
+        }
+        if (T == TEXT("surfaceforwardshading") || T == TEXT("forward") || T == TEXT("forwardshading"))
+        {
+            OutByteValue = static_cast<uint8>(TLM_SurfaceForwardShading);
+            OutCanonical = TEXT("SurfaceForwardShading");
+            return true;
+        }
+        return false;
+    }
+
+    FString TranslucencyLightingModeToCanonicalToken(uint8 InByte)
+    {
+        const ETranslucencyLightingMode Mode = static_cast<ETranslucencyLightingMode>(InByte);
+        switch (Mode)
+        {
+        case TLM_VolumetricNonDirectional:           return TEXT("VolumetricNonDirectional");
+        case TLM_VolumetricDirectional:              return TEXT("VolumetricDirectional");
+        case TLM_VolumetricPerVertexNonDirectional:  return TEXT("VolumetricPerVertexNonDirectional");
+        case TLM_VolumetricPerVertexDirectional:     return TEXT("VolumetricPerVertexDirectional");
+        case TLM_Surface:                            return TEXT("Surface");
+        case TLM_SurfacePerPixelLighting:            return TEXT("SurfacePerPixelLighting");
+        case TLM_SurfaceForwardShading:              return TEXT("SurfaceForwardShading");
+        default: return FString::Printf(TEXT("Unknown(%d)"), static_cast<int32>(InByte));
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetTranslucencySettings(const TSharedPtr<FJsonObject>& Params)
+{
+    // Reflection-driven writer for the translucency block on UMaterial.
+    // The engine carries a long set of translucency knobs in scattered
+    // UPROPERTYs across UMaterial; the typical authoring workflow opens
+    // the material editor's Translucency category and lands a small
+    // subset by hand. This op covers the high-traffic subset documented
+    // in the README addition. Each entry routes through FindPropertyByName
+    // + the matching FBoolProperty / FByteProperty (the
+    // TEnumAsByte<ETranslucencyLightingMode>) / FFloatProperty setter so
+    // the op stays compatible with the visibility tightening UE has done
+    // across recent versions. Failures land on the response's `skipped`
+    // array rather than aborting the whole call. PostEditChangeProperty
+    // fires per-touched UPROPERTY so the static permutation invalidates
+    // when the engine cares about it (TranslucencyLightingMode is one of
+    // the permutation-key drivers on the basepass shader compile for
+    // translucent passes).
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(MaterialPath);
+    UMaterial* Material = Cast<UMaterial>(Asset);
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial (Material Instances do not expose a paired translucency override block; the FMaterialInstanceBasePropertyOverrides struct only covers blend_mode / shading_model / opacity_mask_clip_value / two_sided etc.)"), *MaterialPath));
+    }
+
+    const TSharedPtr<FJsonObject>* SettingsObjPtr = nullptr;
+    if (!Params->TryGetObjectField(TEXT("settings"), SettingsObjPtr)
+        && !Params->TryGetObjectField(TEXT("translucency"), SettingsObjPtr)
+        && !Params->TryGetObjectField(TEXT("properties"), SettingsObjPtr)
+        && !Params->TryGetObjectField(TEXT("values"), SettingsObjPtr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_translucency_settings: missing 'settings' object. Supported keys: TranslucencyLightingMode, TranslucentShadowDensityScale, TranslucentSelfShadowDensityScale, TranslucentBackscatteringExponent, bScreenSpaceReflections, bUseTranslucencyVertexFog"));
+    }
+    const TSharedPtr<FJsonObject>& SettingsObj = *SettingsObjPtr;
+    if (!SettingsObj.IsValid() || SettingsObj->Values.Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_translucency_settings: 'settings' object is empty"));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> AppliedArr;
+    TArray<TSharedPtr<FJsonValue>> SkippedArr;
+
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : SettingsObj->Values)
+    {
+        const FString& InName = Entry.Key;
+
+        FString Canonical;
+        if (!TranslucencySettings_ResolveFieldName(InName, Canonical))
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), InName);
+            Skip->SetStringField(TEXT("reason"), TEXT("unknown_field"));
+            Skip->SetStringField(TEXT("hint"), TEXT("Supported: TranslucencyLightingMode, TranslucentShadowDensityScale, TranslucentSelfShadowDensityScale, TranslucentBackscatteringExponent, bScreenSpaceReflections, bUseTranslucencyVertexFog"));
+            SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+
+        FProperty* Prop = Material->GetClass()->FindPropertyByName(FName(*Canonical));
+        if (!Prop)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), InName);
+            Skip->SetStringField(TEXT("canonical"), Canonical);
+            Skip->SetStringField(TEXT("reason"), TEXT("uproperty_not_found"));
+            SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+            continue;
+        }
+
+        // Route by the concrete property type so the byte-enum and bool
+        // bitfield cases both land on the right setter.
+        if (FBoolProperty* BoolProp = CastField<FBoolProperty>(Prop))
+        {
+            bool NewBool = false;
+            if (!MaterialFlags_ParseBool(Entry.Value, NewBool))
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), InName);
+                Skip->SetStringField(TEXT("canonical"), Canonical);
+                Skip->SetStringField(TEXT("reason"), TEXT("not_a_bool"));
+                SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            const bool PreviousBool = BoolProp->GetPropertyValue_InContainer(Material);
+
+            Material->PreEditChange(BoolProp);
+            BoolProp->SetPropertyValue_InContainer(Material, NewBool);
+            FPropertyChangedEvent ChangeEvent(BoolProp, EPropertyChangeType::ValueSet);
+            Material->PostEditChangeProperty(ChangeEvent);
+
+            TSharedPtr<FJsonObject> AppliedEntry = MakeShared<FJsonObject>();
+            AppliedEntry->SetStringField(TEXT("name"), InName);
+            AppliedEntry->SetStringField(TEXT("canonical"), Canonical);
+            AppliedEntry->SetStringField(TEXT("kind"), TEXT("bool"));
+            AppliedEntry->SetBoolField(TEXT("previous"), PreviousBool);
+            AppliedEntry->SetBoolField(TEXT("value"), NewBool);
+            AppliedArr.Add(MakeShared<FJsonValueObject>(AppliedEntry));
+            continue;
+        }
+
+        if (FByteProperty* ByteProp = CastField<FByteProperty>(Prop))
+        {
+            // The only byte / enum UPROPERTY in this set is
+            // TranslucencyLightingMode, which the engine declares as
+            // TEnumAsByte<ETranslucencyLightingMode>. Resolve through the
+            // token table; numbers also accepted as a fallback so callers
+            // that already have the int value can pass it.
+            uint8 NewByte = 0;
+            FString CanonicalToken;
+            bool bResolved = false;
+            if (Entry.Value.IsValid() && Entry.Value->Type == EJson::String)
+            {
+                bResolved = ResolveTranslucencyLightingModeToken(Entry.Value->AsString(), NewByte, CanonicalToken);
+            }
+            else if (Entry.Value.IsValid() && Entry.Value->Type == EJson::Number)
+            {
+                NewByte = static_cast<uint8>(Entry.Value->AsNumber());
+                CanonicalToken = TranslucencyLightingModeToCanonicalToken(NewByte);
+                bResolved = !CanonicalToken.StartsWith(TEXT("Unknown("));
+            }
+
+            if (!bResolved)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), InName);
+                Skip->SetStringField(TEXT("canonical"), Canonical);
+                Skip->SetStringField(TEXT("reason"), TEXT("unknown_translucency_lighting_mode"));
+                Skip->SetStringField(TEXT("hint"), TEXT("Supported: VolumetricNonDirectional, VolumetricDirectional, VolumetricPerVertexNonDirectional, VolumetricPerVertexDirectional, Surface, SurfacePerPixelLighting, SurfaceForwardShading"));
+                SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+
+            const uint8 PreviousByte = ByteProp->GetPropertyValue_InContainer(Material);
+
+            Material->PreEditChange(ByteProp);
+            ByteProp->SetPropertyValue_InContainer(Material, NewByte);
+            FPropertyChangedEvent ChangeEvent(ByteProp, EPropertyChangeType::ValueSet);
+            Material->PostEditChangeProperty(ChangeEvent);
+
+            TSharedPtr<FJsonObject> AppliedEntry = MakeShared<FJsonObject>();
+            AppliedEntry->SetStringField(TEXT("name"), InName);
+            AppliedEntry->SetStringField(TEXT("canonical"), Canonical);
+            AppliedEntry->SetStringField(TEXT("kind"), TEXT("enum"));
+            AppliedEntry->SetStringField(TEXT("previous"), TranslucencyLightingModeToCanonicalToken(PreviousByte));
+            AppliedEntry->SetStringField(TEXT("value"), CanonicalToken);
+            AppliedArr.Add(MakeShared<FJsonValueObject>(AppliedEntry));
+            continue;
+        }
+
+        if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Prop))
+        {
+            if (!Entry.Value.IsValid() || Entry.Value->Type != EJson::Number)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), InName);
+                Skip->SetStringField(TEXT("canonical"), Canonical);
+                Skip->SetStringField(TEXT("reason"), TEXT("not_a_number"));
+                SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            const float PreviousFloat = FloatProp->GetPropertyValue_InContainer(Material);
+            const float NewFloat = static_cast<float>(Entry.Value->AsNumber());
+
+            Material->PreEditChange(FloatProp);
+            FloatProp->SetPropertyValue_InContainer(Material, NewFloat);
+            FPropertyChangedEvent ChangeEvent(FloatProp, EPropertyChangeType::ValueSet);
+            Material->PostEditChangeProperty(ChangeEvent);
+
+            TSharedPtr<FJsonObject> AppliedEntry = MakeShared<FJsonObject>();
+            AppliedEntry->SetStringField(TEXT("name"), InName);
+            AppliedEntry->SetStringField(TEXT("canonical"), Canonical);
+            AppliedEntry->SetStringField(TEXT("kind"), TEXT("float"));
+            AppliedEntry->SetNumberField(TEXT("previous"), PreviousFloat);
+            AppliedEntry->SetNumberField(TEXT("value"), NewFloat);
+            AppliedArr.Add(MakeShared<FJsonValueObject>(AppliedEntry));
+            continue;
+        }
+
+        // Anything else (a renamed field that turned into a struct, etc.)
+        // surfaces under skipped with the cpp type so the caller can see
+        // what the field resolved to.
+        TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+        Skip->SetStringField(TEXT("name"), InName);
+        Skip->SetStringField(TEXT("canonical"), Canonical);
+        Skip->SetStringField(TEXT("reason"), TEXT("unsupported_property_type"));
+        Skip->SetStringField(TEXT("cpp_type"), Prop->GetCPPType());
+        SkippedArr.Add(MakeShared<FJsonValueObject>(Skip));
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile && AppliedArr.Num() > 0)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_translucency_settings"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedArr);
+    ResultObj->SetArrayField(TEXT("skipped"), SkippedArr);
+    ResultObj->SetNumberField(TEXT("applied_count"), AppliedArr.Num());
+    ResultObj->SetNumberField(TEXT("skipped_count"), SkippedArr.Num());
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile && AppliedArr.Num() > 0);
     ResultObj->SetBoolField(TEXT("saved"), bSave);
     return ResultObj;
 }

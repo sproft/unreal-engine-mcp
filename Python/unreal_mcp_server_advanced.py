@@ -4047,6 +4047,8 @@ def material_edit(
     opacity_mask_clip_value: Optional[float] = None,
     flags: Optional[Dict[str, Any]] = None,
     shading_model: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    translucency: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -4331,6 +4333,35 @@ def material_edit(
           ``set_attribute_blendable`` instead since the override
           surface is on the FMaterialInstanceBasePropertyOverrides
           struct, not on the MIC's UPROPERTY directly).
+        - "set_translucency_settings": reflection-driven writer
+          for the translucency block on a UMaterial. ``settings``
+          (alias ``translucency`` / ``properties`` / ``values``)
+          is a flat dict from field name to value covering the
+          documented translucency surface:
+          ``TranslucencyLightingMode`` (enum token; engine
+          spellings such as ``VolumetricNonDirectional`` /
+          ``VolumetricDirectional`` /
+          ``VolumetricPerVertexNonDirectional`` /
+          ``VolumetricPerVertexDirectional`` / ``Surface`` /
+          ``SurfacePerPixelLighting`` / ``SurfaceForwardShading``
+          plus the ``TLM_`` prefix variant, case-insensitive),
+          ``TranslucentShadowDensityScale`` (float),
+          ``TranslucentSelfShadowDensityScale`` (float),
+          ``TranslucentBackscatteringExponent`` (float),
+          ``bScreenSpaceReflections`` (bool), and
+          ``bUseTranslucencyVertexFog`` (bool). Each entry
+          resolves through FindPropertyByName + the matching
+          FBoolProperty / FByteProperty (the
+          TEnumAsByte<ETranslucencyLightingMode>) /
+          FFloatProperty setter. Failures (unknown field, type
+          mismatch, missing UPROPERTY) land on the response's
+          ``skipped`` array with a reason rather than aborting
+          the whole call. Recompiles the material once after
+          the writes when at least one knob landed (override
+          with ``recompile=false``). Saves on success unless
+          ``save=false``. Refuses Material Instances since the
+          translucency block does not surface a paired override
+          struct on the MIC.
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.
@@ -4519,6 +4550,10 @@ def material_edit(
         params["flags"] = flags
     if shading_model is not None:
         params["shading_model"] = shading_model
+    if settings is not None:
+        params["settings"] = settings
+    if translucency is not None:
+        params["translucency"] = translucency
 
     try:
         response = unreal.send_command("material_edit", params)
