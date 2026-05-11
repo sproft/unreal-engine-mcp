@@ -97,6 +97,20 @@
  *     FName), but a consumer that filters on a specific
  *     `AllowedTypes` set may need a manual revisit, and we surface
  *     that surface area without silently rewriting anything.
+ *   - `set_parent_blackboard`: rebind a target Blackboard's
+ *     `Parent` UPROPERTY to another UBlackboardData (or `none` /
+ *     `clear=true` to unbind). Refuses self-parenting and the
+ *     cycle case (a candidate parent already in the target's
+ *     ancestor chain). After the write the op fires the same
+ *     PreEditChange + PostEditChangeChainProperty pair the editor
+ *     fires on the property panel, then calls `UpdateParentKeys`
+ *     so `ParentKeys` is regenerated from the new chain (dedupes
+ *     against own `Keys`), `UpdateIfHasSynchronizedKeys` so the
+ *     instance-sync flag propagates, `UpdateKeyIDs` so FirstKeyID
+ *     stays consistent, and `PropagateKeyChangesToDerivedBlackboardAssets`
+ *     so derived Blackboards refresh. Returns the previous parent
+ *     path (or `none`), the new parent path (or `none`), and the
+ *     inherited key count on the new chain.
  *
  * Inputs (inspect):
  *   - tree:                short asset name or full `/Game/...` path
@@ -271,4 +285,5 @@ private:
     TSharedPtr<FJsonObject> HandleRemoveBlackboardKey(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRenameBlackboardKey(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleChangeBlackboardKeyType(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetParentBlackboard(const TSharedPtr<FJsonObject>& Params);
 };

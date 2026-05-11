@@ -6476,6 +6476,15 @@ def behavior_tree(
           points at this key under ``consumer_assets`` so the
           caller can audit the touch area without us silently
           rewriting consumer pin shapes.
+        - ``set_parent_blackboard``: rebind a target Blackboard's
+          ``Parent`` UPROPERTY to another UBlackboardData (or pass
+          ``clear=True`` / ``parent='none'`` to unbind). Refuses
+          self-parenting and the parent-cycle case. After the
+          write the op runs the documented ``UpdateParentKeys`` +
+          ``UpdateIfHasSynchronizedKeys`` + ``UpdateKeyIDs`` +
+          ``PropagateKeyChangesToDerivedBlackboardAssets`` fix-up
+          so ``ParentKeys`` is regenerated from the new chain
+          without duplicating own keys and any derived BB refreshes.
 
     Args:
         tree: Short asset name or full ``/Game/...`` Behavior Tree

@@ -629,6 +629,11 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCommand(const FString
     {
         return HandleChangeBlackboardKeyType(Params);
     }
+    if (Op == TEXT("set_parent_blackboard") || Op == TEXT("set_blackboard_parent")
+        || Op == TEXT("rebind_parent_blackboard"))
+    {
+        return HandleSetParentBlackboard(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("behavior_tree: unsupported op '%s'"), *Op));
 }
@@ -2836,6 +2841,182 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleChangeBlackboardKeyTy
     Result->SetNumberField(TEXT("consumer_asset_count"), ConsumerAssetsJson.Num());
     Result->SetNumberField(TEXT("consumer_selector_matches"), ConsumerSelectorMatches);
     Result->SetArrayField(TEXT("consumer_assets"), ConsumerAssetsJson);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleSetParentBlackboard(const TSharedPtr<FJsonObject>& Params)
+{
+    // Rebinds a target Blackboard's `Parent` UPROPERTY. UBlackboardData
+    // stores a `TObjectPtr<UBlackboardData> Parent`; the editor's
+    // PostEditChangeProperty path runs `UpdateParentKeys` whenever
+    // that property moves, which clears `ParentKeys` and rebuilds it
+    // from the chain (`Parent`, `Parent->Parent`, ...), deduping each
+    // entry against the local `Keys` array. We mirror that fix-up
+    // here so child Blackboards inherit the new parent's keys without
+    // duplication, and any derived BB gets a fresh
+    // `PropagateKeyChangesToDerivedBlackboardAssets` pass.
+    //
+    // The engine's own `PostEditChangeProperty` path also runs the
+    // cycle guard (`Parent->IsChildOf(*this)` then `Parent = NULL`),
+    // but we reject the cycle case up front so the caller sees a
+    // clean error rather than the writes-then-clears outcome.
+    FString ResolveError;
+    UBlackboardData* BBData = ResolveBlackboardArg(Params, ResolveError);
+    if (!BBData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    bool bClear = false;
+    Params->TryGetBoolField(TEXT("clear"), bClear);
+
+    UBlackboardData* NewParent = nullptr;
+    FString ParentInput;
+    bool bHasParentInput =
+        Params->TryGetStringField(TEXT("parent"), ParentInput)
+        || Params->TryGetStringField(TEXT("parent_blackboard"), ParentInput)
+        || Params->TryGetStringField(TEXT("parent_path"), ParentInput);
+
+    if (bHasParentInput)
+    {
+        // Tokenised forms for the clear path: an empty string, `none`,
+        // `null`, or `clear` unbinds the slot, matching how the small
+        // `set_blackboard` op handles its own unbind shape.
+        const FString Lower = ParentInput.TrimStartAndEnd().ToLower();
+        if (Lower.IsEmpty() || Lower == TEXT("none") || Lower == TEXT("null") || Lower == TEXT("clear"))
+        {
+            bClear = true;
+        }
+    }
+
+    if (!bClear)
+    {
+        if (!bHasParentInput)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Missing 'parent' parameter (or pass 'clear': true / 'parent': 'none' to unbind the slot)"));
+        }
+
+        UObject* Resolved = nullptr;
+        if (ParentInput.StartsWith(TEXT("/")))
+        {
+            Resolved = UEditorAssetLibrary::LoadAsset(ParentInput);
+        }
+        else
+        {
+            FAssetRegistryModule& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+            TArray<FAssetData> Found;
+            AssetRegistry.Get().GetAssetsByClass(UBlackboardData::StaticClass()->GetClassPathName(), Found);
+            for (const FAssetData& Data : Found)
+            {
+                if (Data.AssetName.ToString().Equals(ParentInput, ESearchCase::IgnoreCase))
+                {
+                    Resolved = Data.GetAsset();
+                    break;
+                }
+            }
+        }
+        NewParent = Cast<UBlackboardData>(Resolved);
+        if (!NewParent)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Parent asset '%s' is not a UBlackboardData"), *ParentInput));
+        }
+        if (NewParent == BBData)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Refusing self-parent: '%s' cannot be its own parent"),
+                    *BBData->GetName()));
+        }
+        // Cycle guard. UBlackboardData::IsChildOf returns true when
+        // the receiver is somewhere up the candidate's parent chain
+        // (self exclusive); we reject the case where the proposed
+        // parent already inherits from the target Blackboard so the
+        // chain never loops.
+        if (NewParent->IsChildOf(*BBData))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Refusing parent cycle: '%s' is already a descendant of '%s'"),
+                    *NewParent->GetName(), *BBData->GetName()));
+        }
+    }
+
+    UBlackboardData* OldParent = BBData->Parent;
+    if (OldParent == NewParent)
+    {
+        // No-op write still goes through fix-up so the response carries
+        // a consistent inherited-key count; mark dirty + save so the
+        // caller's `saved` flag is meaningful in either branch.
+    }
+
+    BBData->Modify();
+    BBData->Parent = NewParent;
+
+#if WITH_EDITOR
+    // Fire the canonical PreEditChange + PostEditChangeChainProperty
+    // pair against the Parent UPROPERTY so the FBlackboardDataChanged
+    // multicast hits anyone listening and so the engine's own
+    // PostEditChangeProperty runs (which itself calls UpdateParentKeys).
+    FProperty* ParentProperty = FindFProperty<FProperty>(
+        UBlackboardData::StaticClass(), GET_MEMBER_NAME_CHECKED(UBlackboardData, Parent));
+    if (ParentProperty)
+    {
+        FEditPropertyChain PropertyChain;
+        PropertyChain.AddHead(ParentProperty);
+        PropertyChain.SetActiveMemberPropertyNode(ParentProperty);
+        PropertyChain.SetActivePropertyNode(ParentProperty);
+        BBData->PreEditChange(PropertyChain);
+
+        FPropertyChangedEvent PropertyChangedEvent(ParentProperty, EPropertyChangeType::ValueSet);
+        FPropertyChangedChainEvent PropertyChangedChainEvent(PropertyChain, PropertyChangedEvent);
+        BBData->PostEditChangeChainProperty(PropertyChangedChainEvent);
+    }
+#endif
+
+    // Belt + braces: the engine's PostEditChangeProperty already runs
+    // UpdateParentKeys, but it gates on PropertyChangedEvent.Property
+    // resolving to the `Parent` field name. Some headless invocation
+    // paths skip that branch (the FProperty lookup above is a no-op
+    // when reflection is partially loaded). Running the documented
+    // fix-up trio directly here is safe (idempotent) and keeps the
+    // op's contract stable across engine versions.
+    BBData->UpdateParentKeys();
+    BBData->UpdateIfHasSynchronizedKeys();
+    BBData->UpdateKeyIDs();
+    BBData->PropagateKeyChangesToDerivedBlackboardAssets();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveBlackboardIfRequested(BBData, bSave);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("set_parent_blackboard"));
+    Result->SetStringField(TEXT("blackboard"), BBData->GetPathName());
+    if (OldParent)
+    {
+        Result->SetStringField(TEXT("previous_parent_path"), OldParent->GetPathName());
+        Result->SetStringField(TEXT("previous_parent_name"), OldParent->GetName());
+    }
+    else
+    {
+        Result->SetStringField(TEXT("previous_parent_path"), TEXT("none"));
+    }
+    if (NewParent)
+    {
+        Result->SetStringField(TEXT("parent_path"), NewParent->GetPathName());
+        Result->SetStringField(TEXT("parent_name"), NewParent->GetName());
+        Result->SetBoolField(TEXT("cleared"), false);
+    }
+    else
+    {
+        Result->SetStringField(TEXT("parent_path"), TEXT("none"));
+        Result->SetBoolField(TEXT("cleared"), true);
+    }
+#if WITH_EDITORONLY_DATA
+    Result->SetNumberField(TEXT("inherited_key_count"), BBData->ParentKeys.Num());
+#endif
+    Result->SetNumberField(TEXT("own_key_count"), BBData->Keys.Num());
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }
