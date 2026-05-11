@@ -8,7 +8,85 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped three deepening edit slices that
+The most recent pass shipped four additions that close the
+UMG event-binding gap on `widget_edit`, the UMG style-struct gap
+on `widget_edit`, the long-standing PlanarCut gap on `chaos_edit`,
+and the mystery Blueprint authoring trio (`bp_author` /
+`bp_dry_run` / `bp_skills`) that the hosted README names but does
+not document beyond a one-line phrase. `widget_edit` gains
+`add_event_binding`: spawns (or focuses) a
+`UK2Node_ComponentBoundEvent` in the WBP's event graph for a named
+child widget's multicast delegate (`OnClicked` / `OnHovered` /
+`OnTextCommitted` / `OnValueChanged`, etc.). Resolves the
+FObjectProperty for the child widget on the WBP's
+`SkeletonGeneratedClass` and the FMulticastDelegateProperty on
+that widget's UClass, then routes through
+`FKismetEditorUtilities::CreateNewBoundEventForClass` (UNREALED_API)
+so the runtime wiring matches the UMG editor's "+ event" picker.
+Auto-flips `bIsVariable` + recompiles when the child widget is not
+yet exposed as a BP variable, since CreateNewBoundEventForClass
+needs the FObjectProperty on the generated class.
+`FindBoundEventForComponent` runs first so a second call returns
+the existing node rather than doubling up. Optional
+`handler_function` lands on the spawned K2Node's
+`CustomFunctionName` so the resulting BP entry point picks up the
+caller's chosen label; the rename skips when the name collides
+with another event node. `widget_edit` gains `set_widget_style`:
+writes a flat property dict against a child widget's style struct
+field through reflection. Defaults to the `WidgetStyle` UPROPERTY
+(covers UButton / UProgressBar / UScrollBar / UScrollBox / USlider
+/ UCheckBox / UEditableText / UEditableTextBox / UComboBox etc.);
+an optional `style_field` knob targets secondary slots
+(`WidgetBarStyle` on a UScrollBox, etc.). Each entry in `style`
+writes through `FProperty::ImportText_Direct` against the field on
+the resolved FXyzStyle struct. Failed entries surface under the
+response's `skipped` array with reason + attempted ImportText
+input. After the writes `PostEditChangeProperty` fires on the
+widget so the UMG editor's preview refreshes and the variable's
+compiled default propagates. `chaos_edit` gains `fracture_box`:
+runs an axis-aligned box fracture against a UGeometryCollection
+through the `PlanarCut` plugin's `CutWithPlanarCells` entry point
+(PLANARCUT_API on `PlanarCut.h` line 210). Required `min` / `max`
+3-element arrays describe the cutting region in the collection's
+local space; optional `divisions` (`[X, Y, Z]` int triple, default
+`[2, 2, 2]`) drives the cell grid through the documented
+`FPlanarCells(FBox, FIntVector)` constructor; optional
+`transform_index` picks the target transform (defaults to the
+collection's `root_index`, the unfractured root for a fresh
+asset). After the cut runs `InitializeMaterials` +
+`UpdateGeometryDependentProperties` + `InvalidateCollection` so
+the cached simulation data and renderer-side fields rebuild on the
+next access. Enables the `PlanarCut` plugin in
+`UnrealMCP.uplugin` (`EnabledByDefault: false` upstream) and adds
+`PlanarCut` + `GeometryCore` + `DynamicMesh` + `GeometryAlgorithms`
+to the editor-only `PrivateDependencyModuleNames` (the 4-dep
+explicit list stays under the 8-dep ceiling; the transitive deps
+off PlanarCut's `PublicDependencyModuleNames` cover the rest).
+The mystery trio ships as Python-side glue over the existing
+Blueprint authoring tools; no new C++ surface. `bp_author` walks a
+declarative JSON spec (`{name, parent_class, variables, components,
+graphs: {events, functions}}`) and runs `bp_create` →
+`bp_variable add` → `bp_component` → `bp_function_create` →
+`bp_nodes` → `bp_wire` → `bp_commit` in order. Each step's
+response surfaces on the ordered `steps` array. `stop_on_error`
+(default true) returns at the first failing step; pass false to
+continue past failures and collect every per-step result.
+`bp_dry_run` accepts the same spec and runs the parent-class /
+variable-type / class-token shape checkers against the live
+`unreal_api` describe path without calling any write op. Returns
+a `would_do` step plan plus `unresolved` rows for unknown tokens
+and `warnings` for soft red flags (e.g. node class tokens outside
+the bp_nodes short-name table). `bp_skills` is the `skills` tool
+scoped to topic IDs that start with `blueprint-`. Seed entries:
+`blueprint-events` and `blueprint-variables`. Adding a new entry
+is a file-add under `Python/skills/`, not a code change. With
+this pass landing the `widget_edit` UMG row narrows to advanced
+styles (USlateBrush asset-driven), the `chaos_edit` BACKLOG row
+loses the `fracture_box` retry, and the Blueprint authoring rows
+that called out `bp_author` / `bp_dry_run` / `bp_skills` as
+unshipped close.
+
+The pass before that shipped three deepening edit slices that
 close the per-direction MVVM conversion gap on `widget_edit`, the
 per-execution scoped-modifier gap on `gas_edit`, and the
 conditional-effect-row gap on `gas_edit`. `widget_edit` gains
@@ -2243,9 +2321,33 @@ ability" alongside `tag_registry_edit`.
   pin-by-pin `set_node_property` overrides on the spawned node.
 - `bp_commit` (small variant ships in this fork) — `MarkBlueprintAsStructurallyModified` + `CompileBlueprint` with captured `FCompilerResultsLog` + `SaveAsset`. Surfaces error / warning / info lines as separate string arrays and refuses to save a broken Blueprint unless `force_save=true`. Open follow-ons: include the structural diff against the previous compiled state (added / removed function signatures and variable types), and a per-call timing breakdown.
 - `bp_function_create` (small variant ships in this fork) — declarative `CreateNewGraph` + `AddFunctionGraph<UClass>` + typed FunctionEntry / FunctionResult pins in one call. Open follow-ons: add a Local Variables array to the new function in the same call, add Latent flag handling + UObject return-pin glue beyond the current FUNC_BlueprintPure toggle, and a `from_interface` mode that fills the signature from a Blueprint Interface method's parameter list.
-- `bp_author` — high-level "write me a feature" composite.
-- `bp_dry_run` — verify what `bp_commit` would do without applying.
-- `bp_skills` — list available Blueprint authoring skills.
+- `bp_author` (small variant ships in this fork) — Python-side
+  compositor that walks a declarative JSON spec
+  (`{name, parent_class, variables, components, graphs: {events,
+  functions}}`) and runs `bp_create` → `bp_variable add` →
+  `bp_component` → `bp_function_create` → `bp_nodes` → `bp_wire` →
+  `bp_commit` in order. Each step's response surfaces on the ordered
+  `steps` array. Open follow-ons: per-step rollback hooks (drop
+  the asset when a mid-flight step fails on `stop_on_error=true`),
+  declarative graph-edge auto-routing where the spec lists nodes
+  but does not spell out every wire, and a `--diff` mode that
+  emits the canonical bp_export delta the run produced.
+- `bp_dry_run` (small variant ships in this fork) — Python-side
+  validator that walks the same spec `bp_author` accepts, probes
+  the parent class through live `unreal_api describe`, runs the
+  variable-type-token / class-token / node-class shape checkers
+  offline, and returns a `would_do` step plan plus `unresolved`
+  rows for unknown tokens and `warnings` for soft red flags.
+  Open follow-ons: live component-class probing (we currently
+  skip the live probe for component classes since the bp_component
+  resolver does its own lookup), pin-compatibility checks for the
+  declared `bp_wire` edges, and a `cost_estimate` field that sums
+  per-stage compile counts.
+- `bp_skills` (small variant ships in this fork) — alias for the
+  `skills` tool scoped to topic IDs starting with `blueprint-`.
+  Seed entries: `blueprint-events` and `blueprint-variables`.
+  Adding a new entry is a file-add under `Python/skills/`, not a
+  code change.
 
 The local repo already implements `add_node`, `connect_nodes`,
 `create_variable`, etc. The hosted batched variants would sit on top of those
@@ -2371,15 +2473,25 @@ helpers.
   validation rule walk, and a deep-dive `compile_metadata` op
   that emits the byte-code disassembly through
   `FNiagaraVMExecutableData::LastAssemblyTranslation`.
-- `chaos_edit` (small read-only variant ships in this fork) —
-  inspect a `UGeometryCollection` asset. Returns geometry-source
-  list + per-fracture-level histogram + cluster info + bone
-  hierarchy depth + simulation block + materials + Nanite block.
-  Open follow-ons: the fracture / authoring write side (driver via
-  the `FFractureToolContext` API or the dataflow side under the
-  asset's `DataflowInstance`), per-instance damage threshold
-  override, fracture-level mutate / re-cluster ops, and per-bone
-  damage propagation tweaks.
+- `chaos_edit` (small read + edit slice ships in this fork) —
+  inspect a `UGeometryCollection` asset (geometry-source list +
+  per-fracture-level histogram + cluster info + bone hierarchy
+  depth + simulation block + materials + Nanite block) plus the
+  edit ops `set_simulation_settings` (flat property dict over the
+  reflected simulation surface), `import_static_mesh` (appends a
+  UStaticMesh via `FGeometryCollectionConversion::AppendStaticMesh`),
+  and `fracture_box` (axis-aligned box fracture through the
+  `PlanarCut` plugin's `CutWithPlanarCells` entry point;
+  `min` / `max` 3-element arrays describe the region, optional
+  `divisions` `[X, Y, Z]` int triple drives the cell grid through
+  `FPlanarCells(FBox, FIntVector)`, optional `transform_index`
+  picks the target transform). Open follow-ons: the dataflow
+  driver under the asset's `DataflowInstance`, per-instance
+  damage threshold override, fracture-level mutate / re-cluster
+  ops, per-bone damage propagation tweaks, and the heavier
+  fracture entry points (`CutMultipleWithPlanarCells` with
+  multi-transform selection, `CutWithMesh` for arbitrary cutting
+  meshes).
 
 ## Animation (large each)
 
@@ -2469,10 +2581,21 @@ helpers.
   MVVM side ships through `set_viewmodel` (viewmodel slot + seeded
   empty binding) plus `add_property_binding` (full
   FMVVMBlueprintViewBinding row authoring: source viewmodel field
-  + destination widget field + binding mode tokens). Remaining
-  open follow-ons: conversion functions on the binding side,
-  advanced widget styles, and event binding (UMG button click ->
-  Blueprint event hook).
+  + destination widget field + binding mode tokens) plus
+  `set_binding_conversion` (per-direction UFunction conversion
+  rewrite). Event binding ships through `add_event_binding`
+  (spawns a `UK2Node_ComponentBoundEvent` for a child widget's
+  multicast delegate; the canonical
+  `FKismetEditorUtilities::CreateNewBoundEventForClass` hot path).
+  Style authoring ships through `set_widget_style` (flat property
+  dict against a child widget's style struct field through
+  reflection; defaults to the `WidgetStyle` UPROPERTY and supports
+  any FXyzStyle slot). Remaining open follow-ons: the K2Node-class
+  conversion branch (async conversion nodes on `set_binding_conversion`),
+  per-binding pin-default authoring inside the wrapper graph, and
+  USlateBrush asset-driven style swaps (i.e. plumbing the
+  `Style` slot of a `USlateWidgetStyleAsset` onto the resolved
+  style struct).
 
 ## AI & abilities (large each)
 
