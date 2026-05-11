@@ -11,6 +11,7 @@
 #include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialFunction.h"
+#include "Materials/MaterialInstanceBasePropertyOverrides.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "Materials/MaterialExpression.h"
@@ -474,9 +475,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddFunctionCall(Params);
     }
+    if (Operation == TEXT("set_attribute_blendable") || Operation == TEXT("set_base_property_override")
+        || Operation == TEXT("set_override"))
+    {
+        return SetAttributeBlendable(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -2125,6 +2131,314 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddFunctionCall(const TShar
     ResultObj->SetNumberField(TEXT("input_count"), CallExpr->FunctionInputs.Num());
     ResultObj->SetNumberField(TEXT("output_count"), CallExpr->FunctionOutputs.Num());
     ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Resolve a user-supplied attribute token to its paired
+     *  bOverride_X / payload property names on
+     *  FMaterialInstanceBasePropertyOverrides. The token list mirrors
+     *  the editor's Material Instance details panel. */
+    struct FBasePropertyOverrideSlot
+    {
+        FString OverrideField;
+        FString PayloadField;
+    };
+
+    bool ResolveBasePropertyOverrideSlot(const FString& InToken, FBasePropertyOverrideSlot& OutSlot)
+    {
+        const FString T = InToken.ToLower().Replace(TEXT("_"), TEXT(""));
+        // Order mirrors FMaterialInstanceBasePropertyOverrides field order.
+        if (T == TEXT("blendmode"))
+        {
+            OutSlot = { TEXT("bOverride_BlendMode"), TEXT("BlendMode") };
+            return true;
+        }
+        if (T == TEXT("shadingmodel"))
+        {
+            OutSlot = { TEXT("bOverride_ShadingModel"), TEXT("ShadingModel") };
+            return true;
+        }
+        if (T == TEXT("opacitymaskclipvalue") || T == TEXT("opacityclip"))
+        {
+            OutSlot = { TEXT("bOverride_OpacityMaskClipValue"), TEXT("OpacityMaskClipValue") };
+            return true;
+        }
+        if (T == TEXT("ditheredlodtransition") || T == TEXT("dithered"))
+        {
+            OutSlot = { TEXT("bOverride_DitheredLODTransition"), TEXT("DitheredLODTransition") };
+            return true;
+        }
+        if (T == TEXT("castdynamicshadowasmasked") || T == TEXT("castshadowasmasked"))
+        {
+            OutSlot = { TEXT("bOverride_CastDynamicShadowAsMasked"), TEXT("bCastDynamicShadowAsMasked") };
+            return true;
+        }
+        if (T == TEXT("twosided"))
+        {
+            OutSlot = { TEXT("bOverride_TwoSided"), TEXT("TwoSided") };
+            return true;
+        }
+        if (T == TEXT("isthinsurface") || T == TEXT("thinsurface"))
+        {
+            OutSlot = { TEXT("bOverride_bIsThinSurface"), TEXT("bIsThinSurface") };
+            return true;
+        }
+        if (T == TEXT("outputtranslucentvelocity") || T == TEXT("translucentvelocity"))
+        {
+            OutSlot = { TEXT("bOverride_OutputTranslucentVelocity"), TEXT("bOutputTranslucentVelocity") };
+            return true;
+        }
+        if (T == TEXT("haspixelanimation") || T == TEXT("pixelanimation"))
+        {
+            OutSlot = { TEXT("bOverride_bHasPixelAnimation"), TEXT("bHasPixelAnimation") };
+            return true;
+        }
+        if (T == TEXT("enabletessellation") || T == TEXT("tessellation"))
+        {
+            OutSlot = { TEXT("bOverride_bEnableTessellation"), TEXT("bEnableTessellation") };
+            return true;
+        }
+        if (T == TEXT("displacementscaling"))
+        {
+            OutSlot = { TEXT("bOverride_DisplacementScaling"), TEXT("DisplacementScaling") };
+            return true;
+        }
+        if (T == TEXT("enabledisplacementfade") || T == TEXT("displacementfade"))
+        {
+            OutSlot = { TEXT("bOverride_bEnableDisplacementFade"), TEXT("bEnableDisplacementFade") };
+            return true;
+        }
+        if (T == TEXT("displacementfaderange"))
+        {
+            OutSlot = { TEXT("bOverride_DisplacementFadeRange"), TEXT("DisplacementFadeRange") };
+            return true;
+        }
+        if (T == TEXT("maxworldpositionoffsetdisplacement") || T == TEXT("maxwpodisplacement")
+            || T == TEXT("maxwpo"))
+        {
+            OutSlot = { TEXT("bOverride_MaxWorldPositionOffsetDisplacement"),
+                        TEXT("MaxWorldPositionOffsetDisplacement") };
+            return true;
+        }
+        if (T == TEXT("compatiblewithlumencardsharing") || T == TEXT("lumencardsharing"))
+        {
+            OutSlot = { TEXT("bOverride_CompatibleWithLumenCardSharing"),
+                        TEXT("bCompatibleWithLumenCardSharing") };
+            return true;
+        }
+        return false;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetAttributeBlendable(const TSharedPtr<FJsonObject>& Params)
+{
+    FString InstancePath;
+    if (!Params->TryGetStringField(TEXT("material_instance"), InstancePath)
+        && !Params->TryGetStringField(TEXT("instance"), InstancePath)
+        && !Params->TryGetStringField(TEXT("material"), InstancePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material_instance' parameter (path to a UMaterialInstanceConstant)"));
+    }
+
+    UObject* InstanceAsset = UEditorAssetLibrary::LoadAsset(InstancePath);
+    UMaterialInstanceConstant* MIC = Cast<UMaterialInstanceConstant>(InstanceAsset);
+    if (!MIC)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterialInstanceConstant"), *InstancePath));
+    }
+
+    FString AttributeToken;
+    if (!Params->TryGetStringField(TEXT("attribute"), AttributeToken)
+        && !Params->TryGetStringField(TEXT("name"), AttributeToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'attribute' parameter (e.g. 'blend_mode', 'two_sided', 'shading_model')"));
+    }
+
+    FBasePropertyOverrideSlot Slot;
+    if (!ResolveBasePropertyOverrideSlot(AttributeToken, Slot))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown attribute '%s'. Supported: blend_mode, shading_model, opacity_mask_clip_value, dithered_lod_transition, cast_dynamic_shadow_as_masked, two_sided, is_thin_surface, output_translucent_velocity, has_pixel_animation, enable_tessellation, displacement_scaling, enable_displacement_fade, displacement_fade_range, max_world_position_offset_displacement, compatible_with_lumen_card_sharing"),
+                *AttributeToken));
+    }
+
+    // Default `enabled` to true: the common case is "I want to flip this
+    // override on" with the payload value supplied alongside. Callers can
+    // pass `enabled=false` to clear the override without changing the
+    // payload field.
+    bool bEnabled = true;
+    Params->TryGetBoolField(TEXT("enabled"), bEnabled);
+
+    // Locate the UScriptStruct fields by name on the live MIC. The
+    // BasePropertyOverrides UPROPERTY is a struct, so we reflect into it
+    // through the outer property to land FProperty::ImportText for the
+    // payload write.
+    FProperty* OuterStructProp = MIC->GetClass()->FindPropertyByName(TEXT("BasePropertyOverrides"));
+    FStructProperty* StructProp = CastField<FStructProperty>(OuterStructProp);
+    if (!StructProp || !StructProp->Struct)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Reflection database does not expose BasePropertyOverrides on UMaterialInstance"));
+    }
+    void* StructContainer = StructProp->ContainerPtrToValuePtr<void>(MIC);
+
+    FProperty* OverrideProp = StructProp->Struct->FindPropertyByName(*Slot.OverrideField);
+    if (!OverrideProp)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("BasePropertyOverrides has no field '%s'"), *Slot.OverrideField));
+    }
+    FBoolProperty* OverrideBoolProp = CastField<FBoolProperty>(OverrideProp);
+    if (!OverrideBoolProp)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Field '%s' is not a bool"), *Slot.OverrideField));
+    }
+
+    // Walk PreEditChange / PostEditChange around the writes so the MIC's
+    // shader-resource state regenerates correctly. The MIC's own
+    // PostEditChangeProperty invokes UpdateStaticPermutation, which is
+    // what the editor UI does on the override checkbox toggle path.
+    MIC->PreEditChange(StructProp);
+
+    // Write the bOverride_X flag through the FBoolProperty so bitfield
+    // packing stays correct (the override flags are uint8 bit-1 fields).
+    OverrideBoolProp->SetPropertyValue_InContainer(StructContainer, bEnabled);
+
+    // Optional payload write. We accept JSON number / bool / string /
+    // array / object so callers can land BlendMode = "BLEND_Masked",
+    // ShadingModel = "MSM_Unlit", OpacityMaskClipValue = 0.333,
+    // TwoSided = true, etc. in the same call.
+    FString PayloadAppliedAs;
+    bool bPayloadApplied = false;
+    if (Params->HasField(TEXT("value")))
+    {
+        FProperty* PayloadProp = StructProp->Struct->FindPropertyByName(*Slot.PayloadField);
+        if (!PayloadProp)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("BasePropertyOverrides has no payload field '%s'"), *Slot.PayloadField));
+        }
+        const TSharedPtr<FJsonValue> ValueField = Params->TryGetField(TEXT("value"));
+        FString TextValue;
+        if (ValueField->Type == EJson::String)
+        {
+            TextValue = ValueField->AsString();
+            PayloadAppliedAs = TEXT("string");
+        }
+        else if (ValueField->Type == EJson::Number)
+        {
+            TextValue = LexToString(ValueField->AsNumber());
+            PayloadAppliedAs = TEXT("number");
+        }
+        else if (ValueField->Type == EJson::Boolean)
+        {
+            TextValue = ValueField->AsBool() ? TEXT("true") : TEXT("false");
+            PayloadAppliedAs = TEXT("bool");
+        }
+        else if (ValueField->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = ValueField->AsArray();
+            TArray<FString> Parts;
+            Parts.Reserve(Arr.Num());
+            for (const TSharedPtr<FJsonValue>& V : Arr)
+            {
+                Parts.Add(V.IsValid() && V->Type == EJson::Number ? LexToString(V->AsNumber()) : TEXT(""));
+            }
+            TextValue = FString::Join(Parts, TEXT(","));
+            PayloadAppliedAs = TEXT("array");
+        }
+        else if (ValueField->Type == EJson::Object)
+        {
+            // Render the object as a struct literal for FProperty::ImportText.
+            const TSharedPtr<FJsonObject>& Obj = ValueField->AsObject();
+            if (!Obj.IsValid())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("'value' object is empty"));
+            }
+            TArray<FString> Parts;
+            for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Obj->Values)
+            {
+                if (!Pair.Value.IsValid())
+                {
+                    continue;
+                }
+                FString Inner;
+                if (Pair.Value->Type == EJson::String)
+                {
+                    Inner = Pair.Value->AsString();
+                }
+                else if (Pair.Value->Type == EJson::Number)
+                {
+                    Inner = LexToString(Pair.Value->AsNumber());
+                }
+                else if (Pair.Value->Type == EJson::Boolean)
+                {
+                    Inner = Pair.Value->AsBool() ? TEXT("true") : TEXT("false");
+                }
+                Parts.Add(FString::Printf(TEXT("%s=%s"), *Pair.Key, *Inner));
+            }
+            TextValue = FString::Printf(TEXT("(%s)"), *FString::Join(Parts, TEXT(",")));
+            PayloadAppliedAs = TEXT("object");
+        }
+        else
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Unsupported JSON type for 'value'"));
+        }
+
+        void* PayloadPtr = PayloadProp->ContainerPtrToValuePtr<void>(StructContainer);
+        const TCHAR* ImportResult = PayloadProp->ImportText_Direct(*TextValue, PayloadPtr, MIC, PPF_None);
+        if (ImportResult == nullptr)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("ImportText failed for '%s' = '%s'"), *Slot.PayloadField, *TextValue));
+        }
+        bPayloadApplied = true;
+    }
+
+    // Trigger the MIC's own PostEditChangeProperty. The MIC code path
+    // calls UpdateStaticPermutation under the hood when an override
+    // toggle changes, which recompiles the static permutation shaders
+    // for the new BlendMode / ShadingModel / etc.
+    FPropertyChangedEvent ChangeEvent(StructProp, EPropertyChangeType::ValueSet);
+    MIC->PostEditChangeProperty(ChangeEvent);
+
+    // Belt-and-braces: explicitly run UpdateOverridableBaseProperties so
+    // the cached fields (BlendMode / TwoSided / ShadingModel / ...) on
+    // the parent material's renderer-side override slot stay in sync.
+    MIC->UpdateOverridableBaseProperties();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = MIC->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(MIC->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_attribute_blendable"));
+    ResultObj->SetStringField(TEXT("material_instance"), MIC->GetPathName());
+    ResultObj->SetStringField(TEXT("attribute"), AttributeToken);
+    ResultObj->SetStringField(TEXT("override_field"), Slot.OverrideField);
+    ResultObj->SetStringField(TEXT("payload_field"), Slot.PayloadField);
+    ResultObj->SetBoolField(TEXT("enabled"), bEnabled);
+    ResultObj->SetBoolField(TEXT("payload_applied"), bPayloadApplied);
+    if (bPayloadApplied)
+    {
+        ResultObj->SetStringField(TEXT("payload_kind"), PayloadAppliedAs);
+    }
     ResultObj->SetBoolField(TEXT("saved"), bSave);
     return ResultObj;
 }

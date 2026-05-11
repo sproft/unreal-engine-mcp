@@ -3660,6 +3660,8 @@ def material_edit(
     collection: Optional[str] = None,
     function: Optional[str] = None,
     name: Optional[str] = None,
+    attribute: Optional[str] = None,
+    enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -3741,6 +3743,29 @@ def material_edit(
           aliases the spawned expression so a follow-up
           ``connect_expressions`` call can address the node by
           FName.
+        - "set_attribute_blendable": flips a per-attribute
+          override toggle on a Material Instance Constant's
+          ``FMaterialInstanceBasePropertyOverrides`` struct.
+          ``attribute`` resolves to a matching ``bOverride_X`` slot
+          (e.g. ``blend_mode`` / ``shading_model`` / ``two_sided`` /
+          ``opacity_mask_clip_value`` /
+          ``dithered_lod_transition`` /
+          ``cast_dynamic_shadow_as_masked`` / ``is_thin_surface`` /
+          ``output_translucent_velocity`` /
+          ``has_pixel_animation`` / ``enable_tessellation`` /
+          ``displacement_scaling`` /
+          ``enable_displacement_fade`` /
+          ``displacement_fade_range`` /
+          ``max_world_position_offset_displacement`` /
+          ``compatible_with_lumen_card_sharing``). ``enabled``
+          lands on the ``bOverride_X`` flag (defaults True); the
+          optional ``value`` lands on the matching payload field
+          through ``FProperty::ImportText_Direct`` so callers can
+          set BlendMode = "BLEND_Masked", OpacityMaskClipValue =
+          0.333, TwoSided = true, etc. in the same call.
+          PostEditChangeProperty runs on the MIC so
+          ``UpdateStaticPermutation`` recompiles the static
+          permutation shaders.
 
     Args:
         operation: One of the operation names listed above.
@@ -3848,6 +3873,10 @@ def material_edit(
         params["function"] = function
     if name is not None:
         params["name"] = name
+    if attribute is not None:
+        params["attribute"] = attribute
+    if enabled is not None:
+        params["enabled"] = enabled
 
     try:
         response = unreal.send_command("material_edit", params)

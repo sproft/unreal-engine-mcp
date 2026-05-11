@@ -85,6 +85,23 @@
  *      `connect_expressions` call can address the node by FName.
  *      Recompiles + saves on success unless `recompile=false` /
  *      `save=false` is passed.
+ *   - "set_attribute_blendable": flips a per-attribute override toggle
+ *      on a UMaterialInstanceConstant's
+ *      `FMaterialInstanceBasePropertyOverrides` struct. The
+ *      `attribute` token resolves to a matching `bOverride_X` slot
+ *      (blend_mode / shading_model / opacity_mask_clip_value /
+ *      dithered_lod_transition / cast_dynamic_shadow_as_masked /
+ *      two_sided / is_thin_surface / output_translucent_velocity /
+ *      has_pixel_animation / enable_tessellation /
+ *      displacement_scaling / enable_displacement_fade /
+ *      displacement_fade_range /
+ *      max_world_position_offset_displacement /
+ *      compatible_with_lumen_card_sharing). The `enabled` boolean
+ *      lands on the `bOverride_X` flag and the optional `value`
+ *      lands on the matching payload field through
+ *      `FProperty::ImportText_Direct`. PostEditChangeProperty fires
+ *      on the MIC so `UpdateStaticPermutation` rebuilds the static
+ *      permutation shaders. Saves on success unless `save=false`.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UMaterialFactoryNew / UMaterialInstanceConstantFactoryNew /
@@ -129,4 +146,6 @@ private:
 
     TSharedPtr<FJsonObject> CreateMaterialFunction(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddFunctionCall(const TSharedPtr<FJsonObject>& Params);
+
+    TSharedPtr<FJsonObject> SetAttributeBlendable(const TSharedPtr<FJsonObject>& Params);
 };
