@@ -165,6 +165,13 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleSetEmitterRenderer(Params);
     }
+    if (Op.Equals(TEXT("set_renderer_property"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_renderer_properties"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_renderer_data"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("edit_renderer"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetRendererProperty(Params);
+    }
     if (Op.Equals(TEXT("add_user_parameter"), ESearchCase::IgnoreCase)
         || Op.Equals(TEXT("add_exposed_parameter"), ESearchCase::IgnoreCase)
         || Op.Equals(TEXT("declare_user_parameter"), ESearchCase::IgnoreCase))
@@ -172,7 +179,7 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
         return HandleAddUserParameter(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup, set_emitter_loop, set_emitter_property, set_emitter_renderer, add_user_parameter"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup, set_emitter_loop, set_emitter_property, set_emitter_renderer, set_renderer_property, add_user_parameter"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -2624,6 +2631,222 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterRenderer(con
 #else
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         TEXT("niagara_edit set_emitter_renderer requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetRendererProperty(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    // Tweaks an existing renderer on an emitter's render stack rather
+    // than adding / replacing it (the `set_emitter_renderer` op covers
+    // that case). Resolves a system + emitter handle, walks the
+    // matched emitter's FVersionedNiagaraEmitterData::GetRenderers()
+    // array by `renderer_index`, then lands each entry of a flat
+    // property dict through FProperty::ImportText_InContainer on the
+    // resolved UNiagaraRendererProperties subobject.
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("set_renderer_property: missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_renderer_property: could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString HandleToken;
+    if (!Params->TryGetStringField(TEXT("emitter"), HandleToken)
+        && !Params->TryGetStringField(TEXT("emitter_handle"), HandleToken)
+        && !Params->TryGetStringField(TEXT("handle_name"), HandleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("set_renderer_property: missing 'emitter' parameter"));
+    }
+    int32 HandleIndex = INDEX_NONE;
+    FNiagaraEmitterHandle* MatchedHandle = FindEmitterHandleByName(System, HandleToken, HandleIndex);
+    if (!MatchedHandle)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_renderer_property: could not resolve emitter handle '%s' on system '%s'"),
+                *HandleToken, *System->GetPathName()));
+    }
+    FVersionedNiagaraEmitterData* EmitterData = MatchedHandle->GetEmitterData();
+    if (!EmitterData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_renderer_property: emitter handle '%s' has no emitter data"), *HandleToken));
+    }
+
+    // GetRenderers returns a const& to the renderer array. Read-only
+    // access is enough since we mutate the subobject in place.
+    const TArray<UNiagaraRendererProperties*>& Renderers = EmitterData->GetRenderers();
+    int32 RendererIndex = 0;
+    Params->TryGetNumberField(TEXT("renderer_index"), RendererIndex);
+    Params->TryGetNumberField(TEXT("index"), RendererIndex);
+    if (!Renderers.IsValidIndex(RendererIndex))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_renderer_property: renderer_index %d out of range [0, %d) on emitter '%s'"),
+                RendererIndex, Renderers.Num(), *HandleToken));
+    }
+    UNiagaraRendererProperties* Renderer = Renderers[RendererIndex];
+    if (!Renderer)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_renderer_property: renderer at index %d is null on emitter '%s'"),
+                RendererIndex, *HandleToken));
+    }
+    UClass* RendererClass = Renderer->GetClass();
+
+    // Walk the flat property dict and ImportText each entry through
+    // the resolved UPROPERTY on the renderer class. Failures collect
+    // on `skipped` so a typo in one field does not lose the rest.
+    TArray<TSharedPtr<FJsonValue>> AppliedRows;
+    TArray<TSharedPtr<FJsonValue>> SkippedRows;
+    int32 AppliedCount = 0;
+    int32 SkippedCount = 0;
+
+    TSharedPtr<FJsonObject> ResolvedProps;
+    const TSharedPtr<FJsonObject>* PropsObjPtr = nullptr;
+    if (Params->TryGetObjectField(TEXT("properties"), PropsObjPtr)
+        || Params->TryGetObjectField(TEXT("renderer_properties"), PropsObjPtr)
+        || Params->TryGetObjectField(TEXT("values"), PropsObjPtr))
+    {
+        if (PropsObjPtr && (*PropsObjPtr).IsValid())
+        {
+            ResolvedProps = *PropsObjPtr;
+        }
+    }
+
+    // Single-field shape: `name` + `value` for the one-liner write
+    // case mirrors the convenience surface `set_emitter_property` uses.
+    FString SingleName;
+    if (!ResolvedProps.IsValid()
+        && (Params->TryGetStringField(TEXT("name"), SingleName)
+            || Params->TryGetStringField(TEXT("property"), SingleName)
+            || Params->TryGetStringField(TEXT("field"), SingleName)))
+    {
+        const TSharedPtr<FJsonValue> SingleVal = Params->TryGetField(TEXT("value"));
+        if (SingleVal.IsValid())
+        {
+            ResolvedProps = MakeShared<FJsonObject>();
+            ResolvedProps->SetField(SingleName, SingleVal);
+        }
+    }
+
+    if (!ResolvedProps.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_renderer_property: missing 'properties' object (or 'name' + 'value' single-field shape)"));
+    }
+
+    for (const auto& KV : ResolvedProps->Values)
+    {
+        const FString& Key = KV.Key;
+        const TSharedPtr<FJsonValue>& Val = KV.Value;
+        FProperty* FieldProp = FindFProperty<FProperty>(RendererClass, *Key);
+        if (!FieldProp)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), Key);
+            Skip->SetStringField(TEXT("reason"), TEXT("not_a_uproperty"));
+            SkippedRows.Add(MakeShared<FJsonValueObject>(Skip));
+            ++SkippedCount;
+            continue;
+        }
+
+        // Marshal the JSON value into the ImportText shape per-type
+        // (mirrors what set_emitter_property does): bool / number /
+        // string land as literals, arrays / objects re-serialise to
+        // JSON so FStructProperty / FArrayProperty paths can chew them.
+        FString ImportInput;
+        if (Val.IsValid())
+        {
+            switch (Val->Type)
+            {
+                case EJson::Boolean:
+                    ImportInput = Val->AsBool() ? TEXT("true") : TEXT("false");
+                    break;
+                case EJson::Number:
+                    ImportInput = FString::SanitizeFloat(Val->AsNumber());
+                    break;
+                case EJson::String:
+                    ImportInput = Val->AsString();
+                    break;
+                case EJson::Array:
+                case EJson::Object:
+                {
+                    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ImportInput);
+                    FJsonSerializer::Serialize(Val.ToSharedRef(), TEXT(""), Writer);
+                    break;
+                }
+                default:
+                    ImportInput = TEXT("");
+                    break;
+            }
+        }
+        FOutputDeviceNull NullDevice;
+        const TCHAR* ImportPtr = *ImportInput;
+        const bool bImported = FieldProp->ImportText_InContainer(ImportPtr, Renderer,
+            Renderer, PPF_None, &NullDevice) != nullptr;
+        if (!bImported)
+        {
+            TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+            Skip->SetStringField(TEXT("name"), Key);
+            Skip->SetStringField(TEXT("reason"), TEXT("import_text_failed"));
+            Skip->SetStringField(TEXT("input"), ImportInput);
+            Skip->SetStringField(TEXT("property_class"), FieldProp->GetClass()->GetName());
+            SkippedRows.Add(MakeShared<FJsonValueObject>(Skip));
+            ++SkippedCount;
+            continue;
+        }
+        TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+        Applied->SetStringField(TEXT("name"), Key);
+        Applied->SetStringField(TEXT("cpp_type"), FieldProp->GetCPPType());
+        AppliedRows.Add(MakeShared<FJsonValueObject>(Applied));
+        ++AppliedCount;
+    }
+
+    // PostEditChange on the renderer regenerates the cached system
+    // binding state so the editor's stack viewmodel picks the writes
+    // up on the next tick.
+    Renderer->PostEditChange();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_renderer_property"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("emitter_handle"), MatchedHandle->GetName().ToString());
+    Out->SetNumberField(TEXT("emitter_handle_index"), HandleIndex);
+    Out->SetNumberField(TEXT("renderer_index"), RendererIndex);
+    Out->SetStringField(TEXT("renderer_class"), RendererClass->GetName());
+    Out->SetStringField(TEXT("renderer_class_path"), RendererClass->GetPathName());
+    Out->SetStringField(TEXT("renderer_path"), Renderer->GetPathName());
+    Out->SetNumberField(TEXT("applied_count"), AppliedCount);
+    Out->SetNumberField(TEXT("skipped_count"), SkippedCount);
+    if (AppliedRows.Num() > 0)
+    {
+        Out->SetArrayField(TEXT("applied"), AppliedRows);
+    }
+    if (SkippedRows.Num() > 0)
+    {
+        Out->SetArrayField(TEXT("skipped"), SkippedRows);
+    }
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit set_renderer_property requires WITH_EDITORONLY_DATA"));
 #endif
 }
 

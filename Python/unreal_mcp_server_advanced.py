@@ -9324,6 +9324,7 @@ def niagara_edit(
     properties: Optional[Dict[str, Any]] = None,
     name: Optional[str] = None,
     renderer_class: Optional[str] = None,
+    renderer_index: Optional[int] = None,
     replace: Optional[bool] = None,
     default: Optional[Union[bool, int, float, str, List[float], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
@@ -9449,6 +9450,21 @@ def niagara_edit(
           etc.). Supply either a ``properties`` dict or a
           single ``name`` + ``value`` pair for one-field
           convenience.
+        - ``set_renderer_property``: edits an existing renderer
+          on an emitter's render stack in place. Distinct from
+          ``set_emitter_renderer`` which adds or replaces a
+          whole renderer. Resolves the system + emitter handle
+          the same way as the other per-emitter ops, walks the
+          matched emitter's ``GetRenderers()`` array by
+          ``renderer_index`` (default 0), and lands a flat
+          ``properties`` dict (or a single ``name`` + ``value``
+          pair for the one-liner case) through
+          ``FProperty::ImportText_InContainer`` on the
+          resolved ``UNiagaraRendererProperties`` subobject.
+          Failures collect on ``skipped`` rather than aborting.
+          PostEditChange fires on the renderer so the cached
+          binding state regenerates. Save the system on
+          success.
         - ``add_user_parameter``: declares a new user-tunable
           parameter on
           ``UNiagaraSystem::GetExposedParameters()``, the
@@ -9586,6 +9602,8 @@ def niagara_edit(
         params["name"] = name
     if renderer_class is not None:
         params["renderer_class"] = renderer_class
+    if renderer_index is not None:
+        params["renderer_index"] = renderer_index
     if replace is not None:
         params["replace"] = replace
     if default is not None:

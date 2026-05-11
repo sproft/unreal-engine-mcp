@@ -138,6 +138,22 @@
  *     `true` / `false`, number -> int or float literal, string
  *     -> passthrough, array / object -> JSON re-serialisation so
  *     struct / array UPROPERTYs land too).
+ *   - `set_renderer_property`: tweaks an existing renderer on an
+ *     emitter's render stack rather than adding / replacing it.
+ *     Resolves an existing system + emitter handle (same name
+ *     resolution `set_emitter_local_parameter` uses), then walks
+ *     the matched emitter's `FVersionedNiagaraEmitterData::GetRenderers()`
+ *     array by `renderer_index` (default 0). Each entry of the
+ *     flat `properties` dict lands through
+ *     `FProperty::ImportText_InContainer` against the resolved
+ *     `UNiagaraRendererProperties` subobject; failures collect on
+ *     `skipped` rather than aborting so a typo in one field does
+ *     not lose the rest. Distinct from `set_emitter_renderer`
+ *     which adds or replaces a whole renderer subobject; this op
+ *     edits the existing renderer in place. PostEditChange fires
+ *     on the renderer after the writes so the cached system
+ *     binding state regenerates and the editor's stack viewmodel
+ *     refreshes. Save the system on success unless `save=false`.
  *   - `add_user_parameter`: declares a new user-tunable parameter
  *     on `UNiagaraSystem::GetExposedParameters()`, the `User.`
  *     namespace `FNiagaraUserRedirectionParameterStore`. Distinct
@@ -237,5 +253,6 @@ private:
     TSharedPtr<FJsonObject> HandleSetEmitterLoop(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterRenderer(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetRendererProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddUserParameter(const TSharedPtr<FJsonObject>& Params);
 };
