@@ -8,7 +8,87 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped four deepening additions across
+The most recent pass shipped three deepening additions across
+existing tools: `widget_edit` gains `set_grid_slot` (single-call
+sugar over `set_slot_property` for the UGridSlot surface; takes
+the widget blueprint plus a target child widget FName plus any of
+the grid slot knobs: `row` / `column` (int cell coordinates, `>= 0`)
+that decide which cell of the parent UGridPanel the child lands
+in, `row_span` / `column_span` (int, `>= 1`) for how many cells
+the child spans, `padding` (the `[L, T, R, B]` / `[H, V]` / uniform
+/ object margin shape we already use), and the familiar
+`horizontal_alignment` / `vertical_alignment` tokens (`Fill` /
+`Left` / `Center` / `Right` and `Fill` / `Top` / `Center` /
+`Bottom`); refuses children whose parent is not a UGridPanel since
+the grid-only fields do not live on UCanvasPanelSlot or
+UOverlaySlot; routes through the concrete `UGridSlot::SetRow` /
+`SetColumn` / `SetRowSpan` / `SetColumnSpan` /
+`SetHorizontalAlignment` / `SetVerticalAlignment` / `SetPadding`
+setters so the parent UGridPanel's cached slate widget invalidates;
+completes the two-dimensional grid layout gap on the widget_edit
+side, parallel to last pass's `set_box_slot` for the
+one-dimensional box stack case), `material_edit` gains
+`set_shading_model` (one-call writer for the master
+`UMaterial::ShadingModel` UPROPERTY, the legacy single-shading-model
+enum slot the static permutation key consults on the basepass
+shader compile when bUseMaterialAttributes is off; `shading_model`
+(alias `model`) accepts `Unlit` / `DefaultLit` / `Subsurface` /
+`PreintegratedSkin` / `ClearCoat` / `SubsurfaceProfile` /
+`TwoSidedFoliage` / `Hair` / `Cloth` / `Eye` / `SingleLayerWater` /
+`ThinTranslucent`, case-insensitive, with or without the `MSM_`
+prefix, with the casual snake_case shape (`default_lit`,
+`single_layer_water`) mapped onto the engine spelling through a
+token normaliser; routes through FindPropertyByName plus
+PreEditChange / PostEditChangeProperty against the ShadingModel
+UPROPERTY so `UMaterial::RebuildShadingModelField` runs on
+PostEdit (keeps the paired ShadingModels bitset in sync) and the
+static permutation invalidates for the new basepass shader; the
+response carries the previous + new shading-model tokens; refuses
+Material Instances since the override surface lives on
+`FMaterialInstanceBasePropertyOverrides::ShadingModel` and routes
+through `set_attribute_blendable`), and `animation_edit` gains
+`add_montage_section` (wraps the WITH_EDITOR-gated public surface
+`UAnimMontage::AddAnimCompositeSection(FName, float)` so a single
+op lands a new FCompositeSection on a montage's CompositeSections
+array; pairs with `set_blend_times` for the rest of the montage
+authoring surface; `section_name` is the FName label for the new
+section (must be unique on the montage; checked up front via
+GetSectionIndex so the caller gets a structured error instead of
+the engine's INDEX_NONE return); `start_frame` (alias `frame`) wins
+over `start_time` (alias `time` seconds); when neither is given
+the start defaults to the end of the last existing section (or 0
+when none exist) so the new section appends after everything that
+came before; frames convert at 30 fps since UAnimMontage does not
+expose a per-asset sampling rate; the start position clamps to
+[0, PlayLength] so an off-the-end section does not lose its anchor
+when the engine resolves the linkable element back into a time;
+optional `is_loop=true` (alias `loop` / `looping`) self-links the
+new section's NextSectionName so playback loops on the new
+section; the engine's own AddAnimCompositeSection logic auto-links
+the previous-last section's NextSectionName to the new section
+when it was empty so a typical section walk runs in order without
+us spelling out the chain; PostEditChange + MarkPackageDirty close
+the edit; the response carries the section_index, start_time, the
+start_source token (`start_frame` / `start_time` /
+`default_end_of_last_section`), previous + new section count,
+is_loop, and the montage's play_length so callers can audit the
+placement). The three additions together close the
+two-dimensional grid layout gap on the widget_edit side, the
+shading-model authoring gap on the material_edit side, and the
+montage section authoring gap on the animation_edit side. The
+fourth slot of this batch (`gas_edit grant_ability_on_actor_default`)
+landed on the dropped list since the engine's UAbilitySystemComponent
+does not surface a canonical `DefaultAbilities` slot. The grant
+surface lives on per-project ASC subclasses (Lyra's
+ULyraAbilitySystemComponent, the SampleGame's
+USampleAbilitySystemComponent, etc.) each with their own field
+name, so a clean-room writer would have to either hard-code one
+project's spelling (not portable) or speculate on a probe list
+(brittle and surprising). Better to keep the slot empty and ship
+the targeted GAS ops the engine itself exposes when a future pass
+finds a portable surface.
+
+The pass before that shipped four deepening additions across
 existing tools: `widget_edit` gains `set_box_slot` (single-call
 sugar over `set_slot_property` for both `UHorizontalBoxSlot` and
 `UVerticalBoxSlot`; the child's slot class decides which
@@ -1617,6 +1697,98 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `widget_edit set_grid_slot` (small) — single-call sugar over
+  `set_slot_property` for the UGridSlot surface. Takes the widget
+  blueprint plus a target child widget FName plus any of the
+  canonical grid slot knobs: `row` / `column` (int cell
+  coordinates, `>= 0`, the parent UGridPanel reads them when it
+  lays out the child), `row_span` / `column_span` (int, `>= 1`,
+  how many cells the child spans; we refuse `< 1` since the
+  engine treats `<= 0` as 1 in the layout pass anyway), `padding`
+  (the canonical `[L, T, R, B]` / `[H, V]` / uniform / object
+  margin shape we use across the slot ops), and
+  `horizontal_alignment` / `vertical_alignment` tokens (the same
+  vocabulary the box / overlay slot ops use: `Fill` / `Left` /
+  `Center` / `Right` and `Fill` / `Top` / `Center` / `Bottom`,
+  case-insensitive). Routes the writes through the concrete
+  `UGridSlot::SetRow` / `SetColumn` / `SetRowSpan` /
+  `SetColumnSpan` / `SetHorizontalAlignment` /
+  `SetVerticalAlignment` / `SetPadding` setters so the parent
+  UGridPanel's cached slate widget invalidates. PostEditChange
+  fires on the slot + child so an open UMG designer refreshes.
+  Refuses children whose parent is not a UGridPanel since the
+  grid-only fields (Row / Column / RowSpan / ColumnSpan) do not
+  live on UCanvasPanelSlot or UOverlaySlot. `MarkBlueprintAsModified`
+  + optional `compile=true` + `save=true` close the edit. The
+  response carries the previous + new value for every touched
+  field so callers can see the diff. Aliases: `set_grid_slot` /
+  `grid_slot` / `set_grid_panel_slot`. Completes the
+  two-dimensional grid layout gap parallel to `set_box_slot` for
+  the one-dimensional box stack case.
+- `material_edit set_shading_model` (small) — one-call writer for
+  the master `UMaterial::ShadingModel` UPROPERTY (the legacy
+  single-shading-model enum slot the static permutation key
+  consults on the basepass shader compile when
+  `bUseMaterialAttributes` is off). `shading_model` (alias `model`)
+  accepts `Unlit` / `DefaultLit` / `Subsurface` /
+  `PreintegratedSkin` / `ClearCoat` / `SubsurfaceProfile` /
+  `TwoSidedFoliage` / `Hair` / `Cloth` / `Eye` / `SingleLayerWater`
+  / `ThinTranslucent`, case-insensitive, with or without the
+  `MSM_` prefix. Casual snake_case (`default_lit`,
+  `single_layer_water`) maps onto the engine spelling through a
+  token normaliser. Routes through FindPropertyByName plus
+  PreEditChange / PostEditChangeProperty against the ShadingModel
+  UPROPERTY so `UMaterial::RebuildShadingModelField` runs on
+  PostEdit (keeps the paired ShadingModels bitset in sync) and
+  the static permutation invalidates for the new basepass shader.
+  Reads the previous value through `GetShadingModels().
+  GetFirstShadingModel()` so the bitset-driven multi-model case
+  still surfaces a sensible "before" token. `recompile=true` (the
+  default) recompiles the material; `save=true` (the default)
+  saves the asset. The response carries the previous + new
+  shading-model tokens so the caller gets a before / after pair
+  on a single round trip. Refuses Material Instances since the
+  override surface lives on
+  `FMaterialInstanceBasePropertyOverrides::ShadingModel` and
+  routes through `set_attribute_blendable`. Aliases:
+  `set_shading_model` / `shading_model` /
+  `set_material_shading_model`.
+- `animation_edit add_montage_section` (small) — wraps the
+  WITH_EDITOR-gated public surface
+  `UAnimMontage::AddAnimCompositeSection(FName, float)` so a
+  single op lands a new FCompositeSection on a montage's
+  CompositeSections array. Pairs with `set_blend_times` for the
+  rest of the montage authoring surface. Useful for scripting
+  montage section authoring without opening the montage editor;
+  mirrors the editor's right-click "+ Add Section" action.
+  `section_name` (alias `name` / `section`) is the FName label
+  for the new composite section (must be unique on the montage;
+  we check `GetSectionIndex` up front so the caller gets a
+  structured error instead of the engine's INDEX_NONE return).
+  `start_frame` (alias `frame`) wins over `start_time` (alias
+  `time` seconds); when neither is given the start position
+  defaults to the end of the last existing section (or 0 when
+  none exist), so the new section appends after everything that
+  came before. Frames convert at 30 fps since UAnimMontage does
+  not expose a per-asset sampling rate (callers can pass
+  `start_time` for full precision). Start position clamps to
+  `[0, PlayLength]` so an off-the-end section does not lose its
+  anchor when the engine resolves the linkable element back into
+  a time. Optional `is_loop=true` (alias `loop` / `looping`)
+  self-links the new section's NextSectionName so playback loops
+  on the new section. The engine's own AddAnimCompositeSection
+  logic auto-links the previous-last section's NextSectionName
+  to the new section when it was empty (the "first time you add
+  a section" hint the engine comment calls out), so a typical
+  montage section walk runs in order without us spelling out the
+  chain. PostEditChange + MarkPackageDirty close the edit; saves
+  on success unless `save=false`. The response carries the
+  section_index, start_time, the start_source token
+  (`start_frame` / `start_time` / `default_end_of_last_section`),
+  previous + new section count, is_loop, and the montage's
+  play_length so callers can audit the placement. Aliases:
+  `add_montage_section` / `add_section` / `add_composite_section`
+  / `montage_add_section`.
 - `widget_edit set_box_slot` (small) — single-call sugar over
   `set_slot_property` for both `UHorizontalBoxSlot` and
   `UVerticalBoxSlot`. The child's slot class decides which
