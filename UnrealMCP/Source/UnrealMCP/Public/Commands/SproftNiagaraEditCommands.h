@@ -121,6 +121,23 @@
  *     the contained `FNiagaraEmitterStateData` struct's
  *     `LoopBehavior` / `LoopCount` fields so we never bind to a
  *     header-private alias. Save the system on success.
+ *   - `set_emitter_property`: generic catch-all that lands a
+ *     flat property dict on an emitter's
+ *     `FVersionedNiagaraEmitterData` through reflection. Each
+ *     entry that resolves to a UPROPERTY on the struct routes
+ *     through `FProperty::ImportText_InContainer`; each entry
+ *     that fails to resolve lands on the response's `skipped`
+ *     array (with a reason and the attempted ImportText input)
+ *     rather than aborting the whole write. Covers the long
+ *     tail of per-emitter tunables we have not added named ops
+ *     for (`bRequiresPersistentIDs`,
+ *     `bUseExternalParameterStore`, `ParticleSpawnMode`,
+ *     `InterpolatedSpawnMode`, etc.) without us shipping a
+ *     named op for every individual field. JSON values are
+ *     marshaled into the ImportText shape per-type (bool ->
+ *     `true` / `false`, number -> int or float literal, string
+ *     -> passthrough, array / object -> JSON re-serialisation so
+ *     struct / array UPROPERTYs land too).
  *
  * Inputs (create_niagara_system):
  *   - path: `/Game/...` package path. Required.
@@ -198,4 +215,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetSystemExposedParameter(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetSystemWarmup(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterLoop(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetEmitterProperty(const TSharedPtr<FJsonObject>& Params);
 };

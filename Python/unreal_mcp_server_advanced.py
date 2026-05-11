@@ -8974,6 +8974,8 @@ def niagara_edit(
     warmup_tick_delta: Optional[float] = None,
     loop_mode: Optional[str] = None,
     loop_count: Optional[int] = None,
+    properties: Optional[Dict[str, Any]] = None,
+    name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
@@ -9082,6 +9084,21 @@ def niagara_edit(
           ``LoopBehavior`` (ENiagaraLoopBehavior) and
           ``LoopCount`` (int32) fields. Saves the system on
           success.
+        - ``set_emitter_property``: generic catch-all that
+          lands a flat ``properties`` dict on the matched
+          emitter's ``FVersionedNiagaraEmitterData`` through
+          reflection. Each entry that resolves to a UPROPERTY on
+          the struct routes through
+          ``FProperty::ImportText_InContainer``; each entry that
+          fails to resolve lands on the response's ``skipped``
+          array rather than aborting. Covers the long tail of
+          per-emitter tunables we have not added named ops for
+          (``bRequiresPersistentIDs``,
+          ``bUseExternalParameterStore``,
+          ``ParticleSpawnMode``, ``InterpolatedSpawnMode``,
+          etc.). Supply either a ``properties`` dict or a
+          single ``name`` + ``value`` pair for one-field
+          convenience.
 
     The broader authoring surface beyond exposed-parameter writes
     stays in BACKLOG.md.
@@ -9192,6 +9209,10 @@ def niagara_edit(
         params["loop_mode"] = loop_mode
     if loop_count is not None:
         params["loop_count"] = loop_count
+    if properties is not None:
+        params["properties"] = properties
+    if name is not None:
+        params["name"] = name
 
     try:
         response = unreal.send_command("niagara_edit", params)

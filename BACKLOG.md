@@ -1330,6 +1330,31 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `niagara_edit set_emitter_property` (small) — generic
+  catch-all that lands a flat property dict on an emitter's
+  `FVersionedNiagaraEmitterData` through the engine's reflection
+  database. Resolves the system + emitter handle through the
+  same name match every other per-emitter op uses, walks the
+  `FVersionedNiagaraEmitterData` UScriptStruct's UPROPERTY
+  database, and routes each entry through
+  `FProperty::ImportText_InContainer` with the JSON value
+  marshaled into the ImportText shape per-type (bool ->
+  `true` / `false`, number -> int or float literal, string ->
+  passthrough, array / object -> JSON re-serialisation so
+  struct / array UPROPERTYs land too). Each entry that fails
+  to resolve (missing UPROPERTY or ImportText refusal) lands
+  on the response's `skipped` array with a reason and the
+  attempted ImportText input rather than aborting the whole
+  write. Covers the long tail of per-emitter tunables we have
+  not shipped named ops for (`bRequiresPersistentIDs`,
+  `bUseExternalParameterStore`, `ParticleSpawnMode`,
+  `InterpolatedSpawnMode`, `SimTarget`, `bAttachToParentSystem`,
+  etc.) without us adding a named op for each one. The
+  single-field convenience shape (`name` + `value` instead of
+  `properties` object) lets a one-liner set just one field.
+  Saves the system on success unless `save=false`. Aliases:
+  `set_emitter_property` / `set_emitter_properties` /
+  `set_emitter_data`.
 - `material_edit add_uv_node` (small) — single-call wrapper
   that spawns one of the common UV-flow expression nodes on a
   target UMaterial. `op` accepts `TextureCoordinate` /
