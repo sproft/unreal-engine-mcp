@@ -133,6 +133,21 @@
  *      `{Left,Top,Right,Bottom}`. After the writes
  *      `PostEditChangeProperty` fires on the widget so the UMG
  *      editor's preview refreshes.
+ *   - "set_overlay_slot": single-call sugar over `set_slot_property`
+ *      for the UOverlaySlot surface. Takes the widget blueprint plus
+ *      a target child widget FName plus the `horizontal_alignment`
+ *      token (`Fill` / `Left` / `Center` / `Right`) and / or the
+ *      `vertical_alignment` token (`Fill` / `Top` / `Center` /
+ *      `Bottom`) plus an optional `padding` `[left, top, right,
+ *      bottom]` margin. The UOverlaySlot exposes
+ *      `SetHorizontalAlignment` / `SetVerticalAlignment` /
+ *      `SetPadding` as the canonical mutators; we route through those
+ *      so the parent UOverlay's cached slate widget refreshes
+ *      (`SBox`'s slot picker rebuilds on next tick). Refuses children
+ *      whose parent is not a UOverlay since the slot class on a
+ *      canvas / vertical box child does not carry these fields.
+ *      Complements `set_canvas_slot` for the overlay-anchored UMG
+ *      layout case.
  *   - "set_canvas_slot": single-call sugar over `set_slot_property`
  *      for the UCanvasPanelSlot surface. Takes the widget blueprint
  *      plus a target child widget FName plus any of the canonical
@@ -191,4 +206,5 @@ private:
     TSharedPtr<FJsonObject> SetWidgetBrush(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetWidgetNavigation(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetCanvasSlot(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetOverlaySlot(const TSharedPtr<FJsonObject>& Params);
 };

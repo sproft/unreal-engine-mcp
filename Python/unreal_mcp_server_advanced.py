@@ -3065,6 +3065,9 @@ def widget_edit(
     pivot: Optional[Any] = None,
     z_order: Optional[int] = None,
     auto_size: Optional[bool] = None,
+    horizontal_alignment: Optional[str] = None,
+    vertical_alignment: Optional[str] = None,
+    padding: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3242,6 +3245,24 @@ def widget_edit(
           picks the slot change up. Useful for canvas-anchored
           UMG layouts without manual UPROPERTY-by-UPROPERTY
           tweaks.
+        - "set_overlay_slot": single-call sugar over
+          ``set_slot_property`` for the UOverlaySlot surface.
+          ``widget`` is the FName of the target child widget
+          on the WBP's WidgetTree; the child's slot must be a
+          UOverlaySlot (the parent panel is a UOverlay).
+          ``horizontal_alignment`` token (alias ``h_align`` /
+          ``halign``) accepts ``Fill`` / ``Left`` / ``Center`` /
+          ``Right``. ``vertical_alignment`` token (alias
+          ``v_align`` / ``valign``) accepts ``Fill`` / ``Top``
+          / ``Center`` / ``Bottom``. Optional ``padding``
+          accepts ``[left, top, right, bottom]`` /
+          ``[horizontal, vertical]`` / a uniform number /
+          ``{Left, Top, Right, Bottom}``. Routes through
+          ``UOverlaySlot::SetHorizontalAlignment`` /
+          ``SetVerticalAlignment`` / ``SetPadding`` so the
+          engine's layout-invalidate path fires. Complements
+          ``set_canvas_slot`` for the overlay-anchored UMG
+          layout case.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3424,6 +3445,12 @@ def widget_edit(
         params["z_order"] = z_order
     if auto_size is not None:
         params["auto_size"] = auto_size
+    if horizontal_alignment is not None:
+        params["horizontal_alignment"] = horizontal_alignment
+    if vertical_alignment is not None:
+        params["vertical_alignment"] = vertical_alignment
+    if padding is not None:
+        params["padding"] = padding
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite

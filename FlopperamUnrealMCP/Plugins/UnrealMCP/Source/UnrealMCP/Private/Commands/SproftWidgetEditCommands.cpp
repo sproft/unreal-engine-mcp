@@ -15,6 +15,7 @@
 #include "Components/HorizontalBox.h"
 #include "Components/Image.h"
 #include "Components/Overlay.h"
+#include "Components/OverlaySlot.h"
 #include "Components/PanelWidget.h"
 #include "Components/ProgressBar.h"
 #include "Components/ScrollBox.h"
@@ -365,9 +366,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetCanvasSlot(Params);
     }
+    if (Operation == TEXT("set_overlay_slot") || Operation == TEXT("overlay_slot")
+        || Operation == TEXT("set_overlay") || Operation == TEXT("set_overlay_alignment"))
+    {
+        return SetOverlaySlot(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation, set_canvas_slot"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation, set_canvas_slot, set_overlay_slot"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -4089,6 +4095,287 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetCanvasSlot(const TSharedPt
     ResultObj->SetArrayField(TEXT("previous_alignment"), Vec2ToArray(PrevLayout.Alignment));
     ResultObj->SetNumberField(TEXT("previous_z_order"), PrevZOrder);
     ResultObj->SetBoolField(TEXT("previous_auto_size"), bPrevAutoSize);
+
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Resolve a user-supplied horizontal-alignment token to the
+     *  EHorizontalAlignment enum the engine stores on
+     *  UOverlaySlot::HorizontalAlignment. The token list mirrors the
+     *  UMG editor's "Horizontal Alignment" dropdown. */
+    bool OverlaySlot_ParseHAlign(const FString& InToken, EHorizontalAlignment& OutAlign, FString& OutCanonical)
+    {
+        FString T = InToken.TrimStartAndEnd().ToLower();
+        if (T.StartsWith(TEXT("halign_")))
+        {
+            T = T.RightChop(7);
+        }
+        T = T.Replace(TEXT("_"), TEXT(""));
+        T = T.Replace(TEXT(" "), TEXT(""));
+        T = T.Replace(TEXT("-"), TEXT(""));
+
+        if (T == TEXT("fill"))      { OutAlign = HAlign_Fill;   OutCanonical = TEXT("Fill");   return true; }
+        if (T == TEXT("left"))      { OutAlign = HAlign_Left;   OutCanonical = TEXT("Left");   return true; }
+        if (T == TEXT("center") || T == TEXT("centre")
+                                  ) { OutAlign = HAlign_Center; OutCanonical = TEXT("Center"); return true; }
+        if (T == TEXT("right"))     { OutAlign = HAlign_Right;  OutCanonical = TEXT("Right");  return true; }
+        return false;
+    }
+
+    /** Resolve a user-supplied vertical-alignment token to the
+     *  EVerticalAlignment enum the engine stores on
+     *  UOverlaySlot::VerticalAlignment. */
+    bool OverlaySlot_ParseVAlign(const FString& InToken, EVerticalAlignment& OutAlign, FString& OutCanonical)
+    {
+        FString T = InToken.TrimStartAndEnd().ToLower();
+        if (T.StartsWith(TEXT("valign_")))
+        {
+            T = T.RightChop(7);
+        }
+        T = T.Replace(TEXT("_"), TEXT(""));
+        T = T.Replace(TEXT(" "), TEXT(""));
+        T = T.Replace(TEXT("-"), TEXT(""));
+
+        if (T == TEXT("fill"))      { OutAlign = VAlign_Fill;   OutCanonical = TEXT("Fill");   return true; }
+        if (T == TEXT("top"))       { OutAlign = VAlign_Top;    OutCanonical = TEXT("Top");    return true; }
+        if (T == TEXT("center") || T == TEXT("centre") || T == TEXT("middle")
+                                  ) { OutAlign = VAlign_Center; OutCanonical = TEXT("Center"); return true; }
+        if (T == TEXT("bottom"))    { OutAlign = VAlign_Bottom; OutCanonical = TEXT("Bottom"); return true; }
+        return false;
+    }
+
+    FString HAlignToToken(EHorizontalAlignment InAlign)
+    {
+        switch (InAlign)
+        {
+        case HAlign_Fill:   return TEXT("Fill");
+        case HAlign_Left:   return TEXT("Left");
+        case HAlign_Center: return TEXT("Center");
+        case HAlign_Right:  return TEXT("Right");
+        default: return FString::Printf(TEXT("Unknown(%d)"), static_cast<int32>(InAlign));
+        }
+    }
+
+    FString VAlignToToken(EVerticalAlignment InAlign)
+    {
+        switch (InAlign)
+        {
+        case VAlign_Fill:   return TEXT("Fill");
+        case VAlign_Top:    return TEXT("Top");
+        case VAlign_Center: return TEXT("Center");
+        case VAlign_Bottom: return TEXT("Bottom");
+        default: return FString::Printf(TEXT("Unknown(%d)"), static_cast<int32>(InAlign));
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetOverlaySlot(const TSharedPtr<FJsonObject>& Params)
+{
+    // Sugar over set_slot_property for the UOverlaySlot surface. The
+    // overlay slot stores per-axis alignment plus a padding margin.
+    // The engine exposes `SetHorizontalAlignment` / `SetVerticalAlignment`
+    // / `SetPadding` as the canonical mutators; routing through those
+    // tickles the parent UOverlay's cached slate widget so an open UMG
+    // editor refreshes on the next tick.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_overlay_slot: missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_overlay_slot: asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+    if (!WBP->WidgetTree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_overlay_slot: WidgetBlueprint has no WidgetTree"));
+    }
+
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_overlay_slot: missing 'widget' parameter (target child widget FName)"));
+    }
+    UWidget* TargetWidget = WBP->WidgetTree->FindWidget(FName(*WidgetNameStr));
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_overlay_slot: could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    UOverlaySlot* Slot = Cast<UOverlaySlot>(TargetWidget->Slot);
+    if (!Slot)
+    {
+        // The slot class is decided by the parent panel when the child
+        // attaches. If the child's parent is not a UOverlay, the slot
+        // class is something else (UCanvasPanelSlot, UVerticalBoxSlot,
+        // etc.) and the overlay-specific knobs do not apply. Surface
+        // a clear error so the caller knows to either reparent the
+        // child or use the generic `set_slot_property`.
+        UClass* SlotClass = TargetWidget->Slot ? TargetWidget->Slot->GetClass() : nullptr;
+        const FString SlotClassName = SlotClass ? SlotClass->GetName() : FString(TEXT("<null>"));
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_overlay_slot: widget '%s' is not parented to a UOverlay (slot class is '%s'). Reparent the child to an overlay or use 'set_slot_property' for non-overlay slots."),
+                *WidgetNameStr, *SlotClassName));
+    }
+
+    // Capture the previous values for the diff payload.
+    const EHorizontalAlignment PrevHAlign = Slot->GetHorizontalAlignment();
+    const EVerticalAlignment PrevVAlign = Slot->GetVerticalAlignment();
+    const FMargin PrevPadding = Slot->GetPadding();
+
+    EHorizontalAlignment NewHAlign = PrevHAlign;
+    EVerticalAlignment NewVAlign = PrevVAlign;
+    FMargin NewPadding = PrevPadding;
+
+    TArray<FString> Applied;
+
+    FString HAlignToken;
+    FString HAlignCanonical = HAlignToToken(PrevHAlign);
+    bool bWroteHAlign = false;
+    if (Params->TryGetStringField(TEXT("horizontal_alignment"), HAlignToken)
+        || Params->TryGetStringField(TEXT("h_align"), HAlignToken)
+        || Params->TryGetStringField(TEXT("halign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("hAlign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("HAlign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("horizontal"), HAlignToken))
+    {
+        if (!OverlaySlot_ParseHAlign(HAlignToken, NewHAlign, HAlignCanonical))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_overlay_slot: unknown horizontal_alignment '%s'. Supported: Fill, Left, Center, Right"), *HAlignToken));
+        }
+        bWroteHAlign = true;
+        Applied.Add(TEXT("horizontal_alignment"));
+    }
+
+    FString VAlignToken;
+    FString VAlignCanonical = VAlignToToken(PrevVAlign);
+    bool bWroteVAlign = false;
+    if (Params->TryGetStringField(TEXT("vertical_alignment"), VAlignToken)
+        || Params->TryGetStringField(TEXT("v_align"), VAlignToken)
+        || Params->TryGetStringField(TEXT("valign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("vAlign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("VAlign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("vertical"), VAlignToken))
+    {
+        if (!OverlaySlot_ParseVAlign(VAlignToken, NewVAlign, VAlignCanonical))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_overlay_slot: unknown vertical_alignment '%s'. Supported: Fill, Top, Center, Bottom"), *VAlignToken));
+        }
+        bWroteVAlign = true;
+        Applied.Add(TEXT("vertical_alignment"));
+    }
+
+    bool bWrotePadding = false;
+    {
+        const TSharedPtr<FJsonValue> Val = Params->TryGetField(TEXT("padding"));
+        if (Val.IsValid())
+        {
+            if (!CanvasSlot_ParseMargin(Val, NewPadding))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_overlay_slot: 'padding' must be [left, top, right, bottom] or {left, top, right, bottom}"));
+            }
+            bWrotePadding = true;
+            Applied.Add(TEXT("padding"));
+        }
+    }
+
+    if (Applied.Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_overlay_slot: pass at least one of 'horizontal_alignment' / 'vertical_alignment' / 'padding'"));
+    }
+
+    Slot->Modify();
+    if (bWroteHAlign)
+    {
+        Slot->SetHorizontalAlignment(NewHAlign);
+    }
+    if (bWroteVAlign)
+    {
+        Slot->SetVerticalAlignment(NewVAlign);
+    }
+    if (bWrotePadding)
+    {
+        Slot->SetPadding(NewPadding);
+    }
+
+#if WITH_EDITOR
+    Slot->PostEditChange();
+    TargetWidget->PostEditChange();
+#endif
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+    bool bCompile = false;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (UPackage* Package = WBP->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    auto MarginToArray = [](const FMargin& M)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Left));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Top));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Right));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Bottom));
+        return Arr;
+    };
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    for (const FString& Name : Applied)
+    {
+        AppliedJson.Add(MakeShared<FJsonValueString>(Name));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_overlay_slot"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("widget"), WidgetNameStr);
+    ResultObj->SetStringField(TEXT("widget_class"), TargetWidget->GetClass()->GetPathName());
+    ResultObj->SetStringField(TEXT("slot_class"), Slot->GetClass()->GetName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetNumberField(TEXT("applied_count"), Applied.Num());
+
+    ResultObj->SetStringField(TEXT("horizontal_alignment"), HAlignToToken(Slot->GetHorizontalAlignment()));
+    ResultObj->SetStringField(TEXT("vertical_alignment"), VAlignToToken(Slot->GetVerticalAlignment()));
+    ResultObj->SetArrayField(TEXT("padding"), MarginToArray(Slot->GetPadding()));
+
+    ResultObj->SetStringField(TEXT("previous_horizontal_alignment"), HAlignToToken(PrevHAlign));
+    ResultObj->SetStringField(TEXT("previous_vertical_alignment"), VAlignToToken(PrevVAlign));
+    ResultObj->SetArrayField(TEXT("previous_padding"), MarginToArray(PrevPadding));
 
     ResultObj->SetBoolField(TEXT("compiled"), bCompile);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
