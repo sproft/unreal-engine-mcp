@@ -8,7 +8,32 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped three deepening additions across
+The most recent pass shipped four deepening additions across
+existing tools: `animation_edit` gains `add_blendspace_sample`
+(UBlendSpace::AddSample wrapper that handles the skeleton +
+additive-type + range-validity guards up front), `sequencer_edit`
+gains `add_transform_section_keys` (declarative one-call writer
+for per-channel transform keys on a binding's
+UMovieScene3DTransformTrack; finds or creates the track + section,
+writes location.x / .y / .z / rotation.roll / .pitch / .yaw /
+scale.x / .y / .z through the section's channel proxy, expands
+the section's range to cover every key time), `material_edit`
+gains `add_texture_sample` (spawns a UMaterialExpressionTextureSample
+through UMaterialEditingLibrary::CreateMaterialExpression, writes
+TextureSample->Texture directly, runs AutoSetSampleType so the
+sampler type derives from the texture, and optionally wires
+Coordinates from a named expression plus drops the RGB output
+into a material attribute), and `bp_input` gains `add_action_chord`
+(declarative one-call wrapper that lays a UInputTriggerChordAction
+on a mapping row and binds its `ChordAction` slot to a sibling
+UInputAction asset path in one step; refuses self-chord since the
+runtime never resolves it). Each tool keeps the rest of its
+surface intact; the four deepenings together cover the most
+common "I need to author X by hand and the small variant did not
+have a one-call shortcut" gaps designers hit in the three months
+since the small-variant cuts shipped.
+
+The pass before that shipped three deepening additions across
 existing tools: `widget_edit` gains `set_widget_brush` (FSlateBrush
 reflective writer with designer-sugar shorthands), `chaos_edit`
 gains `set_damage_threshold` (per-fracture-level + uniform writer
