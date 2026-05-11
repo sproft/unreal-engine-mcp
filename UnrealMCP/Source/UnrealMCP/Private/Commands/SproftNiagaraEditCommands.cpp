@@ -142,8 +142,14 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleSetSystemWarmup(Params);
     }
+    if (Op.Equals(TEXT("set_emitter_loop"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_loop"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_loop_behavior"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetEmitterLoop(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup, set_emitter_loop"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -1796,6 +1802,305 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetSystemWarmup(const 
     Out->SetNumberField(TEXT("previous_warmup_tick_count"), PreviousTickCount);
     Out->SetNumberField(TEXT("previous_warmup_tick_delta"), PreviousTickDelta);
     Out->SetBoolField(TEXT("needs_warmup"), System->NeedsWarmup());
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterLoop(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writes the per-emitter loop behaviour fields on a Niagara
+    // system. The runtime path stores these on the
+    // FVersionedNiagaraEmitterData's `EmitterState` UPROPERTY (a
+    // FNiagaraEmitterStateData struct) which holds the loop
+    // configuration: an ENiagaraLoopBehavior enum (`Once` /
+    // `Infinite` / `Multiple`) plus an int32 LoopCount used when
+    // the mode is Multiple. We route through reflection against
+    // the FVersionedNiagaraEmitterData UScriptStruct so the public
+    // / private split on the contained struct stays transparent.
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString HandleToken;
+    if (!Params->TryGetStringField(TEXT("emitter"), HandleToken)
+        && !Params->TryGetStringField(TEXT("emitter_handle"), HandleToken)
+        && !Params->TryGetStringField(TEXT("handle_name"), HandleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'emitter' parameter"));
+    }
+
+    FString LoopModeToken;
+    if (!Params->TryGetStringField(TEXT("loop_mode"), LoopModeToken)
+        && !Params->TryGetStringField(TEXT("mode"), LoopModeToken)
+        && !Params->TryGetStringField(TEXT("loop_behavior"), LoopModeToken)
+        && !Params->TryGetStringField(TEXT("behavior"), LoopModeToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'loop_mode' parameter (one of 'once' / 'infinite' / 'multiple')"));
+    }
+
+    // Canonicalize the loop mode against the engine's
+    // ENiagaraLoopBehavior token set. We accept the engine's
+    // CamelCase form, the lowered alias, plus a few human-friendly
+    // synonyms.
+    const FString LoopModeLower = LoopModeToken.ToLower();
+    FString CanonicalMode;
+    if (LoopModeLower == TEXT("once") || LoopModeLower == TEXT("one") || LoopModeLower == TEXT("single"))
+    {
+        CanonicalMode = TEXT("Once");
+    }
+    else if (LoopModeLower == TEXT("infinite") || LoopModeLower == TEXT("loop") || LoopModeLower == TEXT("forever"))
+    {
+        CanonicalMode = TEXT("Infinite");
+    }
+    else if (LoopModeLower == TEXT("multiple") || LoopModeLower == TEXT("count") || LoopModeLower == TEXT("n_times"))
+    {
+        CanonicalMode = TEXT("Multiple");
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unsupported loop_mode '%s' (try 'once' / 'infinite' / 'multiple')"),
+                *LoopModeToken));
+    }
+
+    int32 LoopCountIn = 0;
+    const bool bHasLoopCount = Params->TryGetNumberField(TEXT("loop_count"), LoopCountIn)
+                            || Params->TryGetNumberField(TEXT("count"), LoopCountIn);
+    if (CanonicalMode == TEXT("Multiple"))
+    {
+        if (!bHasLoopCount)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("'multiple' loop_mode requires a 'loop_count' (int >= 1)"));
+        }
+        if (LoopCountIn < 1)
+        {
+            // Match the editor's clamp: Multiple with 0 collapses to
+            // 1.
+            LoopCountIn = 1;
+        }
+    }
+
+    // Walk the system's emitter handles and match by name (same
+    // resolver every other per-emitter op uses).
+    FNiagaraEmitterHandle* MatchedHandle = nullptr;
+    int32 HandleIndex = INDEX_NONE;
+    TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    for (int32 I = 0; I < Handles.Num(); ++I)
+    {
+        FNiagaraEmitterHandle& H = Handles[I];
+        const FString HName = H.GetName().ToString();
+        FString SourceName;
+        if (UNiagaraEmitter* SrcEmitter = H.GetInstance().Emitter)
+        {
+            SourceName = SrcEmitter->GetName();
+        }
+        if (HName.Equals(HandleToken, ESearchCase::IgnoreCase)
+            || (!SourceName.IsEmpty() && SourceName.Equals(HandleToken, ESearchCase::IgnoreCase)))
+        {
+            MatchedHandle = &H;
+            HandleIndex = I;
+            break;
+        }
+    }
+    if (!MatchedHandle)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve emitter handle '%s' on system '%s'"),
+                *HandleToken, *System->GetPathName()));
+    }
+
+    FVersionedNiagaraEmitterData* EmitterData = MatchedHandle->GetEmitterData();
+    if (!EmitterData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Emitter handle '%s' has no emitter data"), *HandleToken));
+    }
+
+    UScriptStruct* EmitterDataStruct = FVersionedNiagaraEmitterData::StaticStruct();
+    if (!EmitterDataStruct)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve FVersionedNiagaraEmitterData::StaticStruct()"));
+    }
+
+    // Reach the contained EmitterState struct by reflection. This
+    // matches the editor's stack viewmodel path, which writes the
+    // same UPROPERTY chain.
+    FStructProperty* StateProp = CastField<FStructProperty>(
+        EmitterDataStruct->FindPropertyByName(TEXT("EmitterState")));
+    if (!StateProp)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("FVersionedNiagaraEmitterData has no 'EmitterState' FStructProperty (engine API moved?)"));
+    }
+
+    UScriptStruct* StateStruct = StateProp->Struct;
+    if (!StateStruct)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("EmitterState property has no resolved UScriptStruct"));
+    }
+
+    void* EmitterDataPtr = static_cast<void*>(EmitterData);
+    void* StatePtr = StateProp->ContainerPtrToValuePtr<void>(EmitterDataPtr);
+
+    // ENiagaraLoopBehavior is exposed as either an FByteProperty
+    // (when declared as `TEnumAsByte<ENiagaraLoopBehavior>`) or an
+    // FEnumProperty (the modern `UENUM(BlueprintType)` shape).
+    // Walk both branches so we tolerate either header layout.
+    FProperty* LoopBehaviorProp = StateStruct->FindPropertyByName(TEXT("LoopBehavior"));
+    if (!LoopBehaviorProp)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("FNiagaraEmitterStateData has no 'LoopBehavior' property"));
+    }
+    FProperty* LoopCountProp = StateStruct->FindPropertyByName(TEXT("LoopCount"));
+    if (!LoopCountProp)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("FNiagaraEmitterStateData has no 'LoopCount' property"));
+    }
+
+    // Capture the previous values for the diff payload.
+    FString PreviousMode = TEXT("");
+    int32 PreviousCount = 0;
+    if (FIntProperty* PrevIntProp = CastField<FIntProperty>(LoopCountProp))
+    {
+        PreviousCount = PrevIntProp->GetPropertyValue_InContainer(StatePtr);
+    }
+    UEnum* LoopBehaviorEnum = nullptr;
+    if (FEnumProperty* AsEnum = CastField<FEnumProperty>(LoopBehaviorProp))
+    {
+        LoopBehaviorEnum = AsEnum->GetEnum();
+        if (LoopBehaviorEnum && AsEnum->GetUnderlyingProperty())
+        {
+            void* ValuePtr = AsEnum->ContainerPtrToValuePtr<void>(StatePtr);
+            const int64 EnumValue = AsEnum->GetUnderlyingProperty()->GetSignedIntPropertyValue(ValuePtr);
+            PreviousMode = LoopBehaviorEnum->GetNameStringByValue(EnumValue);
+        }
+    }
+    else if (FByteProperty* AsByte = CastField<FByteProperty>(LoopBehaviorProp))
+    {
+        LoopBehaviorEnum = AsByte->Enum;
+        if (LoopBehaviorEnum)
+        {
+            const uint8 ByteValue = AsByte->GetPropertyValue_InContainer(StatePtr);
+            PreviousMode = LoopBehaviorEnum->GetNameStringByValue(ByteValue);
+        }
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("FNiagaraEmitterStateData::LoopBehavior is not a byte / enum property"));
+    }
+    if (!LoopBehaviorEnum)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Could not resolve LoopBehavior's UEnum"));
+    }
+
+    // Translate the canonical mode token to the engine's enum
+    // value. The enum is `ENiagaraLoopBehavior`; the engine spells
+    // the entries `Once` / `Infinite` / `Multiple` so we try both
+    // the short name and the fully-qualified token.
+    auto ResolveLoopBehaviorValue = [LoopBehaviorEnum](const FString& Token, int64& OutValue) -> bool
+    {
+        const int64 ShortValue = LoopBehaviorEnum->GetValueByNameString(Token);
+        if (ShortValue != INDEX_NONE)
+        {
+            OutValue = ShortValue;
+            return true;
+        }
+        const FString Qualified = FString::Printf(TEXT("ENiagaraLoopBehavior::%s"), *Token);
+        const int64 QualifiedValue = LoopBehaviorEnum->GetValueByNameString(Qualified);
+        if (QualifiedValue != INDEX_NONE)
+        {
+            OutValue = QualifiedValue;
+            return true;
+        }
+        return false;
+    };
+
+    int64 NewModeValue = 0;
+    if (!ResolveLoopBehaviorValue(CanonicalMode, NewModeValue))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("ENiagaraLoopBehavior has no entry '%s' (engine API moved?)"),
+                *CanonicalMode));
+    }
+
+    // Write LoopBehavior through whichever property shape we got.
+    if (FEnumProperty* AsEnum = CastField<FEnumProperty>(LoopBehaviorProp))
+    {
+        if (FNumericProperty* Underlying = AsEnum->GetUnderlyingProperty())
+        {
+            void* ValuePtr = AsEnum->ContainerPtrToValuePtr<void>(StatePtr);
+            Underlying->SetIntPropertyValue(ValuePtr, NewModeValue);
+        }
+    }
+    else if (FByteProperty* AsByte = CastField<FByteProperty>(LoopBehaviorProp))
+    {
+        AsByte->SetPropertyValue_InContainer(StatePtr, static_cast<uint8>(NewModeValue));
+    }
+
+    // LoopCount: keep the existing count when the mode is not
+    // Multiple unless the caller supplied one explicitly. When
+    // Multiple, we always write the resolved count (1 minimum).
+    int32 ResolvedCount = PreviousCount;
+    if (bHasLoopCount)
+    {
+        ResolvedCount = LoopCountIn;
+    }
+    if (CanonicalMode == TEXT("Multiple"))
+    {
+        if (ResolvedCount < 1)
+        {
+            ResolvedCount = 1;
+        }
+    }
+    if (FIntProperty* IntProp = CastField<FIntProperty>(LoopCountProp))
+    {
+        IntProp->SetPropertyValue_InContainer(StatePtr, ResolvedCount);
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("FNiagaraEmitterStateData::LoopCount is not an int32 property"));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_emitter_loop"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("emitter_handle"), MatchedHandle->GetName().ToString());
+    Out->SetNumberField(TEXT("emitter_handle_index"), HandleIndex);
+    Out->SetStringField(TEXT("loop_mode"), CanonicalMode);
+    Out->SetNumberField(TEXT("loop_count"), ResolvedCount);
+    if (!PreviousMode.IsEmpty())
+    {
+        Out->SetStringField(TEXT("previous_loop_mode"), PreviousMode);
+    }
+    Out->SetNumberField(TEXT("previous_loop_count"), PreviousCount);
     Out->SetBoolField(TEXT("saved"), bSave);
     return Out;
 }

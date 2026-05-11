@@ -108,6 +108,19 @@
  *     bare token (`MyFloat`) and the fully-qualified
  *     `User.MyFloat` form on the SetParameterData path because of
  *     the store's redirection map. Save the system on success.
+ *   - `set_emitter_loop`: resolves an existing system + emitter
+ *     handle (same shape `set_emitter_local_parameter` uses) and
+ *     writes the per-version emitter data's `EmitterState` loop
+ *     fields (`FNiagaraEmitterStateData::LoopBehavior` and
+ *     `LoopCount`). `loop_mode` accepts `once` / `infinite` /
+ *     `multiple` (case-insensitive); `loop_count` is required
+ *     when `multiple` is selected (the editor caps at 1 when the
+ *     mode is Multiple and the count was 0). The write routes
+ *     through reflection against the
+ *     `FVersionedNiagaraEmitterData::EmitterState` UPROPERTY plus
+ *     the contained `FNiagaraEmitterStateData` struct's
+ *     `LoopBehavior` / `LoopCount` fields so we never bind to a
+ *     header-private alias. Save the system on success.
  *
  * Inputs (create_niagara_system):
  *   - path: `/Game/...` package path. Required.
@@ -184,4 +197,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetEmitterSimTarget(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetSystemExposedParameter(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetSystemWarmup(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetEmitterLoop(const TSharedPtr<FJsonObject>& Params);
 };

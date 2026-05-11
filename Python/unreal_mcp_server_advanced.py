@@ -8826,6 +8826,8 @@ def niagara_edit(
     warmup_time: Optional[float] = None,
     warmup_tick_count: Optional[int] = None,
     warmup_tick_delta: Optional[float] = None,
+    loop_mode: Optional[str] = None,
+    loop_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
@@ -8921,6 +8923,19 @@ def niagara_edit(
           derives the count; when ``warmup_tick_count`` is supplied
           we reflect-write that and harmonise the time. Saves the
           system on success.
+        - ``set_emitter_loop``: resolves an existing system +
+          emitter handle (same shape as
+          ``set_emitter_local_parameter``) and writes the
+          per-version emitter data's ``EmitterState`` loop
+          fields. ``loop_mode`` accepts ``once`` / ``infinite`` /
+          ``multiple`` (case-insensitive); ``loop_count`` is
+          required when ``multiple`` is selected (the editor
+          clamps to 1 minimum). The op routes through reflection
+          against ``FVersionedNiagaraEmitterData::EmitterState``
+          plus the contained ``FNiagaraEmitterStateData``'s
+          ``LoopBehavior`` (ENiagaraLoopBehavior) and
+          ``LoopCount`` (int32) fields. Saves the system on
+          success.
 
     The broader authoring surface beyond exposed-parameter writes
     stays in BACKLOG.md.
@@ -9027,6 +9042,10 @@ def niagara_edit(
         params["warmup_tick_count"] = warmup_tick_count
     if warmup_tick_delta is not None:
         params["warmup_tick_delta"] = warmup_tick_delta
+    if loop_mode is not None:
+        params["loop_mode"] = loop_mode
+    if loop_count is not None:
+        params["loop_count"] = loop_count
 
     try:
         response = unreal.send_command("niagara_edit", params)
