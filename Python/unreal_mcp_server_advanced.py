@@ -7010,6 +7010,8 @@ def sequencer_edit(
     interpolation: Optional[str] = None,
     channels: Optional[List[str]] = None,
     mask: Optional[int] = None,
+    end_frame: Optional[int] = None,
+    visible: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over a ULevelSequence asset.
@@ -7078,6 +7080,17 @@ def sequencer_edit(
           EMovieSceneTransformChannel bit layout. Useful for
           layered camera animations where a child section drives
           only Translation while a parent track drives Rotation.
+        - ``add_visibility_track``: declarative one-call wrapper
+          that lays a binding-scoped show / hide section down.
+          Resolves the binding through ``binding`` GUID or
+          ``actor`` / ``possessable`` name. Picks
+          ``UMovieSceneVisibilityTrack`` for possessables and
+          ``UMovieSceneSpawnTrack`` for spawnables, finds or
+          creates the track, then spawns a section over
+          ``[start_frame, end_frame)`` (or
+          ``[start_frame, start_frame + duration_frames)``) with the
+          bool channel default set to ``visible`` (default True).
+          Pass ``force_new_track=True`` to bypass the reuse path.
 
     Args:
         sequence: For inspect / add_possessable / add_track /
@@ -7180,6 +7193,10 @@ def sequencer_edit(
         params["channels"] = channels
     if mask is not None:
         params["mask"] = mask
+    if end_frame is not None:
+        params["end_frame"] = end_frame
+    if visible is not None:
+        params["visible"] = visible
 
     try:
         response = unreal.send_command("sequencer_edit", params)

@@ -41,6 +41,23 @@
  *     entry takes `{time_frames, location?, rotation?, scale?}`. The
  *     section's range expands to cover every key time, so the typical
  *     "lay down a camera fly-through" workflow is one call.
+ *   - `add_visibility_track`: declarative one-call wrapper that lays
+ *     a binding-scoped visibility section down. Resolves the target
+ *     binding through `binding` GUID or `actor` / `possessable` name
+ *     (required: visibility is per-binding). For possessables the
+ *     track class is `UMovieSceneVisibilityTrack` (the property track
+ *     that drives `AActor::SetActorHiddenInGame` / per-component
+ *     visibility); for spawnables the track class is
+ *     `UMovieSceneSpawnTrack` (the spawn-driver that gates whether the
+ *     spawnable is alive). Finds or creates the track on the binding,
+ *     then spawns a section via `UMovieSceneTrack::CreateNewSection` +
+ *     `AddSection`, wraps the requested `start_frame` +
+ *     `duration_frames` (or `end_frame`) into an inclusive-start /
+ *     exclusive-end `TRange<FFrameNumber>`, and writes the bool
+ *     channel default to `true` so the section keys the actor "visible"
+ *     (or "alive" for spawnables) over the requested interval. Pass
+ *     `visible=false` to flip the default to "hidden" without leaving
+ *     the MCP layer.
  *   - `set_transform_channel_mask`: writes the `FMovieSceneTransformMask`
  *     on an existing `UMovieScene3DTransformSection` through the
  *     documented `UMovieScene3DTransformSection::SetMask` (MOVIESCENETRACKS_API).
@@ -173,4 +190,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddAudioTrack(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddTransformSectionKeys(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetTransformChannelMask(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddVisibilityTrack(const TSharedPtr<FJsonObject>& Params);
 };

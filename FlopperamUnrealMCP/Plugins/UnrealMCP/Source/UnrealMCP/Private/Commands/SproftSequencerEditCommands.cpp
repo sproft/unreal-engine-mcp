@@ -18,11 +18,15 @@
 #include "Channels/MovieSceneChannelProxy.h"
 #include "Channels/MovieSceneDoubleChannel.h"
 #include "Channels/MovieSceneFloatChannel.h"
+#include "Channels/MovieSceneBoolChannel.h"
 #include "Sections/MovieScene3DTransformSection.h"
 #include "Sections/MovieSceneAudioSection.h"
+#include "Sections/MovieSceneBoolSection.h"
 #include "Sound/SoundBase.h"
 #include "Tracks/MovieScene3DTransformTrack.h"
 #include "Tracks/MovieSceneAudioTrack.h"
+#include "Tracks/MovieSceneSpawnTrack.h"
+#include "Tracks/MovieSceneVisibilityTrack.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
 
@@ -419,6 +423,12 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCommand(const FStrin
         || Op == TEXT("set_channel_mask"))
     {
         return HandleSetTransformChannelMask(Params);
+    }
+    if (Op == TEXT("add_visibility_track")
+        || Op == TEXT("add_visibility")
+        || Op == TEXT("visibility_track"))
+    {
+        return HandleAddVisibilityTrack(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("sequencer_edit: unsupported op '%s'"), *Op));
@@ -2129,6 +2139,215 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleSetTransformChannelM
         for (const FString& T : Tokens) { Arr.Add(MakeShared<FJsonValueString>(T)); }
         Result->SetArrayField(TEXT("previous_channels"), Arr);
     }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddVisibilityTrack(const TSharedPtr<FJsonObject>& Params)
+{
+    // Declarative one-call wrapper for the "show / hide an actor over
+    // a frame range" pattern. Visibility is a per-binding concept:
+    // - For an FMovieScenePossessable we attach a
+    //   `UMovieSceneVisibilityTrack` (a bool property track driving
+    //   `AActor::SetActorHiddenInGame`).
+    // - For an FMovieSceneSpawnable we attach a `UMovieSceneSpawnTrack`
+    //   (the bool track that gates the spawnable's lifetime); the
+    //   spawnable has no "hidden" property in the same way a possessed
+    //   actor does, so SpawnTrack is the canonical surface.
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    UMovieSceneSequence* Sequence = Cast<UMovieSceneSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMovieSceneSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    // Visibility is binding-scoped; a master visibility track has no
+    // meaning. Require either an explicit GUID or a name to resolve.
+    FGuid BindingGuid;
+    FString BindingGuidString;
+    if (Params->TryGetStringField(TEXT("binding"), BindingGuidString)
+        || Params->TryGetStringField(TEXT("binding_guid"), BindingGuidString))
+    {
+        if (!FGuid::Parse(BindingGuidString, BindingGuid))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Invalid binding GUID '%s'"), *BindingGuidString));
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        FString PossessableName;
+        if (Params->TryGetStringField(TEXT("possessable"), PossessableName)
+            || Params->TryGetStringField(TEXT("actor"), PossessableName))
+        {
+            BindingGuid = FindBindingByName(MovieScene, PossessableName);
+            if (!BindingGuid.IsValid())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("No binding matching '%s' on sequence '%s'"),
+                        *PossessableName, *Sequence->GetName()));
+            }
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Visibility is per-binding: pass 'binding' (GUID) or 'actor' / 'possessable' (name)"));
+    }
+
+    // Pick the right track subclass based on the binding kind. The
+    // FMovieSceneSpawnable lookup is keyed by GUID; FindSpawnable
+    // returns nullptr for possessables, so the test below is one cast.
+    const bool bIsSpawnable = (MovieScene->FindSpawnable(BindingGuid) != nullptr);
+    UClass* TrackClass = bIsSpawnable
+        ? static_cast<UClass*>(UMovieSceneSpawnTrack::StaticClass())
+        : static_cast<UClass*>(UMovieSceneVisibilityTrack::StaticClass());
+
+    // Find an existing track on the binding so the op is idempotent
+    // for follow-up adds; pass `force_new_track=true` to bypass.
+    bool bForceNewTrack = false;
+    Params->TryGetBoolField(TEXT("force_new_track"), bForceNewTrack);
+
+    UMovieSceneTrack* TargetTrack = nullptr;
+    bool bReusedExisting = false;
+    if (!bForceNewTrack)
+    {
+        if (UMovieSceneTrack* Existing = MovieScene->FindTrack(TrackClass, BindingGuid))
+        {
+            TargetTrack = Existing;
+            bReusedExisting = true;
+        }
+    }
+    if (!TargetTrack)
+    {
+        TargetTrack = MovieScene->AddTrack(TrackClass, BindingGuid);
+    }
+    if (!TargetTrack)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to add %s under binding %s"),
+                *TrackClass->GetName(), *BindingGuid.ToString()));
+    }
+
+    // Start frame defaults to the MovieScene's playback range start.
+    // Duration defaults to the playback range length; explicit
+    // `end_frame` wins over `duration_frames`.
+    int32 StartFrameInt = 0;
+    bool bStartFromCaller = Params->TryGetNumberField(TEXT("start_frame"), StartFrameInt);
+    if (!bStartFromCaller)
+    {
+        const TRange<FFrameNumber> Playback = MovieScene->GetPlaybackRange();
+        if (Playback.GetLowerBound().IsClosed())
+        {
+            StartFrameInt = Playback.GetLowerBoundValue().Value;
+        }
+    }
+    int32 EndFrameInt = 0;
+    bool bEndFromCaller = Params->TryGetNumberField(TEXT("end_frame"), EndFrameInt);
+    int32 DurationFramesInt = 0;
+    const bool bDurationFromCaller = Params->TryGetNumberField(TEXT("duration_frames"), DurationFramesInt)
+                                  || Params->TryGetNumberField(TEXT("duration"), DurationFramesInt);
+    if (!bEndFromCaller)
+    {
+        if (bDurationFromCaller)
+        {
+            EndFrameInt = StartFrameInt + DurationFramesInt;
+        }
+        else
+        {
+            const TRange<FFrameNumber> Playback = MovieScene->GetPlaybackRange();
+            if (Playback.GetUpperBound().IsClosed())
+            {
+                EndFrameInt = Playback.GetUpperBoundValue().Value;
+            }
+            else
+            {
+                // No closed upper bound: default to one display-rate
+                // second so the section has some range.
+                const FFrameRate Tick = MovieScene->GetTickResolution();
+                EndFrameInt = StartFrameInt + static_cast<int32>(Tick.AsDecimal());
+            }
+        }
+    }
+    if (EndFrameInt <= StartFrameInt)
+    {
+        EndFrameInt = StartFrameInt + 1;
+    }
+    DurationFramesInt = EndFrameInt - StartFrameInt;
+
+    // The track decides its native section subclass. For
+    // UMovieSceneVisibilityTrack that is UMovieSceneVisibilitySection
+    // (a UMovieSceneBoolSection subclass with the per-evaluation
+    // visibility entity provider). For UMovieSceneSpawnTrack that is
+    // UMovieSceneSpawnSection (also a UMovieSceneBoolSection
+    // subclass). The shared base lets us write the channel default
+    // through one path.
+    UMovieSceneSection* NewSection = TargetTrack->CreateNewSection();
+    if (!NewSection)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Track '%s' CreateNewSection returned null"),
+                *TargetTrack->GetClass()->GetName()));
+    }
+
+    const FFrameNumber StartFrame(StartFrameInt);
+    const FFrameNumber EndFrame(EndFrameInt);
+    const TRange<FFrameNumber> NewRange = TRange<FFrameNumber>(
+        TRangeBound<FFrameNumber>::Inclusive(StartFrame),
+        TRangeBound<FFrameNumber>::Exclusive(EndFrame));
+    NewSection->SetRange(NewRange);
+
+    // Default value flips between "visible / alive" (true, default)
+    // and "hidden / dead" (false). The bool section base exposes the
+    // channel through `GetChannel()`; both Visibility and Spawn
+    // sections inherit from UMovieSceneBoolSection.
+    bool bVisible = true;
+    Params->TryGetBoolField(TEXT("visible"), bVisible);
+    if (UMovieSceneBoolSection* BoolSection = Cast<UMovieSceneBoolSection>(NewSection))
+    {
+        BoolSection->GetChannel().SetDefault(bVisible);
+    }
+
+    TargetTrack->AddSection(*NewSection);
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    Sequence->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_visibility_track"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());
+    Result->SetStringField(TEXT("binding_kind"), bIsSpawnable ? TEXT("spawnable") : TEXT("possessable"));
+    Result->SetStringField(TEXT("track_class"), TrackClass->GetName());
+    Result->SetStringField(TEXT("track_class_path"), TrackClass->GetPathName());
+    Result->SetStringField(TEXT("track_name"), TargetTrack->GetFName().ToString());
+    Result->SetBoolField(TEXT("reused_existing_track"), bReusedExisting);
+    Result->SetStringField(TEXT("section_class"), NewSection->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class_path"), NewSection->GetClass()->GetPathName());
+    Result->SetNumberField(TEXT("section_index"),
+        TargetTrack->GetAllSections().IndexOfByKey(NewSection));
+    Result->SetNumberField(TEXT("start_frame"), StartFrameInt);
+    Result->SetNumberField(TEXT("end_frame"), EndFrameInt);
+    Result->SetNumberField(TEXT("duration_frames"), DurationFramesInt);
+    Result->SetBoolField(TEXT("visible"), bVisible);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }
