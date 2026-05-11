@@ -82,6 +82,20 @@
  *     `gpu` / `CPUSim` / `GPUComputeSim`. The op runs the
  *     PostEditChangeProperty fix-up against the SimTarget UPROPERTY
  *     so the cached renderer / GPU-script state refreshes.
+ *   - `set_system_warmup`: writes the system-level warmup pair on
+ *     a UNiagaraSystem. Inputs: optional `warmup_time` (seconds),
+ *     optional `warmup_tick_count` (integer), optional
+ *     `warmup_tick_delta` (seconds-per-tick override). When
+ *     `warmup_time` is supplied we route through the public
+ *     `UNiagaraSystem::SetWarmupTime` mutator (NIAGARA_API) so the
+ *     engine's `ResolveWarmupTickCount` resolves the tick count from
+ *     the current tick delta. When `warmup_tick_count` is supplied
+ *     we write it directly through reflection (`WarmupTickCount`
+ *     has no public setter) and harmonise `WarmupTime` so the
+ *     editor's EditCondition (`WarmupTime > 0`) holds. When
+ *     `warmup_tick_delta` is supplied we route through the public
+ *     `UNiagaraSystem::SetWarmupTickDelta` mutator. Saves the system
+ *     on success unless `save=false`.
  *   - `set_system_exposed_parameter`: resolves an existing
  *     UNiagaraSystem and writes a parameter into the system's
  *     `ExposedParameters` store
@@ -169,4 +183,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddSimStage(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterSimTarget(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetSystemExposedParameter(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetSystemWarmup(const TSharedPtr<FJsonObject>& Params);
 };

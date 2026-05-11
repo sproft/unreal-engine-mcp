@@ -137,8 +137,13 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleSetSystemExposedParameter(Params);
     }
+    if (Op.Equals(TEXT("set_system_warmup"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_warmup"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetSystemWarmup(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -1667,4 +1672,130 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetSystemExposedParame
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         TEXT("niagara_edit set_system_exposed_parameter requires WITH_EDITORONLY_DATA"));
 #endif
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetSystemWarmup(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writes the trio of warmup UPROPERTYs on a UNiagaraSystem:
+    //   WarmupTime (seconds; the editor surface designers see),
+    //   WarmupTickCount (number of ticks; derived from time/delta),
+    //   WarmupTickDelta (seconds per warmup tick).
+    // The public mutators `SetWarmupTime` / `SetWarmupTickDelta`
+    // (NIAGARA_API) call `ResolveWarmupTickCount` so the derived
+    // count stays consistent with the time. When the caller passes
+    // `warmup_tick_count` directly we reflect-write `WarmupTickCount`
+    // since the engine has no public setter for it, then keep
+    // `WarmupTime` consistent (`WarmupTime = TickCount * TickDelta`)
+    // so the editor's EditCondition (`WarmupTime > 0`) reveals the
+    // remaining warmup fields.
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    double WarmupTimeIn = 0.0;
+    const bool bHasWarmupTime = Params->TryGetNumberField(TEXT("warmup_time"), WarmupTimeIn);
+    int32 WarmupTickCountIn = 0;
+    const bool bHasWarmupTickCount = Params->TryGetNumberField(TEXT("warmup_tick_count"), WarmupTickCountIn)
+                                  || Params->TryGetNumberField(TEXT("tick_count"), WarmupTickCountIn);
+    double WarmupTickDeltaIn = 0.0;
+    const bool bHasWarmupTickDelta = Params->TryGetNumberField(TEXT("warmup_tick_delta"), WarmupTickDeltaIn)
+                                  || Params->TryGetNumberField(TEXT("tick_delta"), WarmupTickDeltaIn);
+
+    if (!bHasWarmupTime && !bHasWarmupTickCount && !bHasWarmupTickDelta)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing warmup field: pass at least one of 'warmup_time', 'warmup_tick_count', 'warmup_tick_delta'"));
+    }
+    if (bHasWarmupTime && WarmupTimeIn < 0.0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'warmup_time' must be >= 0"));
+    }
+    if (bHasWarmupTickCount && WarmupTickCountIn < 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'warmup_tick_count' must be >= 0"));
+    }
+    if (bHasWarmupTickDelta && WarmupTickDeltaIn < 0.0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'warmup_tick_delta' must be >= 0"));
+    }
+
+    // Capture the prior values so the response can surface them for
+    // diagnostic diff.
+    const float PreviousWarmupTime = System->GetWarmupTime();
+    const int32 PreviousTickCount = System->GetWarmupTickCount();
+    const float PreviousTickDelta = System->GetWarmupTickDelta();
+
+    // Order matters: write the tick delta first so any subsequent
+    // SetWarmupTime call resolves through the latest delta.
+    if (bHasWarmupTickDelta)
+    {
+        System->SetWarmupTickDelta(static_cast<float>(WarmupTickDeltaIn));
+    }
+
+    if (bHasWarmupTime)
+    {
+        System->SetWarmupTime(static_cast<float>(WarmupTimeIn));
+    }
+
+    if (bHasWarmupTickCount)
+    {
+        // `WarmupTickCount` is a UPROPERTY but has no public setter
+        // (the engine derives it from WarmupTime / WarmupTickDelta in
+        // ResolveWarmupTickCount). We route through reflection so we
+        // stay clean-room and avoid friending the class. After the
+        // write we mirror the time-side so the editor EditCondition
+        // (`WarmupTime > 0`) holds for nonzero tick counts.
+        FProperty* TickCountProp = FindFProperty<FProperty>(UNiagaraSystem::StaticClass(), TEXT("WarmupTickCount"));
+        if (FIntProperty* IntProp = CastField<FIntProperty>(TickCountProp))
+        {
+            IntProp->SetPropertyValue_InContainer(System, WarmupTickCountIn);
+            // Keep WarmupTime consistent with the tick count.
+            const float ResolvedDelta = System->GetWarmupTickDelta();
+            if (ResolvedDelta > SMALL_NUMBER)
+            {
+                FProperty* TimeProp = FindFProperty<FProperty>(UNiagaraSystem::StaticClass(), TEXT("WarmupTime"));
+                if (FFloatProperty* TimeFloat = CastField<FFloatProperty>(TimeProp))
+                {
+                    TimeFloat->SetPropertyValue_InContainer(System, ResolvedDelta * WarmupTickCountIn);
+                }
+            }
+        }
+        else
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("UNiagaraSystem 'WarmupTickCount' not resolvable through reflection (FIntProperty)"));
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_system_warmup"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetNumberField(TEXT("warmup_time"), System->GetWarmupTime());
+    Out->SetNumberField(TEXT("warmup_tick_count"), System->GetWarmupTickCount());
+    Out->SetNumberField(TEXT("warmup_tick_delta"), System->GetWarmupTickDelta());
+    Out->SetNumberField(TEXT("previous_warmup_time"), PreviousWarmupTime);
+    Out->SetNumberField(TEXT("previous_warmup_tick_count"), PreviousTickCount);
+    Out->SetNumberField(TEXT("previous_warmup_tick_delta"), PreviousTickDelta);
+    Out->SetBoolField(TEXT("needs_warmup"), System->NeedsWarmup());
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
 }

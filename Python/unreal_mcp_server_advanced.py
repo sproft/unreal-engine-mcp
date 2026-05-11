@@ -8790,6 +8790,9 @@ def niagara_edit(
     stage_class: Optional[str] = None,
     stage_name: Optional[str] = None,
     sim_target: Optional[str] = None,
+    warmup_time: Optional[float] = None,
+    warmup_tick_count: Optional[int] = None,
+    warmup_tick_delta: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Niagara system + emitter authoring.
@@ -8875,6 +8878,16 @@ def niagara_edit(
           callers may pass the bare token (``MyFloat``) or the
           fully-qualified ``User.MyFloat`` form. Saves the system
           on success.
+        - ``set_system_warmup``: writes the system-level warmup
+          trio (``WarmupTime`` seconds, ``WarmupTickCount`` ticks,
+          ``WarmupTickDelta`` seconds-per-tick) on a
+          ``UNiagaraSystem``. Pass any combination of
+          ``warmup_time`` / ``warmup_tick_count`` / ``warmup_tick_delta``.
+          When ``warmup_time`` is supplied we route through the
+          public ``SetWarmupTime`` mutator so ``ResolveWarmupTickCount``
+          derives the count; when ``warmup_tick_count`` is supplied
+          we reflect-write that and harmonise the time. Saves the
+          system on success.
 
     The broader authoring surface beyond exposed-parameter writes
     stays in BACKLOG.md.
@@ -8975,6 +8988,12 @@ def niagara_edit(
         params["stage_name"] = stage_name
     if sim_target is not None:
         params["sim_target"] = sim_target
+    if warmup_time is not None:
+        params["warmup_time"] = warmup_time
+    if warmup_tick_count is not None:
+        params["warmup_tick_count"] = warmup_tick_count
+    if warmup_tick_delta is not None:
+        params["warmup_tick_delta"] = warmup_tick_delta
 
     try:
         response = unreal.send_command("niagara_edit", params)
