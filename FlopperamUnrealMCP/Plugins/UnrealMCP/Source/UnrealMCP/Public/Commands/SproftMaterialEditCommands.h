@@ -180,6 +180,24 @@
  *      `name`, `properties`, `property` / `connect_to` /
  *      `connect_input` for one-shot downstream wiring, `recompile`,
  *      `save`).
+ *   - "add_uv_node": single-call wrapper that spawns one of the
+ *      common UV-flow expression nodes by short `op` token.
+ *      Accepts `TextureCoordinate` / `Panner` / `Rotator` /
+ *      `WorldPosition` / `ObjectPosition` / `CameraPosition` /
+ *      `ScreenPosition` (case-insensitive plus aliases `TexCoord`
+ *      / `UV` / `ObjectPositionWS` / `CameraPositionWS`). The op
+ *      auto-picks the matching expression subclass and lays the
+ *      new node onto the target material. Optional flat
+ *      `properties` dict applies through `ImportText_InContainer`
+ *      so callers can land `CoordinateIndex` / `UTiling` /
+ *      `VTiling` on TextureCoordinate, `SpeedX` / `SpeedY` /
+ *      `ConstCoordinate` on Panner, `CenterX` / `CenterY` /
+ *      `Speed` on Rotator, the `WorldPositionShaderOffset` enum
+ *      on WorldPosition, the `OriginType` enum on ObjectPosition,
+ *      etc., in the same call. Same downstream knobs as
+ *      `add_expression` / `add_math` (`position`, `name`,
+ *      `property` / `connect_to` / `connect_input` for one-shot
+ *      downstream wiring, `recompile`, `save`).
  *   - "set_attribute_blendable": flips a per-attribute override toggle
  *      on a UMaterialInstanceConstant's
  *      `FMaterialInstanceBasePropertyOverrides` struct. The
@@ -249,4 +267,5 @@ private:
     TSharedPtr<FJsonObject> AddTexture2DArraySample(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddConstant(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddMath(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddUVNode(const TSharedPtr<FJsonObject>& Params);
 };

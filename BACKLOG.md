@@ -1330,6 +1330,38 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `material_edit add_uv_node` (small) — single-call wrapper
+  that spawns one of the common UV-flow expression nodes on a
+  target UMaterial. `op` accepts `TextureCoordinate` /
+  `Panner` / `Rotator` / `WorldPosition` / `ObjectPosition` /
+  `CameraPosition` / `ScreenPosition` (case-insensitive plus
+  aliases `TexCoord` / `UV` / `ObjectPositionWS` /
+  `CameraPositionWS`; underscores and spaces are normalised
+  out before the lookup so a caller can pass
+  `Texture_Coordinate` or `Camera Position` and still land
+  the canonical class). Routes through
+  `UMaterialEditingLibrary::CreateMaterialExpression` for the
+  spawn so the editor's right-click "Add Material Expression"
+  path is the same path the op takes. Optional `position`
+  overrides the default cascade. Optional flat `properties`
+  dict applies through `ImportText_InContainer` so callers
+  can land `CoordinateIndex` / `UTiling` / `VTiling` on
+  TextureCoordinate, `SpeedX` / `SpeedY` / `ConstCoordinate`
+  on Panner, `CenterX` / `CenterY` / `Speed` on Rotator, the
+  `WorldPositionShaderOffset` enum on WorldPosition, and the
+  `OriginType` enum on ObjectPosition, all in the same call.
+  Reuses the same `DeriveDefaultPosition` cascade,
+  `MaterialEdit_ApplyPropertyDict`, `FindExpressionByName`,
+  and `TryParseMaterialProperty` helpers `add_expression` /
+  `add_constant` / `add_math` already use. Same downstream
+  knobs as `add_math` (`name`, `property` / `connect_to` /
+  `connect_input` for one-shot downstream wiring,
+  `recompile`, `save`). Closes the common UV-flow shortcuts
+  on `material_edit` without spelling out
+  `UMaterialExpressionTextureCoordinate` / `Panner` /
+  `Rotator` / `WorldPosition` / `ObjectPositionWS` /
+  `CameraPositionWS` / `ScreenPosition` class names. Aliases:
+  `add_uv_node` / `add_uv` / `add_uv_expression` / `uv_node`.
 - `behavior_tree set_parent_blackboard` (small) — rebinds a
   target UBlackboardData's `Parent` UPROPERTY to another
   UBlackboardData, or unbinds the slot when `clear=true` or

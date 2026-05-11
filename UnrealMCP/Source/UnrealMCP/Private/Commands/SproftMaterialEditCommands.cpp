@@ -40,13 +40,18 @@
 #include "Materials/MaterialExpressionNormalize.h"
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialExpressionOneMinus.h"
+#include "Materials/MaterialExpressionCameraPositionWS.h"
+#include "Materials/MaterialExpressionObjectPositionWS.h"
 #include "Materials/MaterialExpressionPanner.h"
 #include "Materials/MaterialExpressionPower.h"
+#include "Materials/MaterialExpressionRotator.h"
 #include "Materials/MaterialExpressionSaturate.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionScreenPosition.h"
 #include "Materials/MaterialExpressionSine.h"
 #include "Materials/MaterialExpressionSubtract.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
+#include "Materials/MaterialExpressionWorldPosition.h"
 #include "Materials/MaterialExpressionTextureObjectParameter.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureCube.h"
@@ -521,9 +526,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddMath(Params);
     }
+    if (Operation == TEXT("add_uv_node") || Operation == TEXT("add_uv")
+        || Operation == TEXT("add_uv_expression") || Operation == TEXT("uv_node"))
+    {
+        return AddUVNode(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -4131,6 +4141,252 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddMath(const TSharedPtr<FJ
         }
         ResultObj->SetArrayField(TEXT("input_errors"), Arr);
     }
+    ResultObj->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
+    if (PropertyErrors.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& E : PropertyErrors)
+        {
+            Arr.Add(MakeShared<FJsonValueString>(E));
+        }
+        ResultObj->SetArrayField(TEXT("property_errors"), Arr);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_property"), bConnectedToProperty);
+    if (bConnectedToProperty)
+    {
+        ResultObj->SetStringField(TEXT("property"), PropertyConnected);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_expression"), bConnectedToExpression);
+    if (bConnectedToExpression)
+    {
+        ResultObj->SetStringField(TEXT("connect_to"), ExpressionConnected);
+    }
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddUVNode(const TSharedPtr<FJsonObject>& Params)
+{
+    // Spawn one of the common UV-flow expressions by short token so
+    // callers do not have to spell out the long class names. Wraps
+    // TextureCoordinate / Panner / Rotator plus the position family
+    // (WorldPosition / ObjectPosition / CameraPosition / ScreenPosition)
+    // since these all share the same flat-property dict shape and
+    // downstream wiring needs.
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+    UMaterial* Material = Cast<UMaterial>(UEditorAssetLibrary::LoadAsset(MaterialPath));
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial"), *MaterialPath));
+    }
+
+    FString OpToken;
+    if (!Params->TryGetStringField(TEXT("op"), OpToken)
+        && !Params->TryGetStringField(TEXT("uv_op"), OpToken)
+        && !Params->TryGetStringField(TEXT("node"), OpToken)
+        && !Params->TryGetStringField(TEXT("uv_node"), OpToken)
+        && !Params->TryGetStringField(TEXT("kind"), OpToken)
+        && !Params->TryGetStringField(TEXT("type"), OpToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'op' parameter (TextureCoordinate / Panner / Rotator / WorldPosition / ObjectPosition / CameraPosition / ScreenPosition)"));
+    }
+
+    TSubclassOf<UMaterialExpression> NodeClass = nullptr;
+    FString CanonicalToken;
+    const FString OpLower = OpToken.ToLower().Replace(TEXT("_"), TEXT("")).Replace(TEXT(" "), TEXT(""));
+
+    if (OpLower == TEXT("texturecoordinate") || OpLower == TEXT("texcoord")
+        || OpLower == TEXT("uv") || OpLower == TEXT("uvs"))
+    {
+        NodeClass = UMaterialExpressionTextureCoordinate::StaticClass();
+        CanonicalToken = TEXT("TextureCoordinate");
+    }
+    else if (OpLower == TEXT("panner"))
+    {
+        NodeClass = UMaterialExpressionPanner::StaticClass();
+        CanonicalToken = TEXT("Panner");
+    }
+    else if (OpLower == TEXT("rotator"))
+    {
+        NodeClass = UMaterialExpressionRotator::StaticClass();
+        CanonicalToken = TEXT("Rotator");
+    }
+    else if (OpLower == TEXT("worldposition") || OpLower == TEXT("worldpos")
+        || OpLower == TEXT("absoluteworldposition") || OpLower == TEXT("worldpositionws"))
+    {
+        NodeClass = UMaterialExpressionWorldPosition::StaticClass();
+        CanonicalToken = TEXT("WorldPosition");
+    }
+    else if (OpLower == TEXT("objectposition") || OpLower == TEXT("objectpos")
+        || OpLower == TEXT("objectpositionws"))
+    {
+        NodeClass = UMaterialExpressionObjectPositionWS::StaticClass();
+        CanonicalToken = TEXT("ObjectPosition");
+    }
+    else if (OpLower == TEXT("cameraposition") || OpLower == TEXT("camerapos")
+        || OpLower == TEXT("camerapositionws"))
+    {
+        NodeClass = UMaterialExpressionCameraPositionWS::StaticClass();
+        CanonicalToken = TEXT("CameraPosition");
+    }
+    else if (OpLower == TEXT("screenposition") || OpLower == TEXT("screenpos"))
+    {
+        NodeClass = UMaterialExpressionScreenPosition::StaticClass();
+        CanonicalToken = TEXT("ScreenPosition");
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown 'op' token '%s'. Use TextureCoordinate / Panner / Rotator / WorldPosition / ObjectPosition / CameraPosition / ScreenPosition"),
+                *OpToken));
+    }
+
+    // Position cascade reuses the same DeriveDefaultPosition helper
+    // that add_expression / add_constant / add_math share.
+    int32 PosX = 0, PosY = 0;
+    bool bExplicitPos = false;
+    if (Params->HasField(TEXT("position")))
+    {
+        const TSharedPtr<FJsonValue> PosVal = Params->TryGetField(TEXT("position"));
+        if (PosVal.IsValid() && PosVal->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = PosVal->AsArray();
+            if (Arr.Num() >= 2)
+            {
+                PosX = static_cast<int32>(Arr[0]->AsNumber());
+                PosY = static_cast<int32>(Arr[1]->AsNumber());
+                bExplicitPos = true;
+            }
+        }
+        else if (PosVal.IsValid() && PosVal->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject> PosObj = PosVal->AsObject();
+            double X = 0.0, Y = 0.0;
+            if (PosObj.IsValid()
+                && (PosObj->TryGetNumberField(TEXT("x"), X) || PosObj->TryGetNumberField(TEXT("X"), X))
+                && (PosObj->TryGetNumberField(TEXT("y"), Y) || PosObj->TryGetNumberField(TEXT("Y"), Y)))
+            {
+                PosX = static_cast<int32>(X);
+                PosY = static_cast<int32>(Y);
+                bExplicitPos = true;
+            }
+        }
+    }
+    if (!bExplicitPos)
+    {
+        DeriveDefaultPosition(Material, PosX, PosY);
+    }
+
+    UMaterialExpression* NewExpr = UMaterialEditingLibrary::CreateMaterialExpression(
+        Material, NodeClass, PosX, PosY);
+    if (!NewExpr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("CreateMaterialExpression failed for class '%s'"), *NodeClass->GetName()));
+    }
+
+    // Optional `name` renames the spawned node so follow-up wiring
+    // calls can address it by FName.
+    FString NameOverride;
+    if (Params->TryGetStringField(TEXT("name"), NameOverride) && !NameOverride.IsEmpty())
+    {
+        NewExpr->Rename(*NameOverride, NewExpr->GetOuter(), REN_DontCreateRedirectors);
+    }
+
+    // Optional flat properties dict (CoordinateIndex / UTiling /
+    // SpeedX / SpeedY / WorldPositionShaderOffset / OriginType etc.)
+    // applies through ImportText_InContainer.
+    TArray<FString> PropertyErrors;
+    int32 PropertyAppliedCount = 0;
+    if (Params->HasField(TEXT("properties")))
+    {
+        const TSharedPtr<FJsonValue> PropsVal = Params->TryGetField(TEXT("properties"));
+        if (PropsVal.IsValid() && PropsVal->Type == EJson::Object)
+        {
+            PropertyAppliedCount = MaterialEdit_ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
+        }
+    }
+
+    // Optional one-shot wiring into a material attribute or another
+    // expression's named input pin. Same shape as add_expression /
+    // add_math.
+    bool bConnectedToProperty = false;
+    bool bConnectedToExpression = false;
+    FString PropertyConnected;
+    FString ExpressionConnected;
+
+    FString PropertyToken;
+    if (Params->TryGetStringField(TEXT("property"), PropertyToken)
+        || Params->TryGetStringField(TEXT("connect_property"), PropertyToken))
+    {
+        EMaterialProperty MaterialProperty;
+        if (!TryParseMaterialProperty(PropertyToken, MaterialProperty))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unknown material property token '%s'. Use BaseColor, Metallic, Roughness, EmissiveColor, etc."), *PropertyToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialProperty(NewExpr, FromOutput, MaterialProperty))
+        {
+            bConnectedToProperty = true;
+            PropertyConnected = PropertyToken;
+        }
+    }
+
+    FString ConnectToToken;
+    FString ConnectInputToken;
+    if (Params->TryGetStringField(TEXT("connect_to"), ConnectToToken))
+    {
+        Params->TryGetStringField(TEXT("connect_input"), ConnectInputToken);
+        UMaterialExpression* ToExpr = FindExpressionByName(Material, ConnectToToken);
+        if (!ToExpr)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("connect_to expression '%s' not found on material"), *ConnectToToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialExpressions(NewExpr, FromOutput, ToExpr, ConnectInputToken))
+        {
+            bConnectedToExpression = true;
+            ExpressionConnected = ToExpr->GetName();
+        }
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_uv_node"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetStringField(TEXT("uv_op"), CanonicalToken);
+    ResultObj->SetStringField(TEXT("expression_class"), NodeClass->GetName());
+    ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
     ResultObj->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
     if (PropertyErrors.Num() > 0)
     {

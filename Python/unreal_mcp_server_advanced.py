@@ -3987,6 +3987,26 @@ def material_edit(
           (``position``, ``name``, ``properties``, ``property`` /
           ``connect_to`` / ``connect_input`` for one-shot
           downstream wiring, ``recompile``, ``save``).
+        - "add_uv_node": single-call wrapper that spawns one of
+          the common UV-flow expression nodes by short ``op``
+          token. Accepts ``TextureCoordinate`` / ``Panner`` /
+          ``Rotator`` / ``WorldPosition`` / ``ObjectPosition`` /
+          ``CameraPosition`` / ``ScreenPosition`` (case-insensitive
+          plus the short aliases ``TexCoord`` / ``UV`` /
+          ``ObjectPositionWS`` / ``CameraPositionWS``). Optional
+          ``position`` overrides the default cascade. Optional flat
+          ``properties`` dict applies through
+          ``ImportText_InContainer`` so callers can land
+          ``CoordinateIndex`` / ``UTiling`` / ``VTiling`` on
+          TextureCoordinate, ``SpeedX`` / ``SpeedY`` /
+          ``ConstCoordinate`` on Panner, ``CenterX`` / ``CenterY``
+          / ``Speed`` on Rotator, the
+          ``WorldPositionShaderOffset`` enum on WorldPosition, the
+          ``OriginType`` enum on ObjectPosition, etc., in the same
+          call. Same downstream knobs as ``add_expression`` /
+          ``add_math`` (``name``, ``property`` / ``connect_to`` /
+          ``connect_input`` for one-shot downstream wiring,
+          ``recompile``, ``save``).
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.
