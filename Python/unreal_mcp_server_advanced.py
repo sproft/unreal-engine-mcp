@@ -3794,6 +3794,9 @@ def material_edit(
     name: Optional[str] = None,
     attribute: Optional[str] = None,
     enabled: Optional[bool] = None,
+    texture: Optional[str] = None,
+    coordinates: Optional[str] = None,
+    coordinates_output: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -3875,6 +3878,25 @@ def material_edit(
           aliases the spawned expression so a follow-up
           ``connect_expressions`` call can address the node by
           FName.
+        - "add_texture_sample": adds a
+          ``UMaterialExpressionTextureSample`` to a target UMaterial
+          and binds the new node's ``Texture`` property to a chosen
+          UTexture asset in one call. ``texture`` accepts a
+          ``/Game/...`` path or a unique short name (probed against
+          the asset registry's UTexture index). After the spawn the
+          op writes ``TextureSample->Texture`` directly and lets the
+          engine derive the sampler type through ``AutoSetSampleType``
+          (the editor's right-click "Refresh Sampler Type" path).
+          Optional ``coordinates`` names an existing expression on
+          the same material whose first output pin (or the pin named
+          by ``coordinates_output``) wires into the texture sample's
+          ``Coordinates`` input through
+          ``UMaterialEditingLibrary::ConnectMaterialExpressions``.
+          Optional ``connect_to`` / ``connect_input`` / ``property``
+          knobs mirror ``add_expression`` so a single call can both
+          spawn the sample and drop its ``RGB`` output into
+          ``BaseColor`` (or another material attribute). Optional
+          ``name`` renames the new expression.
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.
@@ -4009,6 +4031,12 @@ def material_edit(
         params["attribute"] = attribute
     if enabled is not None:
         params["enabled"] = enabled
+    if texture is not None:
+        params["texture"] = texture
+    if coordinates is not None:
+        params["coordinates"] = coordinates
+    if coordinates_output is not None:
+        params["coordinates_output"] = coordinates_output
 
     try:
         response = unreal.send_command("material_edit", params)

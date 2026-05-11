@@ -2311,6 +2311,34 @@ ability" alongside `tag_registry_edit`.
   per-row Triggers array (next to Modifiers on
   FEnhancedActionKeyMapping) and per-action Modifier surface on
   the UInputAction asset stay on this list.
+- `material_edit add_texture_sample` (small) — adds a
+  `UMaterialExpressionTextureSample` to a target UMaterial and binds
+  the new node's `Texture` property to a chosen UTexture asset in one
+  call. Spawns the expression through
+  `UMaterialEditingLibrary::CreateMaterialExpression` (the same path
+  `add_expression` uses for every other expression subclass), writes
+  `TextureSample->Texture` directly, and runs
+  `UMaterialExpressionTextureBase::AutoSetSampleType` (ENGINE_API on
+  MaterialExpressionTextureBase.h line 63) so the engine derives the
+  sampler type from the texture the same way the editor's right-click
+  "Refresh Sampler Type" entry does. Without that step the node renders
+  with a mismatched sampler and a downstream compile warning. The
+  texture resolves through a `/Game/...` path or a unique short name
+  probed against the asset registry's UTexture index (any UTexture
+  subclass passes the IsA check). Optional `coordinates` knob names
+  an existing expression on the same material whose first output (or
+  the pin named by `coordinates_output`) wires into the texture
+  sample's `Coordinates` input through
+  `UMaterialEditingLibrary::ConnectMaterialExpressions`. Optional
+  `property` / `connect_to` / `connect_input` knobs mirror
+  `add_expression` so a single call can both spawn the sample and
+  drop its RGB output into BaseColor (or another material attribute /
+  expression). Position cascades through the same `DeriveDefaultPosition`
+  helper `add_expression` uses; optional `name` renames the spawned
+  expression. Recompiles + saves on success unless `recompile=false`
+  / `save=false`. The non-2D texture-sample variants
+  (TextureSampleParameterCube, TextureSampleParameterVolume) stay
+  on the open backlog under the existing `add_expression` shape.
 - `sequencer_edit add_transform_section_keys` (small) — declarative
   one-call writer for per-channel transform keys on a binding's
   `UMovieScene3DTransformTrack`. Resolves the target binding through

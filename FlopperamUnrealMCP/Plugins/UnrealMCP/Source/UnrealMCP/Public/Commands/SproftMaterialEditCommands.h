@@ -85,6 +85,29 @@
  *      `connect_expressions` call can address the node by FName.
  *      Recompiles + saves on success unless `recompile=false` /
  *      `save=false` is passed.
+ *   - "add_texture_sample": adds a `UMaterialExpressionTextureSample`
+ *      to a target UMaterial's graph and binds the new node's
+ *      `Texture` property to a chosen UTexture asset in one call.
+ *      Common enough that going through the generic `add_expression`
+ *      + manual `Texture` property set is awkward. The texture
+ *      resolves from a `/Game/...` path or a unique short name
+ *      probed against the asset registry's UTexture index. After
+ *      the spawn the op writes `TextureSample->Texture` directly
+ *      and lets the engine derive the sampler type from the texture
+ *      through `AutoSetSampleType()` (the editor's right-click
+ *      "Refresh Sampler Type" path). An optional `coordinates`
+ *      named expression on the same material wires its first output
+ *      pin into the texture sample's `Coordinates` input through
+ *      `UMaterialEditingLibrary::ConnectMaterialExpressions`.
+ *      Optional `connect_to` / `connect_input` and `property`
+ *      knobs mirror `add_expression` so the call can both create
+ *      the sample and drop its `RGB` output into `BaseColor` (or
+ *      another material attribute) in one step. Optional `name`
+ *      renames the new expression so a follow-up
+ *      `connect_expressions` call can address it by FName.
+ *      Position cascades the same way as `add_expression`.
+ *      Recompiles + saves on success unless `recompile=false` /
+ *      `save=false` is passed.
  *   - "set_attribute_blendable": flips a per-attribute override toggle
  *      on a UMaterialInstanceConstant's
  *      `FMaterialInstanceBasePropertyOverrides` struct. The
@@ -148,4 +171,6 @@ private:
     TSharedPtr<FJsonObject> AddFunctionCall(const TSharedPtr<FJsonObject>& Params);
 
     TSharedPtr<FJsonObject> SetAttributeBlendable(const TSharedPtr<FJsonObject>& Params);
+
+    TSharedPtr<FJsonObject> AddTextureSample(const TSharedPtr<FJsonObject>& Params);
 };
