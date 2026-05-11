@@ -3056,6 +3056,8 @@ def widget_edit(
     tiling: Optional[str] = None,
     draw_as: Optional[str] = None,
     mirroring: Optional[str] = None,
+    rule: Optional[str] = None,
+    target: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3171,6 +3173,23 @@ def widget_edit(
           the response's ``skipped`` array with a reason. After the
           writes ``PostEditChangeProperty`` fires on the widget so
           the UMG editor preview refreshes.
+        - "set_widget_navigation": write a per-direction navigation
+          rule onto a child widget's ``UWidgetNavigation`` instance.
+          ``widget`` is the FName of the target child widget on the
+          WBP's WidgetTree. ``direction`` is one of ``Up`` / ``Down``
+          / ``Left`` / ``Right`` / ``Next`` / ``Previous``
+          (case-insensitive). ``rule`` is one of ``Escape`` (default
+          engine behaviour) / ``Stop`` / ``Wrap`` / ``Explicit`` /
+          ``Custom`` / ``CustomBoundary``. The ``Explicit`` rule
+          requires ``target`` (the FName of the widget to focus on
+          this direction press); the ``Custom`` /
+          ``CustomBoundary`` rules accept ``target`` as a delegate /
+          function name on the parent UUserWidget. The
+          ``UWidget::Navigation`` Instanced UPROPERTY auto-spawns
+          on first use (``spawned_navigation_instance`` flag in the
+          response). PostEditChangeProperty fires on the widget so
+          the UMG editor's navigation panel refreshes. Useful for
+          keyboard / gamepad UI authoring.
         - "set_widget_brush": write an FSlateBrush field on a
           target child widget. ``brush_field`` picks the
           FSlateBrush UPROPERTY (e.g. ``Brush`` on UImage,
@@ -3354,6 +3373,10 @@ def widget_edit(
         params["draw_as"] = draw_as
     if mirroring is not None:
         params["mirroring"] = mirroring
+    if rule is not None:
+        params["rule"] = rule
+    if target is not None:
+        params["target"] = target
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite

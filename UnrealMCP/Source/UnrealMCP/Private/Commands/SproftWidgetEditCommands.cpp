@@ -6,6 +6,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "Blueprint/WidgetNavigation.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
 #include "Components/Button.h"
@@ -353,9 +354,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetWidgetBrush(Params);
     }
+    if (Operation == TEXT("set_widget_navigation") || Operation == TEXT("set_navigation")
+        || Operation == TEXT("widget_navigation") || Operation == TEXT("set_nav"))
+    {
+        return SetWidgetNavigation(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -3335,6 +3341,272 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWidgetBrush(const TSharedP
     ResultObj->SetArrayField(TEXT("skipped"), SkippedRows);
     ResultObj->SetNumberField(TEXT("applied_count"), AppliedCount);
     ResultObj->SetNumberField(TEXT("skipped_count"), SkippedCount);
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Map a per-direction token (Up / Down / Left / Right / Next /
+     *  Previous, case-insensitive) onto the matching FWidgetNavigationData
+     *  field on UWidgetNavigation. Returns null when the token is
+     *  unrecognised. The mapping mirrors `UWidgetNavigation::GetNavigationData`
+     *  but is hand-rolled so we can sidestep the editor-only accessor. */
+    FWidgetNavigationData* WidgetNav_FindDirectionField(UWidgetNavigation* Nav, const FString& DirectionToken)
+    {
+        if (!Nav)
+        {
+            return nullptr;
+        }
+        const FString Lower = DirectionToken.ToLower();
+        if (Lower == TEXT("up"))       { return &Nav->Up; }
+        if (Lower == TEXT("down"))     { return &Nav->Down; }
+        if (Lower == TEXT("left"))     { return &Nav->Left; }
+        if (Lower == TEXT("right"))    { return &Nav->Right; }
+        if (Lower == TEXT("next") || Lower == TEXT("tab"))       { return &Nav->Next; }
+        if (Lower == TEXT("previous") || Lower == TEXT("prev") || Lower == TEXT("shift_tab"))
+        {
+            return &Nav->Previous;
+        }
+        return nullptr;
+    }
+
+    /** Map a rule token (Escape / Stop / Wrap / Explicit / Custom /
+     *  CustomBoundary, case-insensitive with `_` normalised out) onto
+     *  EUINavigationRule. Returns false when the token is unrecognised
+     *  so the caller can surface a clear error. */
+    bool WidgetNav_ParseRule(const FString& Token, EUINavigationRule& OutRule)
+    {
+        const FString Norm = Token.ToLower().Replace(TEXT("_"), TEXT("")).Replace(TEXT(" "), TEXT(""));
+        if (Norm == TEXT("escape"))         { OutRule = EUINavigationRule::Escape; return true; }
+        if (Norm == TEXT("stop"))           { OutRule = EUINavigationRule::Stop; return true; }
+        if (Norm == TEXT("wrap"))           { OutRule = EUINavigationRule::Wrap; return true; }
+        if (Norm == TEXT("explicit"))       { OutRule = EUINavigationRule::Explicit; return true; }
+        if (Norm == TEXT("custom"))         { OutRule = EUINavigationRule::Custom; return true; }
+        if (Norm == TEXT("customboundary")) { OutRule = EUINavigationRule::CustomBoundary; return true; }
+        return false;
+    }
+
+    /** Render an EUINavigationRule back to its short token. */
+    FString WidgetNav_RuleTokenFor(EUINavigationRule Rule)
+    {
+        switch (Rule)
+        {
+            case EUINavigationRule::Escape:         return TEXT("Escape");
+            case EUINavigationRule::Stop:           return TEXT("Stop");
+            case EUINavigationRule::Wrap:           return TEXT("Wrap");
+            case EUINavigationRule::Explicit:       return TEXT("Explicit");
+            case EUINavigationRule::Custom:         return TEXT("Custom");
+            case EUINavigationRule::CustomBoundary: return TEXT("CustomBoundary");
+            case EUINavigationRule::Invalid:        return TEXT("Invalid");
+            default:                                return TEXT("Unknown");
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWidgetNavigation(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writes a per-direction navigation rule onto a child widget's
+    // UWidgetNavigation instance. The UWidget::Navigation slot is an
+    // Instanced UPROPERTY: a widget without a customised ruleset
+    // leaves it null and the runtime falls back to the engine's default
+    // navigation; the moment any direction gets a non-Escape rule the
+    // editor NewObject's an instance through the Instanced tag. We
+    // mirror that flow: spawn the instance on demand, lay the chosen
+    // direction's FWidgetNavigationData down, then route through
+    // PostEditChangeProperty so the editor's preview and any open
+    // UMG editor tree refresh.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_widget_navigation: missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_widget_navigation: asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target_widget"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_widget_navigation: missing 'widget' parameter (target child widget FName)"));
+    }
+    UWidget* TargetWidget = nullptr;
+    if (UWidgetTree* Tree = WBP->WidgetTree)
+    {
+        Tree->ForEachWidget([&](UWidget* W)
+        {
+            if (TargetWidget) return;
+            if (W && W->GetFName() == FName(*WidgetNameStr))
+            {
+                TargetWidget = W;
+            }
+        });
+    }
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_widget_navigation: could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    FString DirectionToken;
+    if (!Params->TryGetStringField(TEXT("direction"), DirectionToken)
+        && !Params->TryGetStringField(TEXT("nav_direction"), DirectionToken)
+        && !Params->TryGetStringField(TEXT("navigation_direction"), DirectionToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_widget_navigation: missing 'direction' parameter (one of Up / Down / Left / Right / Next / Previous)"));
+    }
+
+    FString RuleToken;
+    if (!Params->TryGetStringField(TEXT("rule"), RuleToken)
+        && !Params->TryGetStringField(TEXT("nav_rule"), RuleToken)
+        && !Params->TryGetStringField(TEXT("navigation_rule"), RuleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_widget_navigation: missing 'rule' parameter (one of Escape / Stop / Wrap / Explicit / Custom / CustomBoundary)"));
+    }
+    EUINavigationRule Rule = EUINavigationRule::Escape;
+    if (!WidgetNav_ParseRule(RuleToken, Rule))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_widget_navigation: unknown rule '%s'; expected Escape / Stop / Wrap / Explicit / Custom / CustomBoundary"), *RuleToken));
+    }
+
+    // The optional explicit target. Required for the Explicit rule;
+    // ignored otherwise (the engine's FWidgetNavigationData::WidgetToFocus
+    // slot doubles as a function name for the Custom rule, so we accept
+    // a `target_widget` / `target_function` shape for both cases).
+    FString TargetToken;
+    bool bHasTarget = Params->TryGetStringField(TEXT("target"), TargetToken)
+        || Params->TryGetStringField(TEXT("target_widget"), TargetToken)
+        || Params->TryGetStringField(TEXT("target_function"), TargetToken)
+        || Params->TryGetStringField(TEXT("widget_to_focus"), TargetToken);
+    if (Rule == EUINavigationRule::Explicit && (!bHasTarget || TargetToken.IsEmpty()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_widget_navigation: rule 'Explicit' requires 'target' (FName of the widget to focus)"));
+    }
+    if (Rule == EUINavigationRule::Explicit)
+    {
+        UWidget* ExplicitTarget = nullptr;
+        if (UWidgetTree* Tree = WBP->WidgetTree)
+        {
+            Tree->ForEachWidget([&](UWidget* W)
+            {
+                if (ExplicitTarget) return;
+                if (W && W->GetFName() == FName(*TargetToken))
+                {
+                    ExplicitTarget = W;
+                }
+            });
+        }
+        if (!ExplicitTarget)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_widget_navigation: 'target' '%s' did not match any child widget on WBP '%s' (Explicit rule needs the widget to exist; rename target first)"),
+                    *TargetToken, *WBPPath));
+        }
+    }
+
+    // Get or spawn the UWidgetNavigation instance on the target. The
+    // Instanced UPROPERTY contract on UWidget::Navigation expects the
+    // instance to outer to the widget itself; NewObject with that outer
+    // matches the editor's navigation-panel "+ rule" path.
+    UWidgetNavigation* Nav = TargetWidget->Navigation;
+    bool bSpawnedNavigation = false;
+    if (!Nav)
+    {
+        Nav = NewObject<UWidgetNavigation>(TargetWidget, NAME_None, RF_Transactional);
+        TargetWidget->Navigation = Nav;
+        bSpawnedNavigation = true;
+    }
+
+    FWidgetNavigationData* DirField = WidgetNav_FindDirectionField(Nav, DirectionToken);
+    if (!DirField)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_widget_navigation: unknown direction '%s'; expected Up / Down / Left / Right / Next / Previous"), *DirectionToken));
+    }
+
+    const EUINavigationRule PrevRule = DirField->Rule;
+    const FName PrevWidgetToFocus = DirField->WidgetToFocus;
+
+    DirField->Rule = Rule;
+    // Reset the target slot when leaving Explicit / Custom; both rules
+    // use FWidgetNavigationData::WidgetToFocus (the second carries a
+    // function name there per the comment on the field), so the slot
+    // gets cleared unless the caller passed a token.
+    if (Rule == EUINavigationRule::Explicit || Rule == EUINavigationRule::Custom
+        || Rule == EUINavigationRule::CustomBoundary)
+    {
+        if (bHasTarget)
+        {
+            DirField->WidgetToFocus = FName(*TargetToken);
+        }
+    }
+    else
+    {
+        DirField->WidgetToFocus = NAME_None;
+    }
+    // Drop any cached weak widget pointer; the runtime fixes this up
+    // through UWidgetNavigation::ResolveRules at construction time.
+    DirField->Widget.Reset();
+
+    // PostEditChangeProperty on the widget so the UMG editor's
+    // navigation panel picks up the change. The Navigation UPROPERTY
+    // on UWidget is Instanced + EditAnywhere so the path mirrors what
+    // the editor's per-direction picker takes.
+    if (FProperty* NavProp = FindFProperty<FProperty>(TargetWidget->GetClass(), TEXT("Navigation")))
+    {
+        FPropertyChangedEvent PropChanged(NavProp, EPropertyChangeType::ValueSet);
+        TargetWidget->PostEditChangeProperty(PropChanged);
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+    bool bCompile = false;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_widget_navigation"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("widget"), WidgetNameStr);
+    ResultObj->SetStringField(TEXT("widget_class"), TargetWidget->GetClass()->GetPathName());
+    ResultObj->SetStringField(TEXT("direction"), DirectionToken);
+    ResultObj->SetStringField(TEXT("rule"), WidgetNav_RuleTokenFor(Rule));
+    ResultObj->SetStringField(TEXT("previous_rule"), WidgetNav_RuleTokenFor(PrevRule));
+    if (DirField->WidgetToFocus != NAME_None)
+    {
+        ResultObj->SetStringField(TEXT("target"), DirField->WidgetToFocus.ToString());
+    }
+    if (PrevWidgetToFocus != NAME_None)
+    {
+        ResultObj->SetStringField(TEXT("previous_target"), PrevWidgetToFocus.ToString());
+    }
+    ResultObj->SetBoolField(TEXT("spawned_navigation_instance"), bSpawnedNavigation);
     ResultObj->SetBoolField(TEXT("compiled"), bCompile);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;

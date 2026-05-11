@@ -170,4 +170,5 @@ private:
     TSharedPtr<FJsonObject> AddEventBinding(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetWidgetStyle(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetWidgetBrush(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetWidgetNavigation(const TSharedPtr<FJsonObject>& Params);
 };

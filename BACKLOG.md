@@ -1330,6 +1330,35 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `widget_edit set_widget_navigation` (small) — writes a per-direction
+  navigation rule onto a child widget's `UWidgetNavigation` instance.
+  Resolves a target child widget by FName on the WBP's `WidgetTree`,
+  picks a direction field (`Up` / `Down` / `Left` / `Right` / `Next` /
+  `Previous`; case-insensitive) on the navigation object, sets the
+  matched `FWidgetNavigationData::Rule` to one of `Escape` / `Stop`
+  / `Wrap` / `Explicit` / `Custom` / `CustomBoundary`, and optionally
+  lands a `target` FName on `FWidgetNavigationData::WidgetToFocus`
+  (required for the `Explicit` rule; doubles as the delegate /
+  function name for the `Custom` / `CustomBoundary` rules per the
+  comment on the field). The `UWidget::Navigation` slot is an
+  Instanced UPROPERTY that the editor NewObject's on demand the
+  moment any direction gets a non-default rule; the op mirrors that
+  flow by spawning the instance with the target widget as outer on
+  first use (`spawned_navigation_instance` flag in the response)
+  and reusing the existing instance on follow-up calls so successive
+  per-direction writes accumulate on the same `UWidgetNavigation`.
+  The `Explicit` rule's target widget gets bounds-checked against
+  the WBP's WidgetTree so a typo at author time lands as a clear
+  error rather than a runtime resolve-failure. The cached
+  `FWidgetNavigationData::Widget` weak pointer gets reset since the
+  runtime fixes it up through `UWidgetNavigation::ResolveRules` at
+  construction time. PostEditChangeProperty fires on the widget so
+  the UMG editor's navigation panel refreshes. The response carries
+  the previous rule + target so the caller can audit the diff.
+  `MarkBlueprintAsModified` + optional `compile=true` + `save=true`
+  close the edit. Useful for keyboard / gamepad UI authoring.
+  Aliases: `set_widget_navigation` / `set_navigation` /
+  `widget_navigation` / `set_nav`.
 - `sequencer_edit add_event_track` (small) — declarative one-call
   wrapper that lays a `UMovieSceneEventTrack` plus a default
   `UMovieSceneEventTriggerSection` (the modern section subclass the
