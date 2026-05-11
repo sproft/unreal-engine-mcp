@@ -803,6 +803,11 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleCommand(const FString& Com
     {
         return HandleAddCalculationModifier(Params);
     }
+    if (Op == TEXT("add_conditional_effect") || Op == TEXT("add_conditional_gameplay_effect")
+        || Op == TEXT("add_conditional"))
+    {
+        return HandleAddConditionalEffect(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("gas_edit: unsupported op '%s'"), *Op));
 }
@@ -2698,6 +2703,151 @@ TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleAddCalculationModifier(con
     if (bHasMagnitude)
     {
         Result->SetNumberField(TEXT("magnitude"), MagnitudeRaw);
+    }
+    Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftGasEditCommands::HandleAddConditionalEffect(const TSharedPtr<FJsonObject>& Params)
+{
+    // Append an FConditionalGameplayEffect to the parent effect's
+    // ConditionalGameplayEffects array. Each row binds a child
+    // UGameplayEffect class plus an optional RequiredSourceTags
+    // container that gates the conditional application.
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetPath)
+        && !Params->TryGetStringField(TEXT("effect"), AssetPath)
+        && !Params->TryGetStringField(TEXT("path"), AssetPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'asset' / 'effect' parameter (path to the parent UGameplayEffect or its Blueprint)"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (!Asset)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not load asset at '%s'"), *AssetPath));
+    }
+    UClass* AssetClass = ResolveAssetClass(Asset);
+    UObject* CDO = ResolveCDO(Asset);
+    UGameplayEffect* Effect = CDO ? Cast<UGameplayEffect>(CDO) : nullptr;
+    if (!Effect)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UGameplayEffect (resolved class: %s)"),
+                *AssetPath, AssetClass ? *AssetClass->GetName() : TEXT("null")));
+    }
+
+    FString ChildClassToken;
+    if (!Params->TryGetStringField(TEXT("effect_class"), ChildClassToken)
+        && !Params->TryGetStringField(TEXT("child_effect"), ChildClassToken)
+        && !Params->TryGetStringField(TEXT("child"), ChildClassToken)
+        && !Params->TryGetStringField(TEXT("class"), ChildClassToken)
+        && !Params->TryGetStringField(TEXT("child_class"), ChildClassToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'effect_class' parameter (UGameplayEffect-derived class path)"));
+    }
+    UClass* ChildClass = ResolveClassByToken(ChildClassToken);
+    if (!ChildClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve effect_class '%s'"), *ChildClassToken));
+    }
+    if (!ChildClass->IsChildOf(UGameplayEffect::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is not a UGameplayEffect subclass"),
+                *ChildClass->GetPathName()));
+    }
+
+    // Optional RequiredSourceTags container. Same shape as
+    // `add_execution`'s passed_in_tags: a JSON array of strings or a
+    // single string.
+    FConditionalGameplayEffect NewCond;
+    NewCond.EffectClass = TSubclassOf<UGameplayEffect>(ChildClass);
+
+    TArray<FString> WarningTags;
+    int32 AddedTags = 0;
+    auto AddOneTag = [&](const FString& TagString)
+    {
+        if (TagString.IsEmpty()) return;
+        const FGameplayTag Tag = UGameplayTagsManager::Get().RequestGameplayTag(
+            *TagString, /*bErrorIfNotFound=*/false);
+        if (!Tag.IsValid())
+        {
+            WarningTags.Add(TagString);
+            return;
+        }
+        NewCond.RequiredSourceTags.AddTag(Tag);
+        ++AddedTags;
+    };
+    const TCHAR* TagFieldKeys[] = {
+        TEXT("required_source_tags"),
+        TEXT("source_tags"),
+        TEXT("required_tags"),
+    };
+    for (const TCHAR* Key : TagFieldKeys)
+    {
+        if (!Params->HasField(Key)) continue;
+        const TSharedPtr<FJsonValue> Val = Params->TryGetField(Key);
+        if (!Val.IsValid()) continue;
+        if (Val->Type == EJson::Array)
+        {
+            for (const TSharedPtr<FJsonValue>& V : Val->AsArray())
+            {
+                if (V.IsValid() && V->Type == EJson::String)
+                {
+                    AddOneTag(V->AsString());
+                }
+            }
+        }
+        else if (Val->Type == EJson::String)
+        {
+            AddOneTag(Val->AsString());
+        }
+        break;
+    }
+
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    Effect->ConditionalGameplayEffects.Add(NewCond);
+    const int32 NewIndex = Effect->ConditionalGameplayEffects.Num() - 1;
+
+    UBlueprint* OwningBP = Cast<UBlueprint>(Asset);
+    if (OwningBP)
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsModified(OwningBP);
+        if (bCompile)
+        {
+            FKismetEditorUtilities::CompileBlueprint(OwningBP);
+        }
+    }
+    Effect->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Asset->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_conditional_effect"));
+    Result->SetStringField(TEXT("path"), Asset->GetPathName());
+    Result->SetStringField(TEXT("effect_class"), ChildClass->GetPathName());
+    Result->SetNumberField(TEXT("conditional_index"), NewIndex);
+    Result->SetNumberField(TEXT("conditional_count"), Effect->ConditionalGameplayEffects.Num());
+    Result->SetNumberField(TEXT("tags_added"), AddedTags);
+    if (WarningTags.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> WarnJson;
+        for (const FString& T : WarningTags)
+        {
+            WarnJson.Add(MakeShared<FJsonValueString>(T));
+        }
+        Result->SetArrayField(TEXT("unknown_tags"), WarnJson);
     }
     Result->SetBoolField(TEXT("compiled"), OwningBP && bCompile);
     Result->SetBoolField(TEXT("saved"), bSave);

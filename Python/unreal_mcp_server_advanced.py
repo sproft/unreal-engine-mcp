@@ -5665,6 +5665,7 @@ def gas_edit(
     execution_class: Optional[str] = None,
     passed_in_tags: Optional[List[str]] = None,
     execution_index: Optional[int] = None,
+    required_source_tags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over Gameplay Ability System assets.
@@ -5776,6 +5777,16 @@ def gas_edit(
           ``modifier_op`` (default Additive) lands on ``ModifierOp``;
           optional ``magnitude`` wraps into the scoped modifier's
           scalable-float magnitude.
+        - ``add_conditional_effect``: append an
+          ``FConditionalGameplayEffect`` to the parent effect's
+          ``ConditionalGameplayEffects`` array. ``effect_class``
+          (same arg the cost / cooldown rebind ops use; on the wire
+          this lands as ``class`` and the C++ side maps it onto the
+          child effect slot) resolves a UGameplayEffect-derived
+          class through a ``/Script/Module.ClassName`` path or a
+          ``/Game/...`` BP-class path. Optional
+          ``required_source_tags`` lands on ``RequiredSourceTags``
+          (unknown tags surface in the response's ``unknown_tags``).
 
     Args:
         asset: Required for ``inspect`` / ``set_gameplay_tags`` /
@@ -5889,6 +5900,8 @@ def gas_edit(
         params["passed_in_tags"] = passed_in_tags
     if execution_index is not None:
         params["execution_index"] = execution_index
+    if required_source_tags is not None:
+        params["required_source_tags"] = required_source_tags
 
     try:
         response = unreal.send_command("gas_edit", params)

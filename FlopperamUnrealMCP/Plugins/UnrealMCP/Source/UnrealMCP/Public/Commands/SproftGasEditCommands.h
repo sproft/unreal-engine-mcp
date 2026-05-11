@@ -140,6 +140,16 @@
  * `FGameplayEffectModifierMagnitude` so the scoped modifier carries
  * a baseline magnitude. Recompiles + saves on success.
  *
+ * The `add_conditional_effect` op appends an
+ * `FConditionalGameplayEffect` to a parent UGameplayEffect's
+ * `ConditionalGameplayEffects` array. The child effect resolves
+ * through a UGameplayEffect-derived class path
+ * (`/Script/Module.ClassName` or `/Game/.../BP` auto-suffixed
+ * with `_C`); optional `required_source_tags` lands on
+ * `RequiredSourceTags` (each tag added through
+ * `RequestGameplayTag(..., bErrorIfNotFound=false)` so unknown tags
+ * surface a warning and skip). Recompiles + saves on success.
+ *
  * Clean-room implementation derived from the public UE5 API:
  *   - UGameplayAbility property surface (CancelAbilitiesWithTag etc.).
  *   - UGameplayEffect public AddComponent / FindOrAddComponent template
@@ -170,4 +180,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetAbilityCueTag(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddExecution(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddCalculationModifier(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddConditionalEffect(const TSharedPtr<FJsonObject>& Params);
 };
