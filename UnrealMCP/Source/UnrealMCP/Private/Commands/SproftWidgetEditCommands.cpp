@@ -39,8 +39,11 @@
 #include "WidgetBlueprint.h"
 #include "WidgetBlueprintExtension.h"
 #include "INotifyFieldValueChanged.h"
+#include "Bindings/MVVMConversionFunctionHelper.h"
+#include "MVVMBlueprintFunctionReference.h"
 #include "MVVMBlueprintView.h"
 #include "MVVMBlueprintViewBinding.h"
+#include "MVVMBlueprintViewConversionFunction.h"
 #include "MVVMBlueprintViewModelContext.h"
 #include "MVVMPropertyPath.h"
 #include "MVVMWidgetBlueprintExtension_View.h"
@@ -323,9 +326,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return AddPropertyBinding(Params);
     }
+    if (Operation == TEXT("set_binding_conversion") || Operation == TEXT("set_conversion_function")
+        || Operation == TEXT("set_conversion") || Operation == TEXT("bind_conversion"))
+    {
+        return SetBindingConversion(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -1963,6 +1971,324 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddPropertyBinding(const TSha
     ResultObj->SetNumberField(TEXT("binding_count"), BlueprintView->GetNumBindings());
     ResultObj->SetBoolField(TEXT("enabled"), bEnabled);
     ResultObj->SetBoolField(TEXT("compile"), bCompileBinding);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetBindingConversion(const TSharedPtr<FJsonObject>& Params)
+{
+    // Rewrite the per-direction conversion slot on an existing
+    // FMVVMBlueprintViewBinding. The canonical authoring entry the
+    // MVVMEditorSubsystem uses (SetSourceToDestinationConversionFunction)
+    // routes a UFunction through:
+    //   1) NewObject<UMVVMBlueprintViewConversionFunction>(WBP)
+    //   2) name the wrapper via CreateWrapperName(Binding, bSourceToDestination)
+    //   3) Initialize(WBP, GraphName, FMVVMBlueprintFunctionReference(WBP, Function))
+    // We follow the same path, plus an explicit clear branch the
+    // editor surface exposes through the "<None>" picker entry.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+
+    UMVVMWidgetBlueprintExtension_View* MVVMExt =
+        UWidgetBlueprintExtension::RequestExtension<UMVVMWidgetBlueprintExtension_View>(WBP);
+    UMVVMBlueprintView* BlueprintView = MVVMExt ? MVVMExt->GetBlueprintView() : nullptr;
+    if (!BlueprintView)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("'%s' has no UMVVMBlueprintView; run widget_edit set_viewmodel + add_property_binding first"),
+                *WBPPath));
+    }
+
+    // Resolve the target binding. Accepts an FGuid binding-id string
+    // (preferred; AddPropertyBinding returns this) or an integer
+    // index into the Bindings array (a designer-friendly fallback for
+    // hand-driven calls).
+    FMVVMBlueprintViewBinding* Binding = nullptr;
+    int32 ResolvedIndex = INDEX_NONE;
+    FString BindingToken;
+    if (Params->TryGetStringField(TEXT("binding_id"), BindingToken)
+        || Params->TryGetStringField(TEXT("binding"), BindingToken)
+        || Params->TryGetStringField(TEXT("id"), BindingToken))
+    {
+        FGuid ParsedGuid;
+        if (FGuid::Parse(BindingToken, ParsedGuid))
+        {
+            Binding = BlueprintView->GetBinding(ParsedGuid);
+        }
+        if (!Binding)
+        {
+            // Fall back to "integer-as-string" so callers can ship
+            // either form through the same field.
+            int32 Parsed = 0;
+            if (LexTryParseString(Parsed, *BindingToken)
+                && Parsed >= 0 && Parsed < BlueprintView->GetNumBindings())
+            {
+                Binding = BlueprintView->GetBindingAt(Parsed);
+                ResolvedIndex = Parsed;
+            }
+        }
+    }
+    if (!Binding)
+    {
+        int32 BindingIdx = INDEX_NONE;
+        double TempIdx = 0.0;
+        if (Params->TryGetNumberField(TEXT("binding_index"), TempIdx)
+            || Params->TryGetNumberField(TEXT("index"), TempIdx))
+        {
+            BindingIdx = static_cast<int32>(TempIdx);
+            if (BindingIdx >= 0 && BindingIdx < BlueprintView->GetNumBindings())
+            {
+                Binding = BlueprintView->GetBindingAt(BindingIdx);
+                ResolvedIndex = BindingIdx;
+            }
+        }
+    }
+    if (!Binding)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve binding on '%s' (pass 'binding_id' GUID or 'binding_index' int)"),
+                *WBPPath));
+    }
+    if (ResolvedIndex == INDEX_NONE)
+    {
+        const TArrayView<const FMVVMBlueprintViewBinding> AllBindings = BlueprintView->GetBindings();
+        for (int32 Idx = 0; Idx < AllBindings.Num(); ++Idx)
+        {
+            if (AllBindings[Idx].BindingId == Binding->BindingId)
+            {
+                ResolvedIndex = Idx;
+                break;
+            }
+        }
+    }
+
+    // Resolve the direction. The MVVM editor exposes both directions
+    // through the "Forward" / "Backward" picker on the binding row.
+    FString DirectionToken;
+    Params->TryGetStringField(TEXT("direction"), DirectionToken);
+    const FString DirectionLower = DirectionToken.ToLower();
+    bool bSourceToDestination = true;
+    FString DirectionCanonical = TEXT("SourceToDestination");
+    if (DirectionLower.IsEmpty() || DirectionLower == TEXT("source_to_destination")
+        || DirectionLower == TEXT("sourcetodestination") || DirectionLower == TEXT("forward")
+        || DirectionLower == TEXT("s2d") || DirectionLower == TEXT("src_to_dst"))
+    {
+        bSourceToDestination = true;
+        DirectionCanonical = TEXT("SourceToDestination");
+    }
+    else if (DirectionLower == TEXT("destination_to_source") || DirectionLower == TEXT("destinationtosource")
+        || DirectionLower == TEXT("backward") || DirectionLower == TEXT("d2s")
+        || DirectionLower == TEXT("dst_to_src"))
+    {
+        bSourceToDestination = false;
+        DirectionCanonical = TEXT("DestinationToSource");
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unsupported 'direction' '%s' (source_to_destination / destination_to_source)"),
+                *DirectionToken));
+    }
+
+    // Decide between clear and rebind. Treat empty / `none` /
+    // explicit `clear=true` as the clear branch; everything else is
+    // a UFunction path that must resolve to a UFunction at author
+    // time.
+    bool bClear = false;
+    Params->TryGetBoolField(TEXT("clear"), bClear);
+    FString FunctionToken;
+    if (!bClear)
+    {
+        Params->TryGetStringField(TEXT("conversion_function"), FunctionToken);
+        if (FunctionToken.IsEmpty()) Params->TryGetStringField(TEXT("function"), FunctionToken);
+        if (FunctionToken.IsEmpty()) Params->TryGetStringField(TEXT("conversion"), FunctionToken);
+        if (FunctionToken.IsEmpty()) Params->TryGetStringField(TEXT("function_path"), FunctionToken);
+        const FString FunctionLower = FunctionToken.ToLower();
+        if (FunctionToken.IsEmpty() || FunctionLower == TEXT("none")
+            || FunctionLower == TEXT("null") || FunctionLower == TEXT("clear"))
+        {
+            bClear = true;
+        }
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    // Snapshot the previous slot so the response can report what was
+    // replaced and the editor's MVVMEditorSubsystem flow runs.
+    TObjectPtr<UMVVMBlueprintViewConversionFunction>& Slot = bSourceToDestination
+        ? Binding->Conversion.SourceToDestinationConversion
+        : Binding->Conversion.DestinationToSourceConversion;
+    FString PreviousFunctionPath;
+    if (Slot)
+    {
+        FMVVMBlueprintFunctionReference PrevRef = Slot->GetConversionFunction();
+        const UFunction* PrevFunc = PrevRef.GetFunction(WBP);
+        if (PrevFunc)
+        {
+            PreviousFunctionPath = PrevFunc->GetPathName();
+        }
+    }
+
+    if (bClear)
+    {
+        // Mirror MVVMEditorSubsystem's clear branch: remove the
+        // wrapper graph before dropping the reference so the
+        // generated graph garbage collects.
+        if (Slot)
+        {
+            Slot->RemoveWrapperGraph(WBP);
+            Slot = nullptr;
+        }
+        FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+        if (bSaveAfterEdit)
+        {
+            UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+        }
+
+        TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+        ResultObj->SetStringField(TEXT("operation"), TEXT("set_binding_conversion"));
+        ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+        ResultObj->SetStringField(TEXT("binding_id"), Binding->BindingId.ToString(EGuidFormats::DigitsWithHyphens));
+        ResultObj->SetNumberField(TEXT("binding_index"), ResolvedIndex);
+        ResultObj->SetStringField(TEXT("direction"), DirectionCanonical);
+        ResultObj->SetBoolField(TEXT("cleared"), true);
+        if (!PreviousFunctionPath.IsEmpty())
+        {
+            ResultObj->SetStringField(TEXT("previous_function"), PreviousFunctionPath);
+        }
+        ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+        return ResultObj;
+    }
+
+    // Rebind branch. Resolve the conversion UFunction by
+    // `/Script/Module.Class:Function`, `/Script/Module.Class.Function`,
+    // a `/Game/...` BP class path with `:Function`, or a bare token.
+    // The MVVMEditorSubsystem keeps this path UFunction-only; the
+    // K2Node-class branch (async conversion nodes) is intentionally
+    // out of scope for this slice.
+    const UFunction* ConversionFunction = nullptr;
+    FString ResolvedFunctionPath;
+    {
+        FString ClassPart;
+        FString FuncPart;
+        bool bSplit = FunctionToken.Split(TEXT(":"), &ClassPart, &FuncPart);
+        if (!bSplit)
+        {
+            // Tolerate the dot-separated form too; LoadObject<UFunction>
+            // accepts /Script/Module.Class.Function directly.
+            int32 DotIdx = INDEX_NONE;
+            if (FunctionToken.FindLastChar('.', DotIdx) && DotIdx > 0)
+            {
+                ClassPart = FunctionToken.Left(DotIdx);
+                FuncPart = FunctionToken.Mid(DotIdx + 1);
+                bSplit = !ClassPart.IsEmpty() && !FuncPart.IsEmpty();
+            }
+        }
+        if (bSplit)
+        {
+            UClass* OwnerClass = nullptr;
+            if (ClassPart.StartsWith(TEXT("/Script/")))
+            {
+                OwnerClass = LoadClass<UObject>(nullptr, *ClassPart);
+            }
+            else if (ClassPart.StartsWith(TEXT("/Game/")))
+            {
+                FString WithSuffix = ClassPart;
+                if (!WithSuffix.EndsWith(TEXT("_C")))
+                {
+                    WithSuffix += TEXT("_C");
+                }
+                OwnerClass = LoadClass<UObject>(nullptr, *WithSuffix);
+            }
+            if (!OwnerClass)
+            {
+                OwnerClass = FindObject<UClass>(nullptr, *ClassPart);
+            }
+            if (OwnerClass)
+            {
+                if (UFunction* Found = OwnerClass->FindFunctionByName(FName(*FuncPart)))
+                {
+                    ConversionFunction = Found;
+                    ResolvedFunctionPath = Found->GetPathName();
+                }
+            }
+        }
+        if (!ConversionFunction)
+        {
+            // Fallback: maybe the caller passed the full path as a
+            // UFunction object path directly.
+            if (UFunction* Loaded = FindObject<UFunction>(nullptr, *FunctionToken))
+            {
+                ConversionFunction = Loaded;
+                ResolvedFunctionPath = Loaded->GetPathName();
+            }
+        }
+    }
+    if (!ConversionFunction)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve conversion UFunction '%s'. Expected '/Script/Module.Class:Function' or '/Game/.../BP_C:Function'."),
+                *FunctionToken));
+    }
+
+    // Mirror MVVMEditorSubsystem::SetSourceToDestinationConversionFunction's
+    // hot path (the only public authoring entry that touches the
+    // Conversion slot): drop the existing wrapper graph, NewObject a
+    // fresh ConversionFunction outered to the WBP, run
+    // SetDestinationPath + Initialize.
+    if (Slot)
+    {
+        Slot->RemoveWrapperGraph(WBP);
+        Slot = nullptr;
+    }
+    UMVVMBlueprintViewConversionFunction* NewConv = NewObject<UMVVMBlueprintViewConversionFunction>(WBP);
+    if (!NewConv)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("NewObject<UMVVMBlueprintViewConversionFunction> returned null"));
+    }
+    Slot = NewConv;
+    // Pass the binding's destination path so async conversion
+    // nodes (which handle the destination write internally) see the
+    // right target. Synchronous UFunctions ignore the field.
+    NewConv->SetDestinationPath(Binding->DestinationPath);
+    const FName GraphName = UE::MVVM::ConversionFunctionHelper::CreateWrapperName(*Binding, bSourceToDestination);
+    FMVVMBlueprintFunctionReference FuncRef(WBP, ConversionFunction);
+    NewConv->Initialize(WBP, GraphName, FuncRef);
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_binding_conversion"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("binding_id"), Binding->BindingId.ToString(EGuidFormats::DigitsWithHyphens));
+    ResultObj->SetNumberField(TEXT("binding_index"), ResolvedIndex);
+    ResultObj->SetStringField(TEXT("direction"), DirectionCanonical);
+    ResultObj->SetBoolField(TEXT("cleared"), false);
+    ResultObj->SetStringField(TEXT("conversion_function"), ResolvedFunctionPath);
+    ResultObj->SetStringField(TEXT("wrapper_graph_name"), GraphName.ToString());
+    if (!PreviousFunctionPath.IsEmpty())
+    {
+        ResultObj->SetStringField(TEXT("previous_function"), PreviousFunctionPath);
+    }
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }

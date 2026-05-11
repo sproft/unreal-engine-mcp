@@ -65,7 +65,25 @@
  *      `binding_mode` token maps `one_way` / `two_way` / `one_time`
  *      onto the canonical `EMVVMBindingMode` enum values
  *      (`OneWayToDestination` / `TwoWay` / `OneTimeToDestination`).
- *      Conversion functions stay on the BACKLOG.
+ *   - "set_binding_conversion": rewrite the per-direction conversion
+ *      slot on an existing `FMVVMBlueprintViewBinding`. Resolves the
+ *      target binding by FGuid binding-id string or by integer
+ *      index, then either clears
+ *      `Conversion.SourceToDestinationConversion` /
+ *      `Conversion.DestinationToSourceConversion` (when
+ *      `conversion_function` is empty / `none` / `clear=true`) or
+ *      NewObject's a fresh `UMVVMBlueprintViewConversionFunction`
+ *      outered to the WBP, runs
+ *      `Initialize(WBP, CreateWrapperName(Binding, bSourceToDestination),
+ *      FMVVMBlueprintFunctionReference(WBP, UFunction*))` against
+ *      the resolved conversion UFunction. The direction defaults to
+ *      `source_to_destination`; the `direction` token accepts
+ *      `source_to_destination` / `destination_to_source` /
+ *      `forward` / `backward` plus the canonical
+ *      `SourceToDestination` / `DestinationToSource` spellings.
+ *      Replacing an existing conversion runs
+ *      `RemoveWrapperGraph` on the old slot so the wrapper graph
+ *      garbage collects.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - FKismetEditorUtilities::CreateBlueprint for asset creation
@@ -99,4 +117,5 @@ private:
     TSharedPtr<FJsonObject> AddAnimationKeyframe(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetViewModel(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddPropertyBinding(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetBindingConversion(const TSharedPtr<FJsonObject>& Params);
 };

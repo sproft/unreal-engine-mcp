@@ -3033,6 +3033,11 @@ def widget_edit(
     binding_mode: Optional[str] = None,
     enabled: Optional[bool] = None,
     compile_binding: Optional[bool] = None,
+    binding_id: Optional[str] = None,
+    binding_index: Optional[int] = None,
+    direction: Optional[str] = None,
+    conversion_function: Optional[str] = None,
+    clear: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3103,7 +3108,23 @@ def widget_edit(
           FProperty or UFunction name on the matched class; the
           field-variant path stores the right kind. ``binding_mode``
           tokens are ``one_way`` (default) / ``two_way`` /
-          ``one_time``. Conversion functions stay on the BACKLOG.
+          ``one_time``.
+        - "set_binding_conversion": rewrite the per-direction
+          conversion slot on an existing
+          ``FMVVMBlueprintViewBinding``. Resolves the target binding
+          through ``binding_id`` (FGuid string returned by
+          ``add_property_binding``) or ``binding_index`` (int into
+          the BlueprintView's Bindings array). ``direction`` selects
+          ``source_to_destination`` (default) or
+          ``destination_to_source``. Pass ``conversion_function`` as
+          ``/Script/Module.Class:Function`` or
+          ``/Game/.../BP_C:Function`` to rebind the slot; pass
+          ``conversion_function=none`` or ``clear=true`` to clear
+          the slot. Routes through the same hot path the editor's
+          MVVMEditorSubsystem uses (NewObject the conversion func,
+          ``Initialize(WBP, CreateWrapperName(Binding, dir),
+          FMVVMBlueprintFunctionReference(WBP, Function))``;
+          existing wrappers get ``RemoveWrapperGraph`` first).
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3222,6 +3243,16 @@ def widget_edit(
         params["enabled"] = enabled
     if compile_binding is not None:
         params["compile_binding"] = compile_binding
+    if binding_id is not None:
+        params["binding_id"] = binding_id
+    if binding_index is not None:
+        params["binding_index"] = binding_index
+    if direction is not None:
+        params["direction"] = direction
+    if conversion_function is not None:
+        params["conversion_function"] = conversion_function
+    if clear is not None:
+        params["clear"] = clear
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite
