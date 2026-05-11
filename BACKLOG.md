@@ -8,7 +8,74 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped three deepening additions across
+The most recent pass shipped four deepening additions across
+existing tools: `material_edit` gains `set_blend_mode` (writes
+the master `UMaterial::BlendMode` UPROPERTY plus the paired
+`OpacityMaskClipValue` knob; `blend_mode` (alias `mode`) accepts
+`Opaque` / `Masked` / `Translucent` / `Additive` / `Modulate` /
+`AlphaComposite` / `AlphaHoldout`, case-insensitive, with or
+without the `BLEND_` prefix; optional `opacity_mask_clip_value`
+(alias `opacity_clip` / `clip`) writes the matching float (the
+engine only consults this on Masked); routes through PreEditChange
+/ PostEditChangeProperty against the BlendMode UPROPERTY so the
+static permutation recompiles for the new translucency pass; the
+response carries the previous and new BlendMode tokens plus the
+previous and new opacity-mask clip values so the caller gets a
+before / after pair on a single round trip; refuses non-UMaterial
+assets since Material Instances flow through
+`set_attribute_blendable` instead, where the override surface
+lives on FMaterialInstanceBasePropertyOverrides rather than the
+MIC's UPROPERTY directly), `widget_edit` gains `set_overlay_slot`
+(single-call sugar over `set_slot_property` for the UOverlaySlot
+surface; takes the widget blueprint plus a target child widget
+FName plus the `horizontal_alignment` token (`Fill` / `Left` /
+`Center` / `Right`) and / or the `vertical_alignment` token
+(`Fill` / `Top` / `Center` / `Bottom`) plus an optional `padding`
+margin (`[left, top, right, bottom]` / `[horizontal, vertical]` /
+a uniform number / `{Left, Top, Right, Bottom}`); the
+UOverlaySlot exposes `SetHorizontalAlignment` /
+`SetVerticalAlignment` / `SetPadding` as the canonical mutators;
+we route through those so the parent UOverlay's cached slate
+widget refreshes; refuses children whose parent is not a UOverlay
+since the slot class on a canvas / vertical box child does not
+carry these fields; complements last pass's `set_canvas_slot` for
+the overlay-anchored UMG layout case), `animation_edit` gains
+`set_loop_flags` (writes the loop knobs on a UAnimSequence; the
+required `loop` (alias `b_loop` / `bLoop`) toggles `bLoop` (the
+per-asset loop flag the engine consults when the AnimGraph does
+not override the play mode); optional `looping_interpolation`
+writes `bLoopingInterpolation` (the additive looping
+interpolation gate); optional `enable_root_motion_on_allowed`
+writes `bEnableRootMotionOnAllowed` (the gate that lets the
+AnimGraph decide whether root motion fires when the sequence
+loops); all three writes go through reflection
+(FindPropertyByName + FBoolProperty::SetPropertyValue_InContainer)
+so the op stays compatible with the visibility tightening UE has
+done across recent versions; distinct from `set_root_motion`
+which writes the root-motion knobs proper; refuses non-UAnimSequence
+assets; returns the previous + new value for each flag plus a
+per-field `provided` boolean), and `niagara_edit` gains
+`set_renderer_property` (tweaks an existing renderer on an
+emitter's render stack rather than adding / replacing it (the
+sister `set_emitter_renderer` op covers that case); resolves a
+system + emitter handle (same name resolver every other
+per-emitter op uses), walks the matched emitter's
+`FVersionedNiagaraEmitterData::GetRenderers()` array by
+`renderer_index` (default 0), then lands each entry of a flat
+`properties` dict through `FProperty::ImportText_InContainer`
+against the resolved `UNiagaraRendererProperties` subobject;
+failures collect on `skipped` rather than aborting so a typo in
+one field does not lose the rest; convenience `name` + `value`
+shape covers the single-field one-liner; PostEditChange fires on
+the renderer after the writes so the cached system binding state
+regenerates and the editor's stack viewmodel refreshes; saves the
+system on success unless `save=false`). The four additions together
+close the blend-mode authoring gap on the material_edit side, the
+overlay-anchored UMG layout gap on the widget_edit side, the
+loop-knob authoring gap on the animation_edit side, and the
+in-place renderer-property edit gap on the niagara_edit side.
+
+The pass before that shipped three deepening additions across
 existing tools: `widget_edit` gains `set_canvas_slot` (single-call
 sugar over `set_slot_property` for the canonical
 `UCanvasPanelSlot` surface; takes the widget blueprint plus a
