@@ -148,6 +148,24 @@
  *      canvas / vertical box child does not carry these fields.
  *      Complements `set_canvas_slot` for the overlay-anchored UMG
  *      layout case.
+ *   - "set_grid_slot": single-call sugar over `set_slot_property` for
+ *      the UGridSlot surface. Takes the widget blueprint plus a target
+ *      child widget FName plus any of the canonical grid slot knobs:
+ *      `row` / `column` (int cell coordinates the parent UGridPanel
+ *      reads when it lays out the child), `row_span` / `column_span`
+ *      (int, >= 1; how many cells the child spans), `padding` (the
+ *      `[L, T, R, B]` / `[H, V]` / uniform / object margin shape we use
+ *      across the slot ops), and `horizontal_alignment` /
+ *      `vertical_alignment` tokens (`Fill` / `Left` / `Center` /
+ *      `Right` and `Fill` / `Top` / `Center` / `Bottom` respectively).
+ *      Refuses children whose parent is not a UGridPanel since the
+ *      grid-only fields (Row / Column / RowSpan / ColumnSpan) do not
+ *      live on UCanvasPanelSlot or UOverlaySlot. Routes through the
+ *      concrete `UGridSlot::SetRow` / `SetColumn` / `SetRowSpan` /
+ *      `SetColumnSpan` / `SetHorizontalAlignment` / `SetVerticalAlignment`
+ *      / `SetPadding` setters so the parent UGridPanel's cached slate
+ *      widget invalidates. Complements `set_box_slot` for the
+ *      two-dimensional grid layout case.
  *   - "set_canvas_slot": single-call sugar over `set_slot_property`
  *      for the UCanvasPanelSlot surface. Takes the widget blueprint
  *      plus a target child widget FName plus any of the canonical
@@ -208,4 +226,5 @@ private:
     TSharedPtr<FJsonObject> SetCanvasSlot(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetOverlaySlot(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetBoxSlot(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetGridSlot(const TSharedPtr<FJsonObject>& Params);
 };

@@ -3068,6 +3068,10 @@ def widget_edit(
     horizontal_alignment: Optional[str] = None,
     vertical_alignment: Optional[str] = None,
     padding: Optional[Any] = None,
+    row: Optional[int] = None,
+    column: Optional[int] = None,
+    row_span: Optional[int] = None,
+    column_span: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3262,6 +3266,29 @@ def widget_edit(
           ``SetVerticalAlignment`` / ``SetPadding`` so the
           engine's layout-invalidate path fires. Complements
           ``set_canvas_slot`` for the overlay-anchored UMG
+          layout case.
+        - "set_grid_slot": single-call sugar over
+          ``set_slot_property`` for the UGridSlot surface.
+          ``widget`` is the FName of the target child widget on
+          the WBP's WidgetTree; the child's slot must be a
+          UGridSlot (the parent panel is a UGridPanel). ``row``
+          and ``column`` are int cell coordinates (>= 0) the
+          parent UGridPanel reads when it lays out the child.
+          ``row_span`` / ``column_span`` (int, >= 1) decide how
+          many cells the child spans. ``horizontal_alignment``
+          (alias ``h_align`` / ``halign``) accepts ``Fill`` /
+          ``Left`` / ``Center`` / ``Right``;
+          ``vertical_alignment`` (alias ``v_align`` /
+          ``valign``) accepts ``Fill`` / ``Top`` / ``Center``
+          / ``Bottom``. ``padding`` accepts ``[left, top,
+          right, bottom]`` / ``[horizontal, vertical]`` / a
+          uniform number / ``{Left, Top, Right, Bottom}``.
+          Routes through ``UGridSlot::SetRow`` /
+          ``SetColumn`` / ``SetRowSpan`` / ``SetColumnSpan``
+          / ``SetHorizontalAlignment`` /
+          ``SetVerticalAlignment`` / ``SetPadding`` so the
+          parent panel's layout invalidates. Complements
+          ``set_box_slot`` for the two-dimensional grid
           layout case.
         - "set_box_slot": single-call sugar over
           ``set_slot_property`` for both UHorizontalBoxSlot and
@@ -3477,6 +3504,14 @@ def widget_edit(
         params["vertical_alignment"] = vertical_alignment
     if padding is not None:
         params["padding"] = padding
+    if row is not None:
+        params["row"] = row
+    if column is not None:
+        params["column"] = column
+    if row_span is not None:
+        params["row_span"] = row_span
+    if column_span is not None:
+        params["column_span"] = column_span
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite
