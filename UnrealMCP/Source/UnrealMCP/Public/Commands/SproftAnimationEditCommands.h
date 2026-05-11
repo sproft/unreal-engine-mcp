@@ -64,6 +64,15 @@
  *   - `delete_blendspace_sample`: remove the sample at `sample_index`
  *     through `UBlendSpace::DeleteSample`. Bounds-checked against the
  *     blendspace's current sample count.
+ *   - `set_root_motion`: write the four canonical root-motion
+ *     UPROPERTYs on a UAnimSequence: `bEnableRootMotion` (bool,
+ *     required), `RootMotionRootLock` (ERootMotionRootLock token:
+ *     `RefPose` / `AnimFirstFrame` / `Zero`; optional), `bForceRootLock`
+ *     (optional), `bUseNormalizedRootMotionScale` (optional). The
+ *     four fields are public UPROPERTYs on UAnimSequence under
+ *     Category=RootMotion. PostEditChange + MarkPackageDirty fire
+ *     after the writes so any open editor refreshes; saves on
+ *     success unless `save=false`.
  *
  * Inputs (set_rate_scale):
  *   - asset: short asset name or `/Game/...` UAnimSequenceBase path.
@@ -144,4 +153,5 @@ private:
     TSharedPtr<FJsonObject> HandleReplaceBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleDeleteBlendSpaceSample(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddMetadataCurve(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetRootMotion(const TSharedPtr<FJsonObject>& Params);
 };

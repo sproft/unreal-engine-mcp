@@ -1330,6 +1330,30 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `animation_edit set_root_motion` (small) — writes the four
+  canonical root-motion UPROPERTYs on a UAnimSequence:
+  `bEnableRootMotion` (required `enable` boolean),
+  `RootMotionRootLock` (optional `root_motion_root_lock` token
+  resolving to `ERootMotionRootLock::RefPose` /
+  `AnimFirstFrame` / `Zero`), `bForceRootLock` (optional
+  `force_root_lock`), and `bUseNormalizedRootMotionScale`
+  (optional `use_normalized_root_motion_scale`). The four
+  fields are public UPROPERTYs on UAnimSequence under
+  `Category=RootMotion` (see
+  `Engine/Classes/Animation/AnimSequence.h` lines 318-332 in
+  the user's source tree). The op writes each field directly,
+  fires `PostEditChange` + `MarkPackageDirty` so any open
+  editor refreshes, then saves the asset by default. Refuses
+  non-UAnimSequence assets (the four fields are not on the
+  base class). Booleans accept JSON true / false, numeric 0
+  / 1, or string tokens (true / false / on / off / yes / no
+  / enable). The lock token resolver is case-insensitive and
+  normalises underscores / spaces. The response carries every
+  field's previous + new value (with the lock token resolved
+  back through the enum) plus per-field `provided` flags so
+  callers can see which fields were left untouched. Aliases:
+  `set_root_motion` / `set_rootmotion` / `root_motion` /
+  `enable_root_motion`.
 - `niagara_edit set_emitter_property` (small) — generic
   catch-all that lands a flat property dict on an emitter's
   `FVersionedNiagaraEmitterData` through the engine's reflection

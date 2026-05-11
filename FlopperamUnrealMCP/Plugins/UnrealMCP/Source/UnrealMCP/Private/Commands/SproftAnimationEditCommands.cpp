@@ -273,8 +273,13 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleDeleteBlendSpaceSample(Params);
     }
+    if (Op == TEXT("set_root_motion") || Op == TEXT("set_rootmotion")
+        || Op == TEXT("root_motion") || Op == TEXT("enable_root_motion"))
+    {
+        return HandleSetRootMotion(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -1503,5 +1508,247 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleAddMetadataCurve(con
     }
     Result->SetBoolField(TEXT("saved"), bSavedSeq);
     Result->SetBoolField(TEXT("saved_skeleton"), bSavedSkel);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRootMotion(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writes the four canonical root-motion UPROPERTYs on a UAnimSequence:
+    //   - bEnableRootMotion (bool, required)
+    //   - RootMotionRootLock (ERootMotionRootLock token: RefPose /
+    //     AnimFirstFrame / Zero; optional)
+    //   - bForceRootLock (optional)
+    //   - bUseNormalizedRootMotionScale (optional)
+    // The four fields are public UPROPERTYs on UAnimSequence under
+    // Category=RootMotion (see Engine/Classes/Animation/AnimSequence.h).
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("set_root_motion: missing 'asset'"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    UAnimSequence* Seq = Cast<UAnimSequence>(Asset);
+    if (!Seq)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_root_motion: '%s' is not a UAnimSequence (root-motion fields live on UAnimSequence)"), *AssetParam));
+    }
+
+    // Capture before-state so the response carries a diffable record.
+    const bool bPrevEnable = Seq->bEnableRootMotion;
+    const TEnumAsByte<ERootMotionRootLock::Type> PrevLock = Seq->RootMotionRootLock;
+    const bool bPrevForce = Seq->bForceRootLock;
+    const bool bPrevNorm = Seq->bUseNormalizedRootMotionScale;
+
+    auto LockTokenFor = [](TEnumAsByte<ERootMotionRootLock::Type> V) -> FString
+    {
+        switch (V.GetValue())
+        {
+            case ERootMotionRootLock::RefPose: return TEXT("RefPose");
+            case ERootMotionRootLock::AnimFirstFrame: return TEXT("AnimFirstFrame");
+            case ERootMotionRootLock::Zero: return TEXT("Zero");
+            default: return TEXT("Unknown");
+        }
+    };
+
+    // Read the required enable flag. Accept booleans, numeric 0/1, and
+    // string tokens (true / false / on / off / yes / no) so callers
+    // can land the flag without preserialising into the JSON bool form.
+    bool bNewEnable = bPrevEnable;
+    bool bEnableProvided = false;
+    {
+        const TSharedPtr<FJsonValue> ValueJson = Params->TryGetField(TEXT("enable"));
+        TSharedPtr<FJsonValue> Pick = ValueJson;
+        if (!Pick.IsValid())
+        {
+            Pick = Params->TryGetField(TEXT("enable_root_motion"));
+        }
+        if (!Pick.IsValid())
+        {
+            Pick = Params->TryGetField(TEXT("b_enable_root_motion"));
+        }
+        if (!Pick.IsValid())
+        {
+            Pick = Params->TryGetField(TEXT("bEnableRootMotion"));
+        }
+        if (Pick.IsValid())
+        {
+            bEnableProvided = true;
+            if (Pick->Type == EJson::Boolean)
+            {
+                bNewEnable = Pick->AsBool();
+            }
+            else if (Pick->Type == EJson::Number)
+            {
+                bNewEnable = (Pick->AsNumber() != 0.0);
+            }
+            else if (Pick->Type == EJson::String)
+            {
+                const FString SLower = Pick->AsString().ToLower();
+                bNewEnable = (SLower == TEXT("true") || SLower == TEXT("1")
+                    || SLower == TEXT("on") || SLower == TEXT("yes")
+                    || SLower == TEXT("enable"));
+            }
+            else
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_root_motion: 'enable' must be a bool, number, or string"));
+            }
+        }
+    }
+    if (!bEnableProvided)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_root_motion: missing 'enable' boolean (required)"));
+    }
+
+    // Optional RootMotionRootLock token.
+    bool bLockProvided = false;
+    TEnumAsByte<ERootMotionRootLock::Type> NewLock = PrevLock;
+    FString LockToken;
+    if (Params->TryGetStringField(TEXT("root_motion_root_lock"), LockToken)
+        || Params->TryGetStringField(TEXT("root_lock"), LockToken)
+        || Params->TryGetStringField(TEXT("rootmotion_root_lock"), LockToken)
+        || Params->TryGetStringField(TEXT("RootMotionRootLock"), LockToken)
+        || Params->TryGetStringField(TEXT("lock"), LockToken))
+    {
+        const FString L = LockToken.ToLower().Replace(TEXT("_"), TEXT("")).Replace(TEXT(" "), TEXT(""));
+        if (L == TEXT("refpose") || L == TEXT("reference_pose") || L == TEXT("referencepose"))
+        {
+            NewLock = ERootMotionRootLock::RefPose;
+            bLockProvided = true;
+        }
+        else if (L == TEXT("animfirstframe") || L == TEXT("anim_first_frame")
+            || L == TEXT("firstframe") || L == TEXT("first_frame"))
+        {
+            NewLock = ERootMotionRootLock::AnimFirstFrame;
+            bLockProvided = true;
+        }
+        else if (L == TEXT("zero") || L == TEXT("identity"))
+        {
+            NewLock = ERootMotionRootLock::Zero;
+            bLockProvided = true;
+        }
+        else
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_root_motion: unknown root_motion_root_lock '%s'; expected RefPose / AnimFirstFrame / Zero"), *LockToken));
+        }
+    }
+
+    // Optional bForceRootLock.
+    bool bForceProvided = false;
+    bool bNewForce = bPrevForce;
+    {
+        const TSharedPtr<FJsonValue> ValueJson = Params->TryGetField(TEXT("force_root_lock"));
+        TSharedPtr<FJsonValue> Pick = ValueJson;
+        if (!Pick.IsValid())
+        {
+            Pick = Params->TryGetField(TEXT("b_force_root_lock"));
+        }
+        if (!Pick.IsValid())
+        {
+            Pick = Params->TryGetField(TEXT("bForceRootLock"));
+        }
+        if (Pick.IsValid())
+        {
+            bForceProvided = true;
+            if (Pick->Type == EJson::Boolean) bNewForce = Pick->AsBool();
+            else if (Pick->Type == EJson::Number) bNewForce = (Pick->AsNumber() != 0.0);
+            else if (Pick->Type == EJson::String)
+            {
+                const FString SLower = Pick->AsString().ToLower();
+                bNewForce = (SLower == TEXT("true") || SLower == TEXT("1")
+                    || SLower == TEXT("on") || SLower == TEXT("yes"));
+            }
+            else
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_root_motion: 'force_root_lock' must be a bool, number, or string"));
+            }
+        }
+    }
+
+    // Optional bUseNormalizedRootMotionScale.
+    bool bNormProvided = false;
+    bool bNewNorm = bPrevNorm;
+    {
+        const TSharedPtr<FJsonValue> ValueJson = Params->TryGetField(TEXT("use_normalized_root_motion_scale"));
+        TSharedPtr<FJsonValue> Pick = ValueJson;
+        if (!Pick.IsValid())
+        {
+            Pick = Params->TryGetField(TEXT("normalized_root_motion_scale"));
+        }
+        if (!Pick.IsValid())
+        {
+            Pick = Params->TryGetField(TEXT("bUseNormalizedRootMotionScale"));
+        }
+        if (Pick.IsValid())
+        {
+            bNormProvided = true;
+            if (Pick->Type == EJson::Boolean) bNewNorm = Pick->AsBool();
+            else if (Pick->Type == EJson::Number) bNewNorm = (Pick->AsNumber() != 0.0);
+            else if (Pick->Type == EJson::String)
+            {
+                const FString SLower = Pick->AsString().ToLower();
+                bNewNorm = (SLower == TEXT("true") || SLower == TEXT("1")
+                    || SLower == TEXT("on") || SLower == TEXT("yes"));
+            }
+            else
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_root_motion: 'use_normalized_root_motion_scale' must be a bool, number, or string"));
+            }
+        }
+    }
+
+    // Apply the writes. Each field is a public UPROPERTY so a direct
+    // member write is enough; PostEditChangeProperty fires after the
+    // writes so any open editor refreshes.
+    Seq->bEnableRootMotion = bNewEnable;
+    if (bLockProvided)
+    {
+        Seq->RootMotionRootLock = NewLock;
+    }
+    if (bForceProvided)
+    {
+        Seq->bForceRootLock = bNewForce;
+    }
+    if (bNormProvided)
+    {
+        Seq->bUseNormalizedRootMotionScale = bNewNorm;
+    }
+
+#if WITH_EDITOR
+    Seq->PostEditChange();
+#endif
+    Seq->MarkPackageDirty();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(Seq->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("set_root_motion"));
+    Result->SetStringField(TEXT("asset"), AssetParam);
+    Result->SetStringField(TEXT("path"), Seq->GetPathName());
+    Result->SetStringField(TEXT("class"), Seq->GetClass()->GetName());
+    Result->SetBoolField(TEXT("enable_root_motion"), bNewEnable);
+    Result->SetBoolField(TEXT("previous_enable_root_motion"), bPrevEnable);
+    Result->SetStringField(TEXT("root_motion_root_lock"), LockTokenFor(Seq->RootMotionRootLock));
+    Result->SetStringField(TEXT("previous_root_motion_root_lock"), LockTokenFor(PrevLock));
+    Result->SetBoolField(TEXT("force_root_lock"), Seq->bForceRootLock);
+    Result->SetBoolField(TEXT("previous_force_root_lock"), bPrevForce);
+    Result->SetBoolField(TEXT("use_normalized_root_motion_scale"), Seq->bUseNormalizedRootMotionScale);
+    Result->SetBoolField(TEXT("previous_use_normalized_root_motion_scale"), bPrevNorm);
+    Result->SetBoolField(TEXT("lock_provided"), bLockProvided);
+    Result->SetBoolField(TEXT("force_root_lock_provided"), bForceProvided);
+    Result->SetBoolField(TEXT("use_normalized_root_motion_scale_provided"), bNormProvided);
+    Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }

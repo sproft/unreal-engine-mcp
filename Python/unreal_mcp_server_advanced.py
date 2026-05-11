@@ -7724,6 +7724,10 @@ def animation_edit(
     clear: Optional[bool] = None,
     save: Optional[bool] = None,
     metadata_type: Optional[str] = None,
+    enable: Optional[bool] = None,
+    root_motion_root_lock: Optional[str] = None,
+    force_root_lock: Optional[bool] = None,
+    use_normalized_root_motion_scale: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Targeted UAnimSequence / UAnimMontage edits (small variant).
@@ -7796,6 +7800,17 @@ def animation_edit(
           ``sample_index`` through ``UBlendSpace::DeleteSample``.
           Bounds-checked against the blendspace's current sample
           count.
+        - ``set_root_motion``: write the four canonical
+          root-motion UPROPERTYs on a UAnimSequence:
+          ``bEnableRootMotion`` (``enable``, required),
+          ``RootMotionRootLock`` (``root_motion_root_lock`` token:
+          ``RefPose`` / ``AnimFirstFrame`` / ``Zero``; optional),
+          ``bForceRootLock`` (``force_root_lock``; optional), and
+          ``bUseNormalizedRootMotionScale``
+          (``use_normalized_root_motion_scale``; optional). The
+          fields are public UPROPERTYs on UAnimSequence under
+          Category=RootMotion. PostEditChange + MarkPackageDirty
+          fire after the writes so any open editor refreshes.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -7900,6 +7915,14 @@ def animation_edit(
         params["save"] = save
     if metadata_type is not None:
         params["metadata_type"] = metadata_type
+    if enable is not None:
+        params["enable"] = enable
+    if root_motion_root_lock is not None:
+        params["root_motion_root_lock"] = root_motion_root_lock
+    if force_root_lock is not None:
+        params["force_root_lock"] = force_root_lock
+    if use_normalized_root_motion_scale is not None:
+        params["use_normalized_root_motion_scale"] = use_normalized_root_motion_scale
 
     try:
         response = unreal.send_command("animation_edit", params)
