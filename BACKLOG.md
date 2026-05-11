@@ -9,6 +9,89 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped four deepening additions across
+existing tools: `widget_edit` gains `set_box_slot` (single-call
+sugar over `set_slot_property` for both `UHorizontalBoxSlot` and
+`UVerticalBoxSlot`; the child's slot class decides which
+orientation the op routes through so the same op covers both box
+flavours; takes the widget blueprint plus a target child widget
+FName plus any of `horizontal_alignment` (`Fill` / `Left` /
+`Center` / `Right`), `vertical_alignment` (`Fill` / `Top` /
+`Center` / `Bottom`), `padding` (the `[L, T, R, B]` / `[H, V]` /
+uniform / object margin shape we already use), and `size` (the
+FSlateChildSize: `"Auto"` / `"Fill"` / a bare number weight
+(Fill broadcast) / `["Fill", weight]` / `{rule: "Fill", value:
+weight}`); routes through the concrete UHorizontalBoxSlot /
+UVerticalBoxSlot setters so the parent panel's layout
+invalidates; refuses children whose parent is not a UHorizontalBox
+or UVerticalBox since the box-only fields do not live on
+UCanvasPanelSlot or UOverlaySlot; the response reports the
+resolved orientation token so callers know which branch fired;
+completes the parallel of last pass's `set_overlay_slot` for
+the box-stack UMG case), `material_edit` gains `set_material_flags`
+(reflection-driven bool flag writer for the long tail of
+shader-permutation toggles on UMaterial; `flags` (alias `bools`
+/ `properties` / `values`) is a flat dict from field name to
+bool covering `TwoSided` / `DitheredLODTransition` /
+`bUseMaterialAttributes` / `bCastDynamicShadowAsMasked` /
+`bOutputTranslucentVelocity` / `bUsedWithStaticLighting` /
+`bUsedWithSkeletalMesh`, with the casual snake_case shape
+(`two_sided`, `dithered_lod`, `use_material_attributes`, etc.)
+mapped back to the canonical UPROPERTY name through a
+case-insensitive alias table; each entry routes through
+FindPropertyByName + `FBoolProperty::SetPropertyValue_InContainer`
+so the op stays compatible with the visibility tightening UE
+has done across recent versions; each touched flag fires
+PreEditChange + PostEditChangeProperty so the static permutation
+invalidates when the engine cares about it; failures (unknown
+field, non-bool value, missing or non-bool UPROPERTY) land on
+the response's `skipped` array with a reason rather than
+aborting; recompiles once after the writes when at least one
+flag landed; refuses Material Instances since the override
+surface lives on FMaterialInstanceBasePropertyOverrides
+instead), `animation_edit` gains `set_blend_times` (tunes the
+seconds-long crossfade duration the AnimGraph reads when a
+montage blends in or out, plus the optional
+`bEnableRootMotionTranslation` toggle on a UAnimSequence;
+`blend_in_time` / `blend_out_time` write the inner `BlendTime`
+float on a UAnimMontage's `BlendIn` / `BlendOut` slot; the
+engine has shipped FAlphaBlend (legacy) and FAlphaBlendArgs
+(modern wrapper) as the struct type for those slots so the op
+resolves through reflection on the outer FStructProperty's
+Struct -> ContainerPtrToValuePtr -> inner `BlendTime`
+FloatProperty rather than hard-coding either shape; the two
+blend-time fields require a UAnimMontage and refuse non-Montage
+assets up front; `enable_root_motion_translation` (alias
+`b_enable_root_motion_translation` / `root_motion_translation`)
+requires a UAnimSequence since the engine reads it on
+UAnimSequence directly (Montages inherit from UAnimSequenceBase
+not UAnimSequence); at least one of the three knobs must be
+provided; PostEditChange + MarkPackageDirty close the edit; the
+response carries the previous + new value for each knob plus
+per-field `provided` / `written` flags), and `niagara_edit`
+gains `remove_emitter` (cleanup helper that strips an existing
+emitter handle off a UNiagaraSystem; pairs with
+`add_emitter_from_asset`; `system` resolves the target system;
+`emitter` (alias `emitter_handle` / `handle_name` / `name`)
+matches the handle by display name (case-insensitive) or by the
+source emitter's `GetName()` so handles that have not been
+renamed still resolve; routes the remove through the public
+NIAGARA_API `UNiagaraSystem::RemoveEmitterHandlesById` against a
+single-element TArray<FGuid> so the system's internal
+bookkeeping (cached compiled emitters, simulation cache, exposed
+parameter wiring) runs the same teardown the editor's
+Selected -> Remove command runs; the response carries the
+previous emitter count, the handle's name and GUID, the source
+emitter path when present, the new count, and a `removed`
+boolean; surfaces a structured failure when the remove did not
+shrink the handle list since the engine silently no-ops in a
+handful of read-only / parent-override cases). The four
+additions together close the box-stack UMG layout gap on the
+widget_edit side, the bool flag writer gap on the material_edit
+side, the montage blend-time authoring gap on the animation_edit
+side, and the emitter-removal cleanup gap on the niagara_edit
+side.
+
+The pass before that shipped four deepening additions across
 existing tools: `material_edit` gains `set_blend_mode` (writes
 the master `UMaterial::BlendMode` UPROPERTY plus the paired
 `OpacityMaskClipValue` knob; `blend_mode` (alias `mode`) accepts
@@ -38,8 +121,7 @@ UOverlaySlot exposes `SetHorizontalAlignment` /
 we route through those so the parent UOverlay's cached slate
 widget refreshes; refuses children whose parent is not a UOverlay
 since the slot class on a canvas / vertical box child does not
-carry these fields; complements last pass's `set_canvas_slot` for
-the overlay-anchored UMG layout case), `animation_edit` gains
+carry these fields), `animation_edit` gains
 `set_loop_flags` (writes the loop knobs on a UAnimSequence; the
 required `loop` (alias `b_loop` / `bLoop`) toggles `bLoop` (the
 per-asset loop flag the engine consults when the AnimGraph does
@@ -69,11 +151,7 @@ one field does not lose the rest; convenience `name` + `value`
 shape covers the single-field one-liner; PostEditChange fires on
 the renderer after the writes so the cached system binding state
 regenerates and the editor's stack viewmodel refreshes; saves the
-system on success unless `save=false`). The four additions together
-close the blend-mode authoring gap on the material_edit side, the
-overlay-anchored UMG layout gap on the widget_edit side, the
-loop-knob authoring gap on the animation_edit side, and the
-in-place renderer-property edit gap on the niagara_edit side.
+system on success unless `save=false`).
 
 The pass before that shipped three deepening additions across
 existing tools: `widget_edit` gains `set_canvas_slot` (single-call
@@ -1539,6 +1617,99 @@ ability" alongside `tag_registry_edit`.
 
 ## Shipped in this fork
 
+- `widget_edit set_box_slot` (small) — single-call sugar over
+  `set_slot_property` for both `UHorizontalBoxSlot` and
+  `UVerticalBoxSlot`. The child's slot class decides which
+  orientation the op routes through, so the same op covers both
+  box flavours. `widget` is the FName of the target child widget
+  on the WBP's WidgetTree. Pass any combination of
+  `horizontal_alignment` (`Fill` / `Left` / `Center` / `Right`),
+  `vertical_alignment` (`Fill` / `Top` / `Center` / `Bottom`),
+  `padding` (the canonical `[L, T, R, B]` / `[H, V]` / uniform /
+  object margin shape we use across the slot ops), and `size`
+  (FSlateChildSize: accepts `"Auto"`, `"Fill"`, a bare number
+  weight (Fill broadcast), `["Fill", weight]`, or
+  `{rule: "Fill", value: weight}`). Routes the writes through
+  the concrete `UHorizontalBoxSlot::SetHorizontalAlignment` /
+  `SetVerticalAlignment` / `SetPadding` / `SetSize` setters (and
+  the matching UVerticalBoxSlot setters) so the parent panel's
+  cached slate widget invalidates. PostEditChange fires on the
+  slot + child so the UMG designer refreshes. Refuses children
+  whose parent is not a UHorizontalBox or UVerticalBox since the
+  box-only fields do not live on UCanvasPanelSlot or
+  UOverlaySlot. `MarkBlueprintAsModified` + optional `compile=true`
+  + `save=true` close the edit. The response reports the resolved
+  orientation token (`Horizontal` / `Vertical`) plus the previous
+  + new value for each field so callers can see which branch
+  fired. Aliases: `set_box_slot` / `box_slot` /
+  `set_vertical_box_slot` / `set_horizontal_box_slot`.
+- `material_edit set_material_flags` (small) — reflection-driven
+  writer that lands a flat dict of bool UPROPERTYs on a
+  UMaterial. The op covers the long tail of shader-permutation
+  toggles the engine exposes on UMaterial: `TwoSided`,
+  `DitheredLODTransition`, `bUseMaterialAttributes`,
+  `bCastDynamicShadowAsMasked`, `bOutputTranslucentVelocity`,
+  `bUsedWithStaticLighting`, `bUsedWithSkeletalMesh`. Each entry
+  resolves through a small alias map (case-insensitive, with the
+  casual snake_case shape mapping back to the canonical engine
+  names) plus FindPropertyByName. Writes go through PreEditChange
+  + `FBoolProperty::SetPropertyValue_InContainer` +
+  PostEditChangeProperty so the static permutation invalidates
+  when the touched flag sits on the permutation key. Failures
+  (unknown field, non-bool value, missing UPROPERTY, or a name
+  that resolves to a non-bool UPROPERTY) land on the response's
+  `skipped` array with a reason rather than aborting the whole
+  call. Recompiles the material once after the writes when at
+  least one flag landed (off by default with `recompile=false`).
+  Saves on success unless `save=false`. Refuses Material
+  Instances since they route through `set_attribute_blendable`
+  where the override surface lives on
+  `FMaterialInstanceBasePropertyOverrides`. Aliases:
+  `set_material_flags` / `set_flags` / `material_flags` /
+  `set_material_bools`.
+- `animation_edit set_blend_times` (small) — tunes the
+  seconds-long crossfade duration the AnimGraph reads when a
+  montage blends in or out, plus the optional
+  `bEnableRootMotionTranslation` toggle on a UAnimSequence.
+  `blend_in_time` / `blend_out_time` land on the inner
+  `BlendTime` float of the UAnimMontage's `BlendIn` / `BlendOut`
+  FAlphaBlend(Args) struct slot. The op resolves through
+  reflection on the outer FStructProperty's Struct
+  (FindPropertyByName -> ContainerPtrToValuePtr -> inner
+  `BlendTime` FloatProperty) so it stays compatible with the two
+  struct shapes UE has shipped: FAlphaBlend (legacy) and
+  FAlphaBlendArgs (the modern wrapper). The two blend-time
+  fields require a UAnimMontage and refuse non-Montage assets up
+  front; `enable_root_motion_translation` routes through the
+  `bEnableRootMotionTranslation` UPROPERTY which the engine only
+  exposes on UAnimSequence (Montages inherit from
+  UAnimCompositeBase -> UAnimSequenceBase, not from
+  UAnimSequence). At least one of the three knobs must be
+  provided. PostEditChange + MarkPackageDirty close the edit so
+  an open Persona refreshes. Saves on success unless `save=false`.
+  Returns the previous + new value for each knob plus per-field
+  `provided` / `written` booleans. Aliases: `set_blend_times` /
+  `set_blendtimes` / `set_blend` / `blend_times`.
+- `niagara_edit remove_emitter` (small) — cleanup helper that
+  strips an existing emitter handle off a `UNiagaraSystem`.
+  Pairs with `add_emitter_from_asset` (the canonical add op).
+  Resolves the system through the same short-name / path shape
+  every other niagara_edit op uses, matches the emitter handle
+  by display name or source-emitter name through
+  `FindEmitterHandleByName`, and routes the remove through the
+  public NIAGARA_API `UNiagaraSystem::RemoveEmitterHandlesById`
+  against a single-element TArray<FGuid>. That overload is the
+  one the editor's Selected -> Remove command calls, so the
+  system's internal bookkeeping (cached compiled emitters,
+  simulation cache, exposed parameter wiring) runs the same
+  teardown path as the UI. The response carries the previous
+  emitter count, the handle's name and GUID, the source emitter
+  path when present, the new count, and a `removed` boolean.
+  Surfaces a structured failure when the remove did not shrink
+  the handle list (the engine silently no-ops in a handful of
+  read-only / parent-override cases). Saves on success unless
+  `save=false`. Aliases: `remove_emitter` / `delete_emitter` /
+  `remove_emitter_handle` / `drop_emitter`.
 - `niagara_edit set_emitter_renderer` (small) — adds a
   `UNiagaraRendererProperties` subobject to the matching emitter
   handle's render stack through the public NIAGARA_API
