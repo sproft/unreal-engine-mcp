@@ -8311,6 +8311,15 @@ def chaos_edit(
     transform: Optional[Dict[str, Any]] = None,
     reindex_materials: Optional[bool] = None,
     save: Optional[bool] = None,
+    min: Optional[List[float]] = None,
+    max: Optional[List[float]] = None,
+    divisions: Optional[List[int]] = None,
+    transform_index: Optional[int] = None,
+    grout: Optional[float] = None,
+    collision_sample_spacing: Optional[float] = None,
+    random_seed: Optional[int] = None,
+    include_outside_cell: Optional[bool] = None,
+    split_islands: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Inspect or mutate a UGeometryCollection asset (read + edit slice).
@@ -8338,6 +8347,18 @@ def chaos_edit(
           Editor-only API. Optional ``transform`` lays the mesh
           down at a chosen world-space transform; the default is
           identity.
+        - ``fracture_box``: axis-aligned box fracture against a
+          UGeometryCollection through the ``PlanarCut`` plugin's
+          ``CutWithPlanarCells`` entry point. Required ``min`` /
+          ``max`` 3-element arrays describe the cutting region in
+          the collection's local space; optional ``divisions``
+          (``[X, Y, Z]`` int triple, default ``[2, 2, 2]``)
+          controls the cell grid; optional ``transform_index``
+          picks the target transform (defaults to the collection's
+          ``root_index``). Pass ``grout`` / ``random_seed`` /
+          ``collision_sample_spacing`` / ``include_outside_cell`` /
+          ``split_islands`` for the canonical
+          ``CutWithPlanarCells`` knobs.
 
     Args:
         collection: Path or short name of a UGeometryCollection
@@ -8400,6 +8421,24 @@ def chaos_edit(
         params["reindex_materials"] = reindex_materials
     if save is not None:
         params["save"] = save
+    if min is not None:
+        params["min"] = min
+    if max is not None:
+        params["max"] = max
+    if divisions is not None:
+        params["divisions"] = divisions
+    if transform_index is not None:
+        params["transform_index"] = transform_index
+    if grout is not None:
+        params["grout"] = grout
+    if collision_sample_spacing is not None:
+        params["collision_sample_spacing"] = collision_sample_spacing
+    if random_seed is not None:
+        params["random_seed"] = random_seed
+    if include_outside_cell is not None:
+        params["include_outside_cell"] = include_outside_cell
+    if split_islands is not None:
+        params["split_islands"] = split_islands
 
     try:
         response = unreal.send_command("chaos_edit", params)

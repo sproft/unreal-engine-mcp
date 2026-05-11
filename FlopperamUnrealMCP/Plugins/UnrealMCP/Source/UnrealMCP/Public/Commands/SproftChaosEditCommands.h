@@ -50,6 +50,19 @@
  *     `FGeometryCollectionConversion::AppendStaticMesh`. Editor-only
  *     API. Optional `transform` lays the mesh down at a chosen
  *     world-space transform; the default is identity.
+ *   - `fracture_box`: runs an axis-aligned box fracture against a
+ *     UGeometryCollection through the `PlanarCut` plugin's
+ *     `CutWithPlanarCells` / `CutMultipleWithPlanarCells` entry
+ *     points. The cutting region is an `FBox(min, max)` in the
+ *     collection's local space; the default 2x2x2 division wraps
+ *     the documented `FPlanarCells(FBox, FIntVector)` constructor
+ *     so an 8-cell box fracture lands without the caller spelling
+ *     out the cells. Optional `divisions` (`[X, Y, Z]` int triple)
+ *     overrides the 2x2x2 default; optional `transform_index`
+ *     picks the target transform (defaults to the collection's
+ *     `root_index`). After the cut runs `InvalidateCollection` +
+ *     `UpdateGeometryDependentProperties` so the cached simulation
+ *     data and renderer-side fields rebuild on the next access.
  *
  * Inputs:
  *   - collection / path / asset / asset_path: required. Accepts a
@@ -101,4 +114,5 @@ private:
     TSharedPtr<FJsonObject> HandleInspect(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetSimulationSettings(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleImportStaticMesh(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleFractureBox(const TSharedPtr<FJsonObject>& Params);
 };

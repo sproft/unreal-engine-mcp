@@ -102,7 +102,11 @@ public class UnrealMCP : ModuleRules
 					"IKRigEditor",         // For UIKRigController::SetRetargetRoot / AddRetargetChain / AddNewGoal (Sproft ik_rig_edit)
 					"GeometryCollectionEditor", // For FGeometryCollectionConversion::AppendStaticMesh (Sproft chaos_edit)
 					"AnimGraph",           // For FEdGraphSchemaAction_NewStateNode / UAnimationStateMachineGraph (Sproft animation_graph_edit add_state)
-					"ModelViewViewModelBlueprint"  // For UMVVMBlueprintView / UMVVMWidgetBlueprintExtension_View / FMVVMBlueprintViewModelContext (Sproft widget_edit set_viewmodel)
+					"ModelViewViewModelBlueprint",  // For UMVVMBlueprintView / UMVVMWidgetBlueprintExtension_View / FMVVMBlueprintViewModelContext (Sproft widget_edit set_viewmodel)
+					"PlanarCut",           // For FPlanarCells + CutWithPlanarCells (Sproft chaos_edit fracture_box)
+					"GeometryCore",        // Transitively pulled by PlanarCut; listed explicit for clarity (Sproft chaos_edit fracture_box)
+					"DynamicMesh",         // Transitively pulled by PlanarCut; listed explicit for clarity (Sproft chaos_edit fracture_box)
+					"GeometryAlgorithms"   // Transitively pulled by PlanarCut; listed explicit for clarity (Sproft chaos_edit fracture_box)
 				}
 			);
 		}

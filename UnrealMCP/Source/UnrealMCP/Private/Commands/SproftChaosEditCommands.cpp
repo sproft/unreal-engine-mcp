@@ -11,6 +11,7 @@
 #include "GeometryCollection/GeometryCollectionSimulationTypes.h"
 #include "GeometryCollection/TransformCollection.h"
 #include "Materials/MaterialInterface.h"
+#include "PlanarCut.h"
 #include "UObject/UnrealType.h"
 
 namespace
@@ -130,8 +131,14 @@ TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleCommand(const FString& C
     {
         return HandleImportStaticMesh(Params);
     }
+    if (Op.Equals(TEXT("fracture_box"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("fracture"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("cut_box"), ESearchCase::IgnoreCase))
+    {
+        return HandleFractureBox(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("chaos_edit: unsupported op '%s'. Supported: inspect, set_simulation_settings, import_static_mesh"), *Op));
+        FString::Printf(TEXT("chaos_edit: unsupported op '%s'. Supported: inspect, set_simulation_settings, import_static_mesh, fracture_box"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleInspect(const TSharedPtr<FJsonObject>& Params)
@@ -613,6 +620,218 @@ TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleImportStaticMesh(const T
     Out->SetStringField(TEXT("static_mesh"), StaticMesh->GetPathName());
     Out->SetObjectField(TEXT("transform"), ChaosEdit_TransformToJson(Transform));
     Out->SetBoolField(TEXT("reindex_materials"), bReindexMaterials);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+}
+
+namespace
+{
+    bool ChaosEdit_ReadVector3(const TSharedPtr<FJsonObject>& Params, const TCHAR* Field, FVector& Out)
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+        if (Params->TryGetArrayField(Field, Arr) && Arr && Arr->Num() >= 3)
+        {
+            Out.X = (*Arr)[0]->AsNumber();
+            Out.Y = (*Arr)[1]->AsNumber();
+            Out.Z = (*Arr)[2]->AsNumber();
+            return true;
+        }
+        return false;
+    }
+
+    bool ChaosEdit_ReadIntVector3(const TSharedPtr<FJsonObject>& Params, const TCHAR* Field, FIntVector& Out)
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+        if (Params->TryGetArrayField(Field, Arr) && Arr && Arr->Num() >= 3)
+        {
+            Out.X = static_cast<int32>((*Arr)[0]->AsNumber());
+            Out.Y = static_cast<int32>((*Arr)[1]->AsNumber());
+            Out.Z = static_cast<int32>((*Arr)[2]->AsNumber());
+            return true;
+        }
+        return false;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftChaosEditCommands::HandleFractureBox(const TSharedPtr<FJsonObject>& Params)
+{
+    // Axis-aligned box fracture against a UGeometryCollection through
+    // the PlanarCut plugin's canonical entry point. Wraps
+    // FPlanarCells(FBox, FIntVector(2,2,2)) (8-cell box division)
+    // plus CutWithPlanarCells / CutMultipleWithPlanarCells against
+    // the chosen transform index (default: the collection's
+    // root_index, which is the unfractured root for a fresh asset).
+    UGeometryCollection* Collection = ResolveCollection(Params);
+    if (!Collection)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("fracture_box: could not resolve target UGeometryCollection"));
+    }
+    TSharedPtr<FGeometryCollection, ESPMode::ThreadSafe> GC = Collection->GetGeometryCollection();
+    if (!GC.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("fracture_box: UGeometryCollection has no FGeometryCollection payload"));
+    }
+
+    FVector BoxMin = FVector::ZeroVector;
+    FVector BoxMax = FVector::ZeroVector;
+    if (!ChaosEdit_ReadVector3(Params, TEXT("min"), BoxMin)
+        && !ChaosEdit_ReadVector3(Params, TEXT("box_min"), BoxMin)
+        && !ChaosEdit_ReadVector3(Params, TEXT("region_min"), BoxMin))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("fracture_box: missing 'min' parameter (3-element [x, y, z] array)"));
+    }
+    if (!ChaosEdit_ReadVector3(Params, TEXT("max"), BoxMax)
+        && !ChaosEdit_ReadVector3(Params, TEXT("box_max"), BoxMax)
+        && !ChaosEdit_ReadVector3(Params, TEXT("region_max"), BoxMax))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("fracture_box: missing 'max' parameter (3-element [x, y, z] array)"));
+    }
+    if (BoxMin.X >= BoxMax.X || BoxMin.Y >= BoxMax.Y || BoxMin.Z >= BoxMax.Z)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("fracture_box: 'min' must be strictly less than 'max' on every axis (got min=[%g,%g,%g], max=[%g,%g,%g])"),
+                BoxMin.X, BoxMin.Y, BoxMin.Z, BoxMax.X, BoxMax.Y, BoxMax.Z));
+    }
+
+    // Divisions default to 2x2x2 (the canonical "box fracture"
+    // 8-piece split); callers can override for a finer grid.
+    FIntVector Divisions(2, 2, 2);
+    ChaosEdit_ReadIntVector3(Params, TEXT("divisions"), Divisions);
+    if (Divisions.X < 1) Divisions.X = 1;
+    if (Divisions.Y < 1) Divisions.Y = 1;
+    if (Divisions.Z < 1) Divisions.Z = 1;
+
+    // Resolve the target transform. Defaults to the collection's
+    // root_index, which is the unfractured root for a fresh asset.
+    int32 TargetTransformIdx = Collection->GetRootIndex();
+    double TempTransformIdx = 0.0;
+    if (Params->TryGetNumberField(TEXT("transform_index"), TempTransformIdx)
+        || Params->TryGetNumberField(TEXT("target_transform"), TempTransformIdx)
+        || Params->TryGetNumberField(TEXT("transform_idx"), TempTransformIdx))
+    {
+        TargetTransformIdx = static_cast<int32>(TempTransformIdx);
+    }
+    const int32 TransformCount = GC->Transform.Num();
+    if (TargetTransformIdx < 0 || TargetTransformIdx >= TransformCount)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("fracture_box: transform_index %d out of range [0, %d)"),
+                TargetTransformIdx, TransformCount));
+    }
+
+    // Optional knobs that pass through to CutWithPlanarCells.
+    double Grout = 0.0;
+    double TempGrout = 0.0;
+    if (Params->TryGetNumberField(TEXT("grout"), TempGrout))
+    {
+        Grout = TempGrout;
+    }
+    double CollisionSampleSpacing = 50.0;
+    double TempSpacing = 0.0;
+    if (Params->TryGetNumberField(TEXT("collision_sample_spacing"), TempSpacing)
+        || Params->TryGetNumberField(TEXT("sample_spacing"), TempSpacing))
+    {
+        CollisionSampleSpacing = TempSpacing;
+    }
+    int32 RandomSeed = 0;
+    double TempSeed = 0.0;
+    if (Params->TryGetNumberField(TEXT("random_seed"), TempSeed)
+        || Params->TryGetNumberField(TEXT("seed"), TempSeed))
+    {
+        RandomSeed = static_cast<int32>(TempSeed);
+    }
+    bool bIncludeOutsideCell = true;
+    Params->TryGetBoolField(TEXT("include_outside_cell"), bIncludeOutsideCell);
+    bool bSplitIslands = true;
+    Params->TryGetBoolField(TEXT("split_islands"), bSplitIslands);
+    bool bSetDefaultInternalMaterialsFromCollection = true;
+    Params->TryGetBoolField(TEXT("set_default_internal_materials_from_collection"), bSetDefaultInternalMaterialsFromCollection);
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    // Build the PlanarCells. The FBox/FIntVector constructor sets up
+    // a regular grid that divides the box into Divisions.X * Y * Z
+    // axis-aligned cells with the right adjacency wiring for the cut.
+    const FBox CutRegion(BoxMin, BoxMax);
+    FPlanarCells Cells(CutRegion, Divisions);
+
+    const int32 TransformCountBefore = GC->Transform.Num();
+    const int32 GeometryCountBefore = GC->NumElements(FGeometryCollection::GeometryGroup);
+
+    const int32 NewGeomIndex = CutWithPlanarCells(
+        Cells,
+        *GC,
+        TargetTransformIdx,
+        Grout,
+        CollisionSampleSpacing,
+        RandomSeed,
+        TOptional<FTransform>(),
+        bIncludeOutsideCell,
+        bSetDefaultInternalMaterialsFromCollection,
+        /*Progress=*/nullptr,
+        /*CellsOrigin=*/FVector::ZeroVector,
+        bSplitIslands);
+
+    const int32 TransformCountAfter = GC->Transform.Num();
+    const int32 GeometryCountAfter = GC->NumElements(FGeometryCollection::GeometryGroup);
+
+    if (NewGeomIndex < 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("fracture_box: CutWithPlanarCells produced no new geometry (target transform '%d' may not intersect the cut region, or the box may sit entirely outside the geometry)"),
+                TargetTransformIdx));
+    }
+
+    Collection->InitializeMaterials();
+    Collection->UpdateGeometryDependentProperties();
+    Collection->InvalidateCollection();
+    Collection->MarkPackageDirty();
+
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Collection->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("fracture_box"));
+    Out->SetStringField(TEXT("collection"), Collection->GetPathName());
+    Out->SetNumberField(TEXT("transform_index"), TargetTransformIdx);
+    Out->SetNumberField(TEXT("first_new_geometry_index"), NewGeomIndex);
+    Out->SetNumberField(TEXT("transform_count_before"), TransformCountBefore);
+    Out->SetNumberField(TEXT("transform_count_after"), TransformCountAfter);
+    Out->SetNumberField(TEXT("geometry_count_before"), GeometryCountBefore);
+    Out->SetNumberField(TEXT("geometry_count_after"), GeometryCountAfter);
+    {
+        TSharedPtr<FJsonObject> RegionJson = MakeShared<FJsonObject>();
+        TArray<TSharedPtr<FJsonValue>> MinArr;
+        MinArr.Add(MakeShared<FJsonValueNumber>(BoxMin.X));
+        MinArr.Add(MakeShared<FJsonValueNumber>(BoxMin.Y));
+        MinArr.Add(MakeShared<FJsonValueNumber>(BoxMin.Z));
+        TArray<TSharedPtr<FJsonValue>> MaxArr;
+        MaxArr.Add(MakeShared<FJsonValueNumber>(BoxMax.X));
+        MaxArr.Add(MakeShared<FJsonValueNumber>(BoxMax.Y));
+        MaxArr.Add(MakeShared<FJsonValueNumber>(BoxMax.Z));
+        RegionJson->SetArrayField(TEXT("min"), MinArr);
+        RegionJson->SetArrayField(TEXT("max"), MaxArr);
+        Out->SetObjectField(TEXT("region"), RegionJson);
+    }
+    {
+        TArray<TSharedPtr<FJsonValue>> DivArr;
+        DivArr.Add(MakeShared<FJsonValueNumber>(Divisions.X));
+        DivArr.Add(MakeShared<FJsonValueNumber>(Divisions.Y));
+        DivArr.Add(MakeShared<FJsonValueNumber>(Divisions.Z));
+        Out->SetArrayField(TEXT("divisions"), DivArr);
+    }
+    Out->SetNumberField(TEXT("grout"), Grout);
+    Out->SetNumberField(TEXT("collision_sample_spacing"), CollisionSampleSpacing);
+    Out->SetNumberField(TEXT("random_seed"), RandomSeed);
+    Out->SetBoolField(TEXT("include_outside_cell"), bIncludeOutsideCell);
+    Out->SetBoolField(TEXT("split_islands"), bSplitIslands);
     Out->SetBoolField(TEXT("saved"), bSave);
     return Out;
 }
