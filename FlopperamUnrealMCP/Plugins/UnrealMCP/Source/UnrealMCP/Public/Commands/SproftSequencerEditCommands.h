@@ -191,4 +191,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddTransformSectionKeys(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetTransformChannelMask(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddVisibilityTrack(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddAudioFade(const TSharedPtr<FJsonObject>& Params);
 };

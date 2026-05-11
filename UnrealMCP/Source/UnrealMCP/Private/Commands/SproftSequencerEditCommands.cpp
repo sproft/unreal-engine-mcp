@@ -430,6 +430,11 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCommand(const FStrin
     {
         return HandleAddVisibilityTrack(Params);
     }
+    if (Op == TEXT("add_audio_fade") || Op == TEXT("audio_fade")
+        || Op == TEXT("add_fade") || Op == TEXT("set_audio_fade"))
+    {
+        return HandleAddAudioFade(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("sequencer_edit: unsupported op '%s'"), *Op));
 }
@@ -2349,5 +2354,243 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddVisibilityTrack(c
     Result->SetNumberField(TEXT("duration_frames"), DurationFramesInt);
     Result->SetBoolField(TEXT("visible"), bVisible);
     Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddAudioFade(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writes a fade-in / fade-out volume ramp on an existing
+    // UMovieSceneAudioSection. The engine stores per-section audio
+    // volume on the section's `SoundVolume` FMovieSceneFloatChannel,
+    // which the sequencer editor's "Volume" curve drives. Recent UE
+    // versions (5.4+) moved the channel proxy under
+    // `CacheChannelProxy` and registered SoundVolume at channel index
+    // 0 with the identifier "Volume", so we resolve the channel
+    // through `Section->GetChannelProxy().GetChannel<FMovieSceneFloatChannel>(0)`.
+    //
+    // The fade lands as a 4-key envelope (interior bounds linear):
+    //   [start_frame, 0.0]
+    //   [start_frame + fade_in_frames, 1.0]
+    //   [end_frame - fade_out_frames, 1.0]
+    //   [end_frame, 0.0]
+    //
+    // A zero fade duration drops the matching pair of keys so the
+    // envelope still lands clean. The op clears the channel's
+    // existing keys first so a second call replaces the prior fade
+    // rather than stacking keys on top.
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    UMovieSceneSequence* Sequence = Cast<UMovieSceneSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMovieSceneSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    // Optional binding scope: when the audio track sits under a
+    // possessable / spawnable, the caller can pass the binding GUID
+    // or a possessable name. Empty binding targets the master audio
+    // track.
+    FGuid BindingGuid;
+    FString BindingGuidString;
+    if (Params->TryGetStringField(TEXT("binding"), BindingGuidString)
+        || Params->TryGetStringField(TEXT("binding_guid"), BindingGuidString))
+    {
+        if (!FGuid::Parse(BindingGuidString, BindingGuid))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Invalid binding GUID '%s'"), *BindingGuidString));
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        FString PossessableName;
+        if (Params->TryGetStringField(TEXT("possessable"), PossessableName)
+            || Params->TryGetStringField(TEXT("actor"), PossessableName))
+        {
+            BindingGuid = FindBindingByName(MovieScene, PossessableName);
+            if (!BindingGuid.IsValid())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("No binding matching '%s' on sequence '%s'"),
+                        *PossessableName, *Sequence->GetName()));
+            }
+        }
+    }
+
+    // Resolve the audio track on the matching scope. Master scope
+    // walks UMovieScene::GetTracks(); binding scope walks FindTrack
+    // on the binding GUID, matching the lookup pattern that
+    // HandleAddAudioTrack uses.
+    UMovieSceneAudioTrack* AudioTrack = nullptr;
+    if (BindingGuid.IsValid())
+    {
+        if (UMovieSceneTrack* Existing = MovieScene->FindTrack(UMovieSceneAudioTrack::StaticClass(), BindingGuid))
+        {
+            AudioTrack = Cast<UMovieSceneAudioTrack>(Existing);
+        }
+    }
+    else
+    {
+        for (UMovieSceneTrack* T : MovieScene->GetTracks())
+        {
+            if (UMovieSceneAudioTrack* Cand = Cast<UMovieSceneAudioTrack>(T))
+            {
+                AudioTrack = Cand;
+                break;
+            }
+        }
+    }
+    if (!AudioTrack)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No UMovieSceneAudioTrack found on sequence '%s' (scope: %s)"),
+                *Sequence->GetName(),
+                BindingGuid.IsValid() ? *BindingGuid.ToString() : TEXT("master")));
+    }
+
+    // Index into the track's sections array. Default 0; out-of-range
+    // surfaces as a clean error rather than crashing the call.
+    int32 SectionIndex = 0;
+    Params->TryGetNumberField(TEXT("section_index"), SectionIndex);
+    const TArray<UMovieSceneSection*>& Sections = AudioTrack->GetAllSections();
+    if (SectionIndex < 0 || SectionIndex >= Sections.Num())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("section_index %d is out of range (track has %d sections)"),
+                SectionIndex, Sections.Num()));
+    }
+    UMovieSceneAudioSection* AudioSection = Cast<UMovieSceneAudioSection>(Sections[SectionIndex]);
+    if (!AudioSection)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Section %d on the resolved audio track is not a UMovieSceneAudioSection"), SectionIndex));
+    }
+
+    // Fade durations: caller supplies seconds; we convert to the
+    // MovieScene's tick resolution to land on frame boundaries that
+    // match the rest of the sequencer storage shape.
+    double FadeInSeconds = 0.0;
+    Params->TryGetNumberField(TEXT("fade_in_seconds"), FadeInSeconds)
+        || Params->TryGetNumberField(TEXT("fade_in"), FadeInSeconds)
+        || Params->TryGetNumberField(TEXT("fadein"), FadeInSeconds);
+    double FadeOutSeconds = 0.0;
+    Params->TryGetNumberField(TEXT("fade_out_seconds"), FadeOutSeconds)
+        || Params->TryGetNumberField(TEXT("fade_out"), FadeOutSeconds)
+        || Params->TryGetNumberField(TEXT("fadeout"), FadeOutSeconds);
+    if (FadeInSeconds < 0.0) FadeInSeconds = 0.0;
+    if (FadeOutSeconds < 0.0) FadeOutSeconds = 0.0;
+    if (FadeInSeconds <= 0.0 && FadeOutSeconds <= 0.0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("At least one of 'fade_in_seconds' / 'fade_out_seconds' must be positive"));
+    }
+
+    // Read the section's bounded range. Falls back to the MovieScene
+    // playback range when the section happens to be unbounded, but
+    // audio sections always carry a closed range from
+    // AddNewSound / AddSection so this is belt-and-braces.
+    const TRange<FFrameNumber> SectionRange = AudioSection->GetRange();
+    if (!SectionRange.GetLowerBound().IsClosed() || !SectionRange.GetUpperBound().IsClosed())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Resolved audio section has an unbounded range; the fade envelope needs closed bounds"));
+    }
+    const FFrameNumber StartFrame = SectionRange.GetLowerBoundValue();
+    const FFrameNumber EndFrame = SectionRange.GetUpperBoundValue();
+    const int32 RangeFrames = EndFrame.Value - StartFrame.Value;
+    if (RangeFrames <= 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Resolved audio section has zero / negative duration; cannot land a fade"));
+    }
+
+    const FFrameRate TickResolution = MovieScene->GetTickResolution();
+    int32 FadeInFrames = static_cast<int32>(FadeInSeconds * TickResolution.AsDecimal());
+    int32 FadeOutFrames = static_cast<int32>(FadeOutSeconds * TickResolution.AsDecimal());
+    // Cap each fade at half the section so they cannot cross over.
+    const int32 MaxFadeFrames = RangeFrames / 2;
+    if (FadeInFrames > MaxFadeFrames) FadeInFrames = MaxFadeFrames;
+    if (FadeOutFrames > MaxFadeFrames) FadeOutFrames = MaxFadeFrames;
+
+    // Find the SoundVolume float channel on the section. The audio
+    // section registers SoundVolume at channel index 0 in both editor
+    // and runtime builds (see UMovieSceneAudioSection::CacheChannelProxy).
+    FMovieSceneChannelProxy& Proxy = AudioSection->GetChannelProxy();
+    FMovieSceneFloatChannel* VolumeChannel = Proxy.GetChannel<FMovieSceneFloatChannel>(0);
+    if (!VolumeChannel)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Audio section does not expose a SoundVolume float channel; engine layout may have shifted"));
+    }
+
+    // Clear the channel's keys so a second call replaces the prior
+    // envelope rather than stacking new keys on top. `Reset` keeps
+    // the default value (1.0 on a fresh audio section) intact; the
+    // four keys we write below override it on the relevant frames.
+    int32 PreviousKeyCount = 0;
+    {
+        TMovieSceneChannelData<FMovieSceneFloatValue> ChannelData = VolumeChannel->GetData();
+        PreviousKeyCount = ChannelData.GetTimes().Num();
+        VolumeChannel->Reset();
+    }
+    VolumeChannel->SetDefault(1.0f);
+
+    AudioSection->TryModify();
+
+    int32 KeysWritten = 0;
+    if (FadeInFrames > 0)
+    {
+        VolumeChannel->AddLinearKey(StartFrame, 0.0f);
+        VolumeChannel->AddLinearKey(StartFrame + FFrameNumber(FadeInFrames), 1.0f);
+        KeysWritten += 2;
+    }
+    if (FadeOutFrames > 0)
+    {
+        VolumeChannel->AddLinearKey(EndFrame - FFrameNumber(FadeOutFrames), 1.0f);
+        VolumeChannel->AddLinearKey(EndFrame, 0.0f);
+        KeysWritten += 2;
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Sequence->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_audio_fade"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("track_class"), AudioTrack->GetClass()->GetName());
+    Result->SetStringField(TEXT("track_name"), AudioTrack->GetFName().ToString());
+    Result->SetNumberField(TEXT("section_index"), SectionIndex);
+    Result->SetStringField(TEXT("section_class"), AudioSection->GetClass()->GetName());
+    Result->SetNumberField(TEXT("start_frame"), StartFrame.Value);
+    Result->SetNumberField(TEXT("end_frame"), EndFrame.Value);
+    Result->SetNumberField(TEXT("range_frames"), RangeFrames);
+    Result->SetNumberField(TEXT("fade_in_seconds"), FadeInSeconds);
+    Result->SetNumberField(TEXT("fade_out_seconds"), FadeOutSeconds);
+    Result->SetNumberField(TEXT("fade_in_frames"), FadeInFrames);
+    Result->SetNumberField(TEXT("fade_out_frames"), FadeOutFrames);
+    Result->SetNumberField(TEXT("keys_written"), KeysWritten);
+    Result->SetNumberField(TEXT("previous_key_count"), PreviousKeyCount);
+    Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }

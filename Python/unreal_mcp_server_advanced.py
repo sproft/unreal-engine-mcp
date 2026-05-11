@@ -7120,6 +7120,8 @@ def sequencer_edit(
     mask: Optional[int] = None,
     end_frame: Optional[int] = None,
     visible: Optional[bool] = None,
+    fade_in_seconds: Optional[float] = None,
+    fade_out_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over a ULevelSequence asset.
@@ -7199,6 +7201,24 @@ def sequencer_edit(
           ``[start_frame, start_frame + duration_frames)``) with the
           bool channel default set to ``visible`` (default True).
           Pass ``force_new_track=True`` to bypass the reuse path.
+        - ``add_audio_fade``: writes a fade-in / fade-out volume
+          ramp on an existing ``UMovieSceneAudioSection`` by writing
+          a 4-key envelope through the section's
+          ``SoundVolume`` ``FMovieSceneFloatChannel`` (channel
+          index 0 on the audio section's channel proxy across
+          5.4+ engine versions). The fade keys land as
+          ``[start, 0.0] -> [start + fade_in, 1.0] -> [end -
+          fade_out, 1.0] -> [end, 0.0]`` (interior bounds linear);
+          a zero fade duration drops the matching pair so a single
+          ramp is one call. The op clears the channel's prior keys
+          first so a second call replaces the prior envelope rather
+          than stacking. Resolves the audio track on master scope
+          by default; pass ``binding`` GUID or ``actor`` /
+          ``possessable`` to target a binding-scoped audio track.
+          ``section_index`` (default 0) picks the section row.
+          ``fade_in_seconds`` and ``fade_out_seconds`` are floats
+          (caps at half the section duration so the two fades
+          cannot cross over). Saves on success unless ``save=False``.
 
     Args:
         sequence: For inspect / add_possessable / add_track /
@@ -7305,6 +7325,10 @@ def sequencer_edit(
         params["end_frame"] = end_frame
     if visible is not None:
         params["visible"] = visible
+    if fade_in_seconds is not None:
+        params["fade_in_seconds"] = fade_in_seconds
+    if fade_out_seconds is not None:
+        params["fade_out_seconds"] = fade_out_seconds
 
     try:
         response = unreal.send_command("sequencer_edit", params)
