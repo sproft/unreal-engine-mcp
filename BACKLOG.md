@@ -9,6 +9,54 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped four deepening additions across
+existing tools: `animation_edit` gains `replace_blendspace_sample`
+plus `delete_blendspace_sample` (per-sample-slot edits paired off
+the existing `add_blendspace_sample` op; `replace` routes through
+`UBlendSpace::ReplaceSampleAnimation(SampleIndex, AnimSequence)`
+with skeleton + additive-type checks against the new sequence and
+an optional `clear=true` path that unbinds the sample; `delete`
+routes through `UBlendSpace::DeleteSample(SampleIndex)` with a
+bounds-checked `IsValidBlendSampleIndex` probe), `sequencer_edit`
+gains `set_transform_channel_mask` (declarative one-call writer
+that lands an `FMovieSceneTransformMask` on a binding's
+UMovieScene3DTransformSection through the documented
+`UMovieScene3DTransformSection::SetMask`; resolves the same
+`binding` GUID / `actor` / `possessable` triple
+`add_transform_section_keys` uses, indexes into the track's
+`GetAllSections()` at an optional `section_index` (default 0),
+accepts either a raw integer `mask` or a flat `channels` list of
+channel tokens (`translation_x` / `rotation` / `scale_z` /
+`all_transform` / `weight` / `all` / `none`, case-insensitive)
+and surfaces the previous + new mask both as a raw bitfield and
+as a tokenised channel list in the response), `material_edit`
+gains `add_texture_sample_cube` (cube-texture sibling of
+`add_texture_sample`; spawns a
+`UMaterialExpressionTextureSampleParameterCube` and binds the
+new node's `Texture` property to a chosen UTextureCube asset
+in one call, with an auto-fallback to
+`UMaterialExpressionTextureSample` when the resolved asset is a
+UTexture2D so a generic "wire this texture up" call still
+lands; supports the same `coordinates` / `connect_to` /
+`connect_input` / `property` / `name` / `properties`
+downstream knobs), and `pie_test_scene` gains three editor-world
+assertion kinds (`actor_has_class`: target actor name + expected
+class path; pass when the actor's class matches the expected
+class or a subclass; `actor_tag_count`: target actor name +
+expected integer; pass when `Tags.Num()` equals the expected
+count; `level_actor_count`: target class path + expected
+integer; pass when `TActorIterator<AActor>(World, TargetClass)`
+counts exactly the expected number, mirroring
+`UGameplayStatics::GetAllActorsOfClass`'s subclass-inclusive
+walk). The class-token resolver shared by `actor_has_class` and
+`level_actor_count` accepts a full `/Script/Module.ClassName`
+path, a `/Game/...` Blueprint class path auto-suffixed with
+`_C`, or a bare short class name probed with A / U prefix
+variants plus a `/Script/Engine.*` fallback. All four
+deepenings keep the rest of each tool's surface intact; the
+pair on `animation_edit` closes the per-sample-slot edit row
+that the previous add-only cut left on the BACKLOG.
+
+The pass before that shipped four deepening additions across
 existing tools: `animation_edit` gains `add_blendspace_sample`
 (UBlendSpace::AddSample wrapper that handles the skeleton +
 additive-type + range-validity guards up front), `sequencer_edit`
@@ -2360,6 +2408,37 @@ ability" alongside `tag_registry_edit`.
   trigger through `FProperty::ImportText_InContainer` for any
   additional fields a future UE version drops on the
   UInputTriggerChordAction surface beyond `ChordAction`.
+- `material_edit add_texture_sample_cube` (small) — cube-texture
+  sibling of `add_texture_sample`. Spawns a
+  `UMaterialExpressionTextureSampleParameterCube` and binds the new
+  node's `Texture` property to a chosen `UTextureCube` asset in one
+  call. The cube-parameter variant carries a `ParameterName` slot the
+  caller can populate through the same `name` / `properties` knobs
+  `add_expression` exposes. When the resolved asset is a `UTexture2D`
+  (or anything other than a UTextureCube) the op falls back to
+  spawning a `UMaterialExpressionTextureSample` so a generic "wire
+  this texture up" call still lands; the response surfaces
+  `is_cube_texture` and `fell_back_to_2d` flags. The shared base
+  class `UMaterialExpressionTextureBase` carries the `Texture`
+  UPROPERTY and the documented `AutoSetSampleType()` (ENGINE_API on
+  `MaterialExpressionTextureBase.h` line 63) the editor's right-click
+  "Refresh Sampler Type" entry uses, so the same writer path applies
+  to both branches without spelling out the per-class case. All the
+  downstream knobs `add_texture_sample` exposes apply (`coordinates`
+  / `coordinates_output` wires the UV / 3-vector input from a named
+  expression; `connect_to` / `connect_input` / `property` lands the
+  RGB output on another expression or a material attribute; `name`
+  renames the spawned expression; `properties` lands the
+  `ParameterName` / `Group` / `SortPriority` UPROPERTYs through
+  `FProperty::ImportText_InContainer`). Position cascades through
+  the same `DeriveDefaultPosition` helper. Recompiles + saves on
+  success unless `recompile=false` / `save=false`. With this op
+  landing the `add_texture_sample` BACKLOG row that read "non-2D
+  texture-sample variants stay on the open backlog" narrows to the
+  `TextureSampleParameterVolume` / `TextureSampleParameterSubUV` /
+  `TextureSampleParameter2DArray` / `TextureSampleParameterCubeArray`
+  variants, which the existing `add_expression` short-name table
+  can still cover through the bare class-name fallback.
 - `material_edit add_texture_sample` (small) — adds a
   `UMaterialExpressionTextureSample` to a target UMaterial and binds
   the new node's `Texture` property to a chosen UTexture asset in one
@@ -2388,6 +2467,31 @@ ability" alongside `tag_registry_edit`.
   / `save=false`. The non-2D texture-sample variants
   (TextureSampleParameterCube, TextureSampleParameterVolume) stay
   on the open backlog under the existing `add_expression` shape.
+- `sequencer_edit set_transform_channel_mask` (small) — declarative
+  one-call writer for the per-section `FMovieSceneTransformMask`.
+  Resolves the target binding + transform track + section the same
+  way `add_transform_section_keys` does (`binding` GUID or
+  `actor` / `possessable` name; `section_index` defaults to 0 into
+  the track's `GetAllSections()` array). The mask is supplied either
+  as a flat `channels` list of `EMovieSceneTransformChannel` token
+  names (`translation_x` / `rotation_y` / `scale_z` / `translation`
+  / `rotation` / `scale` / `all_transform` / `weight` / `all` /
+  `none`, case-insensitive with snake / camel and `_` / `.`
+  normalisation so callers can spell either way) or a raw integer
+  `mask` matching the EMovieSceneTransformChannel bit layout
+  (TranslationX = 0x001 ... ScaleZ = 0x100 plus Weight = 0x200).
+  Routes through the documented MOVIESCENETRACKS_API
+  `UMovieScene3DTransformSection::SetMask` (which clears
+  `ChannelProxy` so the proxy regenerates on the next inspect; the
+  editor's channel list refreshes accordingly). Marks the section +
+  sequence packages dirty and saves on success unless `save=false`.
+  The response carries the previous + new mask both as a raw
+  bitfield (`previous_mask`, `mask`) and as a tokenised channel
+  list (`previous_channels`, `channels`) so the caller can audit the
+  diff. With this op landing the
+  `sequencer_edit add_transform_section_keys` per-section channel
+  authoring row on the open BACKLOG narrows to the per-row weight /
+  constraint channel writes.
 - `sequencer_edit add_transform_section_keys` (small) — declarative
   one-call writer for per-channel transform keys on a binding's
   `UMovieScene3DTransformTrack`. Resolves the target binding through
@@ -2409,6 +2513,30 @@ ability" alongside `tag_registry_edit`.
   `constant`. Saves on success unless `save=false`. The per-mask
   EMovieSceneTransformChannel toggle and the weight / constraint
   channel writes stay on this list.
+- `animation_edit replace_blendspace_sample` (small) — swaps the
+  UAnimSequence on an existing sample at `sample_index` through the
+  documented public editor surface
+  `UBlendSpace::ReplaceSampleAnimation(SampleIndex, AnimSequence)`
+  (`ENGINE_API` gated under `WITH_EDITOR`). Bounds-checked through
+  `IsValidBlendSampleIndex` so the response surfaces a clear "out of
+  range" message rather than a silent false return; an empty / `none`
+  animation string or explicit `clear=true` unbinds the sample's
+  sequence (mirrors the editor's "Clear" picker). The replacement
+  sequence's skeleton goes through the same
+  `IsAnimationCompatibleWithSkeleton` / `IsAnimationCompatible` chain
+  `add_blendspace_sample` already runs so the asset never lands in a
+  state the engine refuses to play. Marks the package dirty + saves
+  on success unless `save=false`. With this op landing the `add_sample`
+  -> `replace_sample` -> `edit_value` triplet on the BACKLOG narrows
+  to the per-sample value edit (`UBlendSpace::EditSampleValue`).
+- `animation_edit delete_blendspace_sample` (small) — removes the
+  sample at `sample_index` through the documented public editor
+  surface `UBlendSpace::DeleteSample(SampleIndex)`. Bounds-checked
+  through `IsValidBlendSampleIndex`. The response carries the
+  removed sample's animation path + sample value so the caller can
+  reapply through `add_blendspace_sample` if they only meant to nudge
+  the sample's axis position. Marks the package dirty + saves on
+  success unless `save=false`.
 - `animation_edit add_blendspace_sample` (small) — appends a sample
   to a UBlendSpace or UBlendSpace1D through the documented public
   editor surface `UBlendSpace::AddSample(UAnimSequence*, FVector)`
@@ -2985,17 +3113,26 @@ helpers.
   variant that runs the function on the CDO directly when the
   function is marked pure with no side effects.
 - `pie_test_scene` (small variant ships in this fork) — scene-state
-  assertion harness with four assertion kinds that all answer
+  assertion harness with seven assertion kinds that all answer
   statically against the editor world: `actor_exists` for actor-name
   presence, `actor_at_location` for distance-bounded location
   matches, `actor_overlapping_tag` for tag-list membership on
-  `AActor::Tags`, and `var_equals` for canonicalized UPROPERTY
+  `AActor::Tags`, `var_equals` for canonicalized UPROPERTY
   value matches through `FProperty::ImportText` /
-  `ExportText_Direct`. Open follow-ons: per-assertion timeout for
-  kinds that need a running PIE world, an over-PIE harness option
-  for callers who want the same surface but inside a running PIE
-  world, and a `component_var_equals` kind that walks one level
-  deeper to a named UActorComponent's UPROPERTY.
+  `ExportText_Direct`, `actor_has_class` for actor-class /
+  subclass identity, `actor_tag_count` for exact `Tags.Num()`
+  matches, and `level_actor_count` for `GetAllActorsOfClass`-style
+  per-class population counts (subclass-inclusive through the
+  typed `TActorIterator<AActor>` overload). The class-token
+  resolver shared by `actor_has_class` and `level_actor_count`
+  accepts a full `/Script/Module.ClassName` path, a `/Game/...`
+  Blueprint class path auto-suffixed with `_C`, or a bare short
+  class name probed with A / U prefix variants plus a
+  `/Script/Engine.*` fallback. Open follow-ons: per-assertion
+  timeout for kinds that need a running PIE world, an over-PIE
+  harness option for callers who want the same surface but inside
+  a running PIE world, and a `component_var_equals` kind that
+  walks one level deeper to a named UActorComponent's UPROPERTY.
 
 ## Execution (large each)
 
