@@ -300,8 +300,13 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleCommand(const FStrin
     {
         return HandleSetCurveCompression(Params);
     }
+    if (Op == TEXT("set_loop_flags") || Op == TEXT("set_loop") || Op == TEXT("set_looping")
+        || Op == TEXT("set_loop_settings"))
+    {
+        return HandleSetLoopFlags(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion', 'set_compression_scheme', 'set_curve_compression'"), *Op));
+        FString::Printf(TEXT("Unsupported animation_edit op '%s'; expected one of 'set_rate_scale', 'set_additive', 'add_notify', 'add_notify_state', 'add_curve', 'add_metadata_curve', 'add_sync_marker', 'add_blendspace_sample', 'replace_blendspace_sample', 'delete_blendspace_sample', 'set_root_motion', 'set_compression_scheme', 'set_curve_compression', 'set_loop_flags'"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetRateScale(const TSharedPtr<FJsonObject>& Params)
@@ -2378,6 +2383,232 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetCurveCompression(
         Result->SetStringField(TEXT("previous_settings_path"), PreviousSettingsPath);
     }
     Result->SetBoolField(TEXT("requested_compile"), bRequestedCompile);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    return Result;
+}
+
+namespace
+{
+    /** Parse a JSON value that should resolve to a bool. Accepts the
+     *  native bool plus the canonical loose tokens callers reach for
+     *  when wiring this op through Python. Returns true when the parse
+     *  resolved; OutValue is left untouched otherwise. */
+    bool LoopFlags_TryReadBool(const TSharedPtr<FJsonValue>& Value, bool& OutValue, FString& OutErr)
+    {
+        if (!Value.IsValid())
+        {
+            return false;
+        }
+        if (Value->Type == EJson::Boolean)
+        {
+            OutValue = Value->AsBool();
+            return true;
+        }
+        if (Value->Type == EJson::Number)
+        {
+            OutValue = (Value->AsNumber() != 0.0);
+            return true;
+        }
+        if (Value->Type == EJson::String)
+        {
+            const FString SLower = Value->AsString().ToLower();
+            if (SLower == TEXT("true") || SLower == TEXT("1") || SLower == TEXT("on")
+                || SLower == TEXT("yes") || SLower == TEXT("enable"))
+            {
+                OutValue = true;
+                return true;
+            }
+            if (SLower == TEXT("false") || SLower == TEXT("0") || SLower == TEXT("off")
+                || SLower == TEXT("no") || SLower == TEXT("disable"))
+            {
+                OutValue = false;
+                return true;
+            }
+            OutErr = FString::Printf(TEXT("unrecognised bool string '%s'"), *Value->AsString());
+            return false;
+        }
+        OutErr = TEXT("value must be a bool, number, or string");
+        return false;
+    }
+
+    /** Pull any of a set of aliased field names off the params dict and
+     *  parse them as a bool. Returns true if any alias was set; false
+     *  if none was provided. On parse failure raises OutErr.
+     */
+    bool LoopFlags_ReadAliasedBool(const TSharedPtr<FJsonObject>& Params,
+        const TArray<FString>& Aliases, bool& OutValue, FString& OutErr)
+    {
+        for (const FString& Key : Aliases)
+        {
+            const TSharedPtr<FJsonValue> Val = Params->TryGetField(Key);
+            if (Val.IsValid())
+            {
+                if (!LoopFlags_TryReadBool(Val, OutValue, OutErr))
+                {
+                    return false;
+                }
+                return true;
+            }
+        }
+        OutErr.Reset();
+        return false;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetLoopFlags(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writes the three loop knobs on UAnimSequence:
+    //   - bLoop (required)
+    //   - bLoopingInterpolation (optional)
+    //   - bEnableRootMotionOnAllowed (optional)
+    // All three resolve through reflection so the op stays compatible
+    // with the property visibility tightening UE has done since 5.0.
+    FString AssetParam;
+    if (!Params->TryGetStringField(TEXT("asset"), AssetParam) || AssetParam.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("set_loop_flags: missing 'asset'"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetParam);
+    UAnimSequence* Seq = Cast<UAnimSequence>(Asset);
+    if (!Seq)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_loop_flags: '%s' is not a UAnimSequence (the three loop knobs do not live on UAnimSequenceBase shared with UAnimMontage)"), *AssetParam));
+    }
+
+    UClass* AssetClass = Seq->GetClass();
+
+    // Required: bLoop. The op refuses if absent so the caller is forced
+    // to declare the loop intent rather than picking up whatever the
+    // sequence was previously set to.
+    bool bNewLoop = false;
+    FString LoopErr;
+    const bool bLoopProvided = LoopFlags_ReadAliasedBool(Params,
+        {
+            TEXT("loop"), TEXT("b_loop"), TEXT("bLoop"),
+            TEXT("looping"), TEXT("is_looping")
+        }, bNewLoop, LoopErr);
+    if (!LoopErr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_loop_flags: 'loop' %s"), *LoopErr));
+    }
+    if (!bLoopProvided)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_loop_flags: missing 'loop' boolean (required)"));
+    }
+
+    // Optional: bLoopingInterpolation.
+    bool bNewLoopingInterp = false;
+    FString LoopInterpErr;
+    const bool bLoopingInterpProvided = LoopFlags_ReadAliasedBool(Params,
+        {
+            TEXT("looping_interpolation"), TEXT("loop_interpolation"),
+            TEXT("b_looping_interpolation"), TEXT("bLoopingInterpolation")
+        }, bNewLoopingInterp, LoopInterpErr);
+    if (!LoopInterpErr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_loop_flags: 'looping_interpolation' %s"), *LoopInterpErr));
+    }
+
+    // Optional: bEnableRootMotionOnAllowed.
+    bool bNewRMAllowed = false;
+    FString RMAllowedErr;
+    const bool bRMAllowedProvided = LoopFlags_ReadAliasedBool(Params,
+        {
+            TEXT("enable_root_motion_on_allowed"),
+            TEXT("b_enable_root_motion_on_allowed"),
+            TEXT("bEnableRootMotionOnAllowed"),
+            TEXT("root_motion_on_allowed")
+        }, bNewRMAllowed, RMAllowedErr);
+    if (!RMAllowedErr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_loop_flags: 'enable_root_motion_on_allowed' %s"), *RMAllowedErr));
+    }
+
+    auto ApplyBoolField = [&](const FName& FieldName, bool bNewValue, bool& bOutPrev, bool& bOutWrote) -> FString
+    {
+        bOutWrote = false;
+        FBoolProperty* BoolProp = CastField<FBoolProperty>(AssetClass->FindPropertyByName(FieldName));
+        if (!BoolProp)
+        {
+            return FString::Printf(TEXT("UAnimSequence has no FBoolProperty named '%s'"), *FieldName.ToString());
+        }
+        void* Container = static_cast<void*>(Seq);
+        bOutPrev = BoolProp->GetPropertyValue_InContainer(Container);
+        BoolProp->SetPropertyValue_InContainer(Container, bNewValue);
+        bOutWrote = true;
+        return FString();
+    };
+
+    bool bPrevLoop = false;
+    bool bWroteLoop = false;
+    {
+        const FString Err = ApplyBoolField(TEXT("bLoop"), bNewLoop, bPrevLoop, bWroteLoop);
+        if (!Err.IsEmpty())
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_loop_flags: %s"), *Err));
+        }
+    }
+
+    bool bPrevLoopingInterp = false;
+    bool bWroteLoopingInterp = false;
+    if (bLoopingInterpProvided)
+    {
+        const FString Err = ApplyBoolField(TEXT("bLoopingInterpolation"),
+            bNewLoopingInterp, bPrevLoopingInterp, bWroteLoopingInterp);
+        if (!Err.IsEmpty())
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_loop_flags: %s"), *Err));
+        }
+    }
+
+    bool bPrevRMAllowed = false;
+    bool bWroteRMAllowed = false;
+    if (bRMAllowedProvided)
+    {
+        const FString Err = ApplyBoolField(TEXT("bEnableRootMotionOnAllowed"),
+            bNewRMAllowed, bPrevRMAllowed, bWroteRMAllowed);
+        if (!Err.IsEmpty())
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_loop_flags: %s"), *Err));
+        }
+    }
+
+#if WITH_EDITOR
+    Seq->PostEditChange();
+#endif
+    Seq->MarkPackageDirty();
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = UEditorAssetLibrary::SaveAsset(Seq->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("op"), TEXT("set_loop_flags"));
+    Result->SetStringField(TEXT("asset"), AssetParam);
+    Result->SetStringField(TEXT("path"), Seq->GetPathName());
+    Result->SetStringField(TEXT("class"), Seq->GetClass()->GetName());
+    Result->SetBoolField(TEXT("loop"), bNewLoop);
+    Result->SetBoolField(TEXT("previous_loop"), bPrevLoop);
+    Result->SetBoolField(TEXT("loop_written"), bWroteLoop);
+    Result->SetBoolField(TEXT("looping_interpolation"), bWroteLoopingInterp ? bNewLoopingInterp : bPrevLoopingInterp);
+    Result->SetBoolField(TEXT("previous_looping_interpolation"), bPrevLoopingInterp);
+    Result->SetBoolField(TEXT("looping_interpolation_provided"), bLoopingInterpProvided);
+    Result->SetBoolField(TEXT("enable_root_motion_on_allowed"), bWroteRMAllowed ? bNewRMAllowed : bPrevRMAllowed);
+    Result->SetBoolField(TEXT("previous_enable_root_motion_on_allowed"), bPrevRMAllowed);
+    Result->SetBoolField(TEXT("enable_root_motion_on_allowed_provided"), bRMAllowedProvided);
     Result->SetBoolField(TEXT("saved"), bSaved);
     return Result;
 }

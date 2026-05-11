@@ -7952,6 +7952,9 @@ def animation_edit(
     request_compile: Optional[bool] = None,
     curve_compression_codec: Optional[str] = None,
     curve_compression_settings: Optional[str] = None,
+    loop: Optional[bool] = None,
+    looping_interpolation: Optional[bool] = None,
+    enable_root_motion_on_allowed: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Targeted UAnimSequence / UAnimMontage edits (small variant).
@@ -8095,6 +8098,19 @@ def animation_edit(
           ``recompile``) triggers
           ``UAnimSequence::RequestAnimCompression`` so the saved
           asset reflects the new curve codec.
+        - ``set_loop_flags``: writes the loop knobs on a
+          UAnimSequence. The required ``loop`` (alias ``b_loop``)
+          toggles ``bLoop`` (the per-asset loop flag). Optional
+          ``looping_interpolation`` writes ``bLoopingInterpolation``
+          (controls the additive looping interpolation). Optional
+          ``enable_root_motion_on_allowed`` writes
+          ``bEnableRootMotionOnAllowed`` (the gate that lets the
+          AnimGraph decide whether root motion fires on loop).
+          All three writes go through reflection so the op stays
+          compatible with the visibility tightening UE has done
+          across recent versions. Distinct from ``set_root_motion``
+          which writes the root-motion knobs proper. Refuses
+          non-UAnimSequence assets.
 
     Args:
         op: One of ``set_rate_scale`` / ``set_additive`` /
@@ -8225,6 +8241,12 @@ def animation_edit(
         params["curve_compression_codec"] = curve_compression_codec
     if curve_compression_settings is not None:
         params["curve_compression_settings"] = curve_compression_settings
+    if loop is not None:
+        params["loop"] = loop
+    if looping_interpolation is not None:
+        params["looping_interpolation"] = looping_interpolation
+    if enable_root_motion_on_allowed is not None:
+        params["enable_root_motion_on_allowed"] = enable_root_motion_on_allowed
 
     try:
         response = unreal.send_command("animation_edit", params)

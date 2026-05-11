@@ -112,6 +112,30 @@
  *     saved asset reflects the new scheme; without it the engine
  *     resamples lazily through the derived data cache. Saves the
  *     sequence on success unless `save=false`.
+ *   - `set_loop_flags`: writes the loop knobs on a UAnimSequence.
+ *     The required `loop` (alias `b_loop`) toggles `bLoop` (the
+ *     per-asset loop flag the engine consults when the AnimGraph
+ *     does not override the play mode). Optional
+ *     `looping_interpolation` (alias `b_looping_interpolation`)
+ *     writes `bLoopingInterpolation` which controls whether the
+ *     additive interpolation blends from the last frame back to
+ *     the first when the sequence loops; we leave the field alone
+ *     when not provided. Optional
+ *     `enable_root_motion_on_allowed` (alias
+ *     `b_enable_root_motion_on_allowed`) writes
+ *     `bEnableRootMotionOnAllowed`, the gate that lets the
+ *     AnimGraph decide whether root motion fires when the
+ *     sequence loops. All three writes go through reflection
+ *     (FindPropertyByName + FBoolProperty::SetPropertyValue_InContainer)
+ *     so the op stays compatible with the visibility tightening
+ *     UE has done across recent versions. Distinct from
+ *     `set_root_motion` which writes the root-motion knobs
+ *     proper (bEnableRootMotion, RootMotionRootLock,
+ *     bForceRootLock, bUseNormalizedRootMotionScale). The op
+ *     refuses non-UAnimSequence assets since the three loop
+ *     knobs are not on the UAnimSequenceBase shared with
+ *     UAnimMontage. Returns the previous + new value for each
+ *     flag plus a per-field `provided` boolean.
  *   - `set_curve_compression`: writes the per-sequence curve
  *     compression slot. Complement to `set_compression_scheme`
  *     which covers the bone-track side. UE5 routes float-curve
@@ -222,4 +246,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddNotifyState(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetCompressionScheme(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetCurveCompression(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetLoopFlags(const TSharedPtr<FJsonObject>& Params);
 };
