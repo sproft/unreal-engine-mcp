@@ -9,6 +9,63 @@ All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
 The most recent pass shipped three deepening edit slices that
+close the per-direction MVVM conversion gap on `widget_edit`, the
+per-execution scoped-modifier gap on `gas_edit`, and the
+conditional-effect-row gap on `gas_edit`. `widget_edit` gains
+`set_binding_conversion`: rewrites the per-direction
+conversion-function slot on an existing
+`FMVVMBlueprintViewBinding`. Resolves the target binding by
+`binding_id` FGuid string (the return shape of
+`add_property_binding`) or by `binding_index` int into the
+BlueprintView's Bindings array; picks the source-to-destination
+or destination-to-source slot through the `direction` token; either
+clears the slot (`conversion_function` empty / `none` / explicit
+`clear=true`) or NewObject's a fresh
+`UMVVMBlueprintViewConversionFunction` outered to the WBP and runs
+`Initialize(WBP, CreateWrapperName(Binding, bSourceToDestination),
+FMVVMBlueprintFunctionReference(WBP, UFunction*))` against the
+resolved conversion UFunction. The conversion-function token
+resolves through `/Script/Module.Class:Function` or
+`/Game/.../BP_C:Function` (the dot-separated
+`/Script/Module.Class.Function` form is also accepted). Replacing
+an existing conversion calls `RemoveWrapperGraph` first so the
+prior wrapper graph garbage collects. Mirrors the canonical
+`UMVVMEditorSubsystem::SetSourceToDestinationConversionFunction` /
+`SetDestinationToSourceConversionFunction` hot path; the
+K2Node-class branch (async conversion nodes) stays out of scope
+for this slice. With this op landing the `widget_edit` MVVM
+surface narrows to bindings against fields beyond UFunction
+conversions plus the wrapper-graph pin-default authoring side.
+`gas_edit` gains `add_calculation_modifier`: appends an
+`FGameplayEffectExecutionScopedModifierInfo` to the chosen
+execution's `CalculationModifiers` array on a UGameplayEffect.
+`execution_index` picks the row into the GE's `Executions` list
+(run `add_execution` first). The captured attribute resolves
+through the same `attribute` colon-form / `attribute_set` +
+`attribute_name` pair resolver `add_modifier` uses; `source`
+(`Source` / `Target`, default Source) + `snapshot` (default false)
+build the `FGameplayEffectAttributeCaptureDefinition` through its
+public attribute-backed constructor so `AggregatorType` lands on
+`CapturedAttributeBacked`. Optional `modifier_op` (default
+Additive) lands on `ModifierOp`; optional `magnitude` literal
+float wraps into the scalable-float variant of
+`FGameplayEffectModifierMagnitude` so the scoped modifier carries
+a baseline magnitude. Recompiles + saves on success.
+`gas_edit` also gains `add_conditional_effect`: appends an
+`FConditionalGameplayEffect` to a parent UGameplayEffect's
+`ConditionalGameplayEffects` array. The child effect resolves
+through `effect_class` (UGameplayEffect-derived class path,
+`/Script/Module.ClassName` or `/Game/.../BP` auto-suffixed with
+`_C`) via the existing `ResolveClassByToken` helper; optional
+`required_source_tags` lands on `RequiredSourceTags` through
+`UGameplayTagsManager::RequestGameplayTag` with
+`bErrorIfNotFound=false` so unknown tags surface a warning and
+skip. Recompiles + saves on success. With this pair landing the
+`gas_edit` BACKLOG row that called out `CalculationModifiers` and
+`ConditionalGameplayEffects` per-row authoring as the follow-on
+gap closes.
+
+The pass before that shipped three deepening edit slices that
 close the per-attribute Material Instance override gap, the
 system-side Niagara exposed-parameter gap, and the GameplayEffect
 executions-array gap. `material_edit` gains
