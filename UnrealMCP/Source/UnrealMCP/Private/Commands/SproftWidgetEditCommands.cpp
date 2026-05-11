@@ -395,9 +395,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetUniformGridSlot(Params);
     }
+    if (Operation == TEXT("set_wrap_box_slot") || Operation == TEXT("wrap_box_slot")
+        || Operation == TEXT("set_wrapbox_slot") || Operation == TEXT("wrapbox_slot"))
+    {
+        return SetWrapBoxSlot(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation, set_canvas_slot, set_overlay_slot, set_box_slot, set_grid_slot, set_uniform_grid_slot"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation, set_canvas_slot, set_overlay_slot, set_box_slot, set_grid_slot, set_uniform_grid_slot, set_wrap_box_slot"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -5384,6 +5389,253 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetUniformGridSlot(const TSha
 
     ResultObj->SetNumberField(TEXT("previous_row"), PrevRow);
     ResultObj->SetNumberField(TEXT("previous_column"), PrevColumn);
+    ResultObj->SetStringField(TEXT("previous_horizontal_alignment"), HAlignToToken(PrevHAlign));
+    ResultObj->SetStringField(TEXT("previous_vertical_alignment"), VAlignToToken(PrevVAlign));
+
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWrapBoxSlot(const TSharedPtr<FJsonObject>& Params)
+{
+    // Sugar over set_slot_property for the UWrapBoxSlot surface. The
+    // wrap box stacks children along a primary axis and breaks the
+    // stack onto the next row / column when the total measured
+    // children exceed the panel size. Each entry's slot carries the
+    // familiar HorizontalAlignment / VerticalAlignment / Padding
+    // triple plus two wrap-box specific knobs: bFillEmptySpace (drives
+    // the "fill leftover space along the wrap axis" behaviour) and
+    // FillSpan (the per-slot weight the wrap box reads when
+    // balancing remaining space). The engine surfaces canonical
+    // setters on UWrapBoxSlot for each field (`SetPadding` /
+    // `SetFillEmptySpace` / `SetFillSpan` / `SetHorizontalAlignment` /
+    // `SetVerticalAlignment`); routing through those tickles the
+    // parent UWrapBox's cached slate widget so an open UMG editor
+    // refreshes on the next tick.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_wrap_box_slot: missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_wrap_box_slot: asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+    if (!WBP->WidgetTree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_wrap_box_slot: WidgetBlueprint has no WidgetTree"));
+    }
+
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_wrap_box_slot: missing 'widget' parameter (target child widget FName)"));
+    }
+    UWidget* TargetWidget = WBP->WidgetTree->FindWidget(FName(*WidgetNameStr));
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_wrap_box_slot: could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    UWrapBoxSlot* Slot = Cast<UWrapBoxSlot>(TargetWidget->Slot);
+    if (!Slot)
+    {
+        // The slot class is decided by the parent panel when the child
+        // attaches. If the parent is not a UWrapBox, the slot class is
+        // something else (UHorizontalBoxSlot / UCanvasPanelSlot / etc.)
+        // and the wrap-box-only knobs do not apply.
+        UClass* SlotClass = TargetWidget->Slot ? TargetWidget->Slot->GetClass() : nullptr;
+        const FString SlotClassName = SlotClass ? SlotClass->GetName() : FString(TEXT("<null>"));
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_wrap_box_slot: widget '%s' is not parented to a UWrapBox (slot class is '%s'). Reparent the child to a wrap box or use 'set_slot_property' for non-wrap slots."),
+                *WidgetNameStr, *SlotClassName));
+    }
+
+    // Capture the previous values for the diff payload.
+    const FMargin PrevPadding = Slot->GetPadding();
+    const bool PrevFillEmptySpace = Slot->DoesFillEmptySpace();
+    const float PrevFillSpan = Slot->GetFillSpan();
+    const EHorizontalAlignment PrevHAlign = Slot->GetHorizontalAlignment();
+    const EVerticalAlignment PrevVAlign = Slot->GetVerticalAlignment();
+
+    FMargin NewPadding = PrevPadding;
+    bool NewFillEmptySpace = PrevFillEmptySpace;
+    float NewFillSpan = PrevFillSpan;
+    EHorizontalAlignment NewHAlign = PrevHAlign;
+    EVerticalAlignment NewVAlign = PrevVAlign;
+
+    TArray<FString> Applied;
+
+    bool bWrotePadding = false;
+    {
+        const TSharedPtr<FJsonValue> Val = Params->TryGetField(TEXT("padding"));
+        if (Val.IsValid())
+        {
+            if (!CanvasSlot_ParseMargin(Val, NewPadding))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_wrap_box_slot: 'padding' must be [left, top, right, bottom] or {left, top, right, bottom}"));
+            }
+            bWrotePadding = true;
+            Applied.Add(TEXT("padding"));
+        }
+    }
+
+    bool bWroteFillEmptySpace = false;
+    {
+        bool BoolVal = false;
+        if (Params->TryGetBoolField(TEXT("fill_empty_space"), BoolVal)
+            || Params->TryGetBoolField(TEXT("fillempty_space"), BoolVal)
+            || Params->TryGetBoolField(TEXT("fill"), BoolVal)
+            || Params->TryGetBoolField(TEXT("bFillEmptySpace"), BoolVal))
+        {
+            NewFillEmptySpace = BoolVal;
+            bWroteFillEmptySpace = true;
+            Applied.Add(TEXT("fill_empty_space"));
+        }
+    }
+
+    bool bWroteFillSpan = false;
+    {
+        double FillSpanVal = 0.0;
+        if (Params->TryGetNumberField(TEXT("fill_span"), FillSpanVal)
+            || Params->TryGetNumberField(TEXT("fillspan"), FillSpanVal)
+            || Params->TryGetNumberField(TEXT("FillSpan"), FillSpanVal)
+            || Params->TryGetNumberField(TEXT("span"), FillSpanVal))
+        {
+            NewFillSpan = static_cast<float>(FillSpanVal);
+            bWroteFillSpan = true;
+            Applied.Add(TEXT("fill_span"));
+        }
+    }
+
+    FString HAlignToken;
+    FString HAlignCanonical = HAlignToToken(PrevHAlign);
+    bool bWroteHAlign = false;
+    if (Params->TryGetStringField(TEXT("horizontal_alignment"), HAlignToken)
+        || Params->TryGetStringField(TEXT("h_align"), HAlignToken)
+        || Params->TryGetStringField(TEXT("halign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("hAlign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("HAlign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("horizontal"), HAlignToken))
+    {
+        if (!OverlaySlot_ParseHAlign(HAlignToken, NewHAlign, HAlignCanonical))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_wrap_box_slot: unknown horizontal_alignment '%s'. Supported: Fill, Left, Center, Right"), *HAlignToken));
+        }
+        bWroteHAlign = true;
+        Applied.Add(TEXT("horizontal_alignment"));
+    }
+
+    FString VAlignToken;
+    FString VAlignCanonical = VAlignToToken(PrevVAlign);
+    bool bWroteVAlign = false;
+    if (Params->TryGetStringField(TEXT("vertical_alignment"), VAlignToken)
+        || Params->TryGetStringField(TEXT("v_align"), VAlignToken)
+        || Params->TryGetStringField(TEXT("valign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("vAlign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("VAlign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("vertical"), VAlignToken))
+    {
+        if (!OverlaySlot_ParseVAlign(VAlignToken, NewVAlign, VAlignCanonical))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_wrap_box_slot: unknown vertical_alignment '%s'. Supported: Fill, Top, Center, Bottom"), *VAlignToken));
+        }
+        bWroteVAlign = true;
+        Applied.Add(TEXT("vertical_alignment"));
+    }
+
+    if (Applied.Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_wrap_box_slot: pass at least one of 'padding' / 'fill_empty_space' / 'fill_span' / 'horizontal_alignment' / 'vertical_alignment'"));
+    }
+
+    // Route writes through the slot's canonical setters so the engine's
+    // layout-invalidate path fires. Each setter calls Invalidate on the
+    // parent UWrapBox so an open UMG designer picks the change up.
+    Slot->Modify();
+    if (bWrotePadding)        { Slot->SetPadding(NewPadding); }
+    if (bWroteFillEmptySpace) { Slot->SetFillEmptySpace(NewFillEmptySpace); }
+    if (bWroteFillSpan)       { Slot->SetFillSpan(NewFillSpan); }
+    if (bWroteHAlign)         { Slot->SetHorizontalAlignment(NewHAlign); }
+    if (bWroteVAlign)         { Slot->SetVerticalAlignment(NewVAlign); }
+
+#if WITH_EDITOR
+    Slot->PostEditChange();
+    TargetWidget->PostEditChange();
+#endif
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+    bool bCompile = false;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (UPackage* Package = WBP->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    auto MarginToArray = [](const FMargin& M)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Left));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Top));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Right));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Bottom));
+        return Arr;
+    };
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    for (const FString& Name : Applied)
+    {
+        AppliedJson.Add(MakeShared<FJsonValueString>(Name));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_wrap_box_slot"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("widget"), WidgetNameStr);
+    ResultObj->SetStringField(TEXT("widget_class"), TargetWidget->GetClass()->GetPathName());
+    ResultObj->SetStringField(TEXT("slot_class"), UWrapBoxSlot::StaticClass()->GetName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetNumberField(TEXT("applied_count"), Applied.Num());
+
+    ResultObj->SetArrayField(TEXT("padding"), MarginToArray(Slot->GetPadding()));
+    ResultObj->SetBoolField(TEXT("fill_empty_space"), Slot->DoesFillEmptySpace());
+    ResultObj->SetNumberField(TEXT("fill_span"), Slot->GetFillSpan());
+    ResultObj->SetStringField(TEXT("horizontal_alignment"), HAlignToToken(Slot->GetHorizontalAlignment()));
+    ResultObj->SetStringField(TEXT("vertical_alignment"), VAlignToToken(Slot->GetVerticalAlignment()));
+
+    ResultObj->SetArrayField(TEXT("previous_padding"), MarginToArray(PrevPadding));
+    ResultObj->SetBoolField(TEXT("previous_fill_empty_space"), PrevFillEmptySpace);
+    ResultObj->SetNumberField(TEXT("previous_fill_span"), PrevFillSpan);
     ResultObj->SetStringField(TEXT("previous_horizontal_alignment"), HAlignToToken(PrevHAlign));
     ResultObj->SetStringField(TEXT("previous_vertical_alignment"), VAlignToToken(PrevVAlign));
 

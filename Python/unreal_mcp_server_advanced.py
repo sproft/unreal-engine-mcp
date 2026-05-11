@@ -3072,6 +3072,8 @@ def widget_edit(
     column: Optional[int] = None,
     row_span: Optional[int] = None,
     column_span: Optional[int] = None,
+    fill_empty_space: Optional[bool] = None,
+    fill_span: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3313,6 +3315,29 @@ def widget_edit(
           ``SetHorizontalAlignment`` /
           ``SetVerticalAlignment`` so the parent
           UUniformGridPanel's layout invalidates.
+        - "set_wrap_box_slot": single-call sugar over
+          ``set_slot_property`` for the UWrapBoxSlot
+          surface. ``widget`` is the FName of the target
+          child widget on the WBP's WidgetTree; the child's
+          slot must be a UWrapBoxSlot (the parent panel is
+          a UWrapBox). ``padding`` accepts ``[left, top,
+          right, bottom]`` / ``[horizontal, vertical]`` /
+          a uniform number / ``{Left, Top, Right, Bottom}``.
+          ``fill_empty_space`` (bool) drives the wrap-box's
+          "fill leftover space along the wrap axis"
+          behaviour. ``fill_span`` (float) sets the
+          per-slot weight the wrap box reads when balancing
+          remaining space. ``horizontal_alignment`` (alias
+          ``h_align`` / ``halign``) accepts ``Fill`` /
+          ``Left`` / ``Center`` / ``Right``;
+          ``vertical_alignment`` (alias ``v_align`` /
+          ``valign``) accepts ``Fill`` / ``Top`` /
+          ``Center`` / ``Bottom``. Routes through
+          ``UWrapBoxSlot::SetPadding`` /
+          ``SetFillEmptySpace`` / ``SetFillSpan`` /
+          ``SetHorizontalAlignment`` /
+          ``SetVerticalAlignment`` so the parent
+          UWrapBox's layout invalidates.
         - "set_box_slot": single-call sugar over
           ``set_slot_property`` for both UHorizontalBoxSlot and
           UVerticalBoxSlot surfaces. ``widget`` is the FName of
@@ -3535,6 +3560,10 @@ def widget_edit(
         params["row_span"] = row_span
     if column_span is not None:
         params["column_span"] = column_span
+    if fill_empty_space is not None:
+        params["fill_empty_space"] = fill_empty_space
+    if fill_span is not None:
+        params["fill_span"] = fill_span
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite

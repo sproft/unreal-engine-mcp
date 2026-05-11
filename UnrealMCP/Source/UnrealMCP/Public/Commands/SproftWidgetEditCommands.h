@@ -185,6 +185,23 @@
  *      `SetHorizontalAlignment` / `SetVerticalAlignment` setters so
  *      the parent UUniformGridPanel's cached slate widget
  *      invalidates.
+ *   - "set_wrap_box_slot": single-call sugar over
+ *      `set_slot_property` for the UWrapBoxSlot surface. Takes the
+ *      widget blueprint plus a target child widget FName plus any
+ *      of the wrap-box slot knobs: `padding` (the `[L, T, R, B]` /
+ *      `[H, V]` / uniform / object margin shape we use across the
+ *      slot ops), `fill_empty_space` (bool, drives the wrap-box's
+ *      "fill leftover space along the wrap axis" behaviour),
+ *      `fill_span` (float, the per-slot weight the wrap box reads
+ *      when balancing remaining space), and the
+ *      `horizontal_alignment` / `vertical_alignment` tokens (`Fill`
+ *      / `Left` / `Center` / `Right` and `Fill` / `Top` /
+ *      `Center` / `Bottom`). Refuses children whose parent is not
+ *      a UWrapBox. Routes through the concrete
+ *      `UWrapBoxSlot::SetPadding` / `SetFillEmptySpace` /
+ *      `SetFillSpan` / `SetHorizontalAlignment` /
+ *      `SetVerticalAlignment` setters so the parent UWrapBox's
+ *      cached slate widget invalidates.
  *   - "set_canvas_slot": single-call sugar over `set_slot_property`
  *      for the UCanvasPanelSlot surface. Takes the widget blueprint
  *      plus a target child widget FName plus any of the canonical
@@ -247,4 +264,5 @@ private:
     TSharedPtr<FJsonObject> SetBoxSlot(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetGridSlot(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetUniformGridSlot(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetWrapBoxSlot(const TSharedPtr<FJsonObject>& Params);
 };
