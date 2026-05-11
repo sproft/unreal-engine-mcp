@@ -624,6 +624,11 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleCommand(const FString
     {
         return HandleRenameBlackboardKey(Params);
     }
+    if (Op == TEXT("change_blackboard_key_type") || Op == TEXT("change_key_type")
+        || Op == TEXT("set_blackboard_key_type"))
+    {
+        return HandleChangeBlackboardKeyType(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("behavior_tree: unsupported op '%s'"), *Op));
 }
@@ -2534,6 +2539,303 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleRenameBlackboardKey(c
     Result->SetNumberField(TEXT("referencer_assets_updated"), UpdatedAssetsJson.Num());
     Result->SetNumberField(TEXT("selector_rewrites"), TotalSelectorRewrites);
     Result->SetArrayField(TEXT("updated_assets"), UpdatedAssetsJson);
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleChangeBlackboardKeyType(const TSharedPtr<FJsonObject>& Params)
+{
+    // Replaces the UBlackboardKeyType instance on an own key entry
+    // with a fresh NewObject of the requested class outered to the
+    // Blackboard. UBlackboardData stores a per-key
+    // FBlackboardEntry whose KeyType TObjectPtr<UBlackboardKeyType>
+    // is the "is this key an int or a vector or a UObject*" hook;
+    // dropping the old instance and assigning a new one re-types
+    // the key wholesale. The same Hard-referencer walk used by
+    // rename_blackboard_key flags every consumer whose
+    // FBlackboardKeySelector points at this key so the response
+    // surfaces (but does not silently rewrite) the consumer set.
+    FString ResolveError;
+    UBlackboardData* BBData = ResolveBlackboardArg(Params, ResolveError);
+    if (!BBData)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    FString KeyNameStr;
+    if (!Params->TryGetStringField(TEXT("key_name"), KeyNameStr)
+        && !Params->TryGetStringField(TEXT("name"), KeyNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'key_name' parameter (the existing key to retype)"));
+    }
+    if (KeyNameStr.IsEmpty())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'key_name' must not be empty"));
+    }
+    const FName KeyName(*KeyNameStr);
+
+    FString KeyClassToken;
+    if (!Params->TryGetStringField(TEXT("key_class"), KeyClassToken)
+        && !Params->TryGetStringField(TEXT("class"), KeyClassToken)
+        && !Params->TryGetStringField(TEXT("type"), KeyClassToken)
+        && !Params->TryGetStringField(TEXT("new_type"), KeyClassToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'key_class' parameter (bool / int / float / string / name / vector / rotator / object / class / enum / struct)"));
+    }
+    UClass* NewKeyTypeClass = ResolveBlackboardKeyTypeClass(KeyClassToken);
+    if (!NewKeyTypeClass)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UBlackboardKeyType subclass '%s'"), *KeyClassToken));
+    }
+    if (NewKeyTypeClass->HasAnyClassFlags(CLASS_Abstract))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is abstract"), *NewKeyTypeClass->GetPathName()));
+    }
+
+    int32 KeyIndex = INDEX_NONE;
+    for (int32 Idx = 0; Idx < BBData->Keys.Num(); ++Idx)
+    {
+        if (BBData->Keys[Idx].EntryName == KeyName)
+        {
+            KeyIndex = Idx;
+            break;
+        }
+    }
+    if (KeyIndex == INDEX_NONE)
+    {
+        // Reject parent-inherited keys: a parent's key cannot be
+        // retyped on a derived BB without breaking the inheritance
+        // contract.
+        for (const FBlackboardEntry& ParentEntry : BBData->ParentKeys)
+        {
+            if (ParentEntry.EntryName == KeyName)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Blackboard '%s' inherits key '%s' from a parent; retype the parent's key instead"),
+                        *BBData->GetName(), *KeyNameStr));
+            }
+        }
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blackboard '%s' has no own key '%s'"),
+                *BBData->GetName(), *KeyNameStr));
+    }
+
+    FBlackboardEntry& Entry = BBData->Keys[KeyIndex];
+    FString OldKeyTypeName = TEXT("none");
+    FString OldKeyTypePath = TEXT("");
+    if (Entry.KeyType)
+    {
+        OldKeyTypeName = Entry.KeyType->GetClass()->GetName();
+        OldKeyTypePath = Entry.KeyType->GetClass()->GetPathName();
+    }
+
+    // Build the replacement key type outered to the Blackboard so
+    // the new subobject is saved with the asset. Matches the create
+    // path used by HandleAddBlackboardKey.
+    BBData->Modify();
+    UBlackboardKeyType* NewKey = NewObject<UBlackboardKeyType>(
+        BBData, NewKeyTypeClass, NAME_None, RF_Transactional);
+    if (!NewKey)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to NewObject UBlackboardKeyType of class '%s'"), *NewKeyTypeClass->GetName()));
+    }
+
+    // Wire inner-type fields when the caller passes the matching
+    // hint. Same shape as HandleAddBlackboardKey.
+    FString BaseClassToken;
+    if (Params->TryGetStringField(TEXT("base_class"), BaseClassToken)
+        || Params->TryGetStringField(TEXT("base_class_path"), BaseClassToken))
+    {
+        if (UBlackboardKeyType_Object* AsObj = Cast<UBlackboardKeyType_Object>(NewKey))
+        {
+            if (UClass* BaseClass = ResolveAnyClass(BaseClassToken))
+            {
+                AsObj->BaseClass = BaseClass;
+            }
+        }
+        else if (UBlackboardKeyType_Class* AsCls = Cast<UBlackboardKeyType_Class>(NewKey))
+        {
+            if (UClass* BaseClass = ResolveAnyClass(BaseClassToken))
+            {
+                AsCls->BaseClass = BaseClass;
+            }
+        }
+    }
+    FString EnumToken;
+    if (Params->TryGetStringField(TEXT("enum_path"), EnumToken)
+        || Params->TryGetStringField(TEXT("enum"), EnumToken))
+    {
+        if (UBlackboardKeyType_Enum* AsEnum = Cast<UBlackboardKeyType_Enum>(NewKey))
+        {
+            if (UEnum* EnumObj = ResolveEnumPath(EnumToken))
+            {
+                AsEnum->EnumType = EnumObj;
+            }
+        }
+    }
+    FString StructToken;
+    if (Params->TryGetStringField(TEXT("struct_path"), StructToken)
+        || Params->TryGetStringField(TEXT("struct"), StructToken))
+    {
+        if (UBlackboardKeyType_Struct* AsStruct = Cast<UBlackboardKeyType_Struct>(NewKey))
+        {
+            if (UScriptStruct* Struct = ResolveScriptStructPath(StructToken))
+            {
+                AsStruct->DefaultValue.InitializeAs(Struct);
+            }
+        }
+    }
+
+    // Swap the typed instance. The old UBlackboardKeyType subobject
+    // becomes unreachable under the Blackboard outer and is GC'd
+    // on the next sweep.
+    Entry.KeyType = NewKey;
+
+#if WITH_EDITOR
+    // Fire the same PreEditChange / PostEditChangeChainProperty
+    // pair we fire on rename so editor pickers refresh and the
+    // FBlackboardDataChanged broadcast hits anyone listening.
+    FProperty* KeysArrayProperty = FindFProperty<FProperty>(
+        UBlackboardData::StaticClass(), GET_MEMBER_NAME_CHECKED(UBlackboardData, Keys));
+    FProperty* KeyTypeProperty = FindFProperty<FProperty>(
+        FBlackboardEntry::StaticStruct(), GET_MEMBER_NAME_CHECKED(FBlackboardEntry, KeyType));
+    if (KeysArrayProperty && KeyTypeProperty)
+    {
+        FEditPropertyChain PropertyChain;
+        PropertyChain.AddHead(KeysArrayProperty);
+        PropertyChain.AddTail(KeyTypeProperty);
+        PropertyChain.SetActiveMemberPropertyNode(KeysArrayProperty);
+        PropertyChain.SetActivePropertyNode(KeyTypeProperty);
+        BBData->PreEditChange(PropertyChain);
+
+        FPropertyChangedEvent PropertyChangedEvent(KeyTypeProperty, EPropertyChangeType::ValueSet);
+        FPropertyChangedChainEvent PropertyChangedChainEvent(PropertyChain, PropertyChangedEvent);
+        BBData->PostEditChangeChainProperty(PropertyChangedChainEvent);
+    }
+#endif
+
+    // Per-BB house-keeping so any subclass BB inherits the new
+    // type and the cached UpdateIfHasSynchronizedKeys flag matches
+    // the new shape.
+    BBData->UpdateIfHasSynchronizedKeys();
+    BBData->UpdateKeyIDs();
+    BBData->PropagateKeyChangesToDerivedBlackboardAssets();
+
+    // Surface every consuming asset whose FBlackboardKeySelector
+    // points at this key. We do not rewrite anything (the FName
+    // stays the same; only the type slot was swapped), but a
+    // consumer that filters on a specific AllowedTypes set may
+    // need a manual revisit and we want the response to call that
+    // out rather than failing silently down the line.
+    TArray<TSharedPtr<FJsonValue>> ConsumerAssetsJson;
+    int32 ConsumerSelectorMatches = 0;
+
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+    IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+    TArray<FName> ReferencerPackages;
+    {
+        UE::AssetRegistry::FDependencyQuery HardOnly;
+        HardOnly.Required = UE::AssetRegistry::EDependencyProperty::Hard;
+        AssetRegistry.GetReferencers(
+            BBData->GetOutermost()->GetFName(),
+            ReferencerPackages,
+            UE::AssetRegistry::EDependencyCategory::Package,
+            HardOnly);
+    }
+
+    TArray<const UClass*> BlackboardOwnerClasses;
+    for (TObjectIterator<UClass> ClassIt; ClassIt; ++ClassIt)
+    {
+        UClass* Class = *ClassIt;
+        if (Class && Class->ImplementsInterface(UBlackboardAssetProvider::StaticClass()))
+        {
+            BlackboardOwnerClasses.Add(Class);
+        }
+    }
+
+    TSet<UObject*> AssetsToScan;
+    for (const FName& ReferencerPackage : ReferencerPackages)
+    {
+        TArray<FAssetData> Assets;
+        AssetRegistry.GetAssetsByPackageName(ReferencerPackage, Assets);
+        for (const FAssetData& Asset : Assets)
+        {
+            if (BlackboardOwnerClasses.Find(Asset.GetClass()) == INDEX_NONE)
+            {
+                continue;
+            }
+            UObject* AssetObject = Asset.GetAsset();
+            if (!AssetObject)
+            {
+                continue;
+            }
+            const IBlackboardAssetProvider* Provider = Cast<const IBlackboardAssetProvider>(AssetObject);
+            if (Provider && Provider->GetBlackboardAsset() == BBData)
+            {
+                AssetsToScan.Add(AssetObject);
+            }
+        }
+    }
+
+    UScriptStruct* SelectorStruct = FBlackboardKeySelector::StaticStruct();
+    for (UObject* Asset : AssetsToScan)
+    {
+        TArray<UObject*> Objects;
+        GetObjectsWithOuter(Asset->GetOutermost(), Objects);
+        int32 PerAssetMatches = 0;
+        for (UObject* SubObject : Objects)
+        {
+            if (!SubObject) continue;
+            for (TFieldIterator<FStructProperty> It(SubObject->GetClass()); It; ++It)
+            {
+                if (It->Struct != SelectorStruct)
+                {
+                    continue;
+                }
+                FBlackboardKeySelector* SelectorPtr =
+                    It->ContainerPtrToValuePtr<FBlackboardKeySelector>(SubObject);
+                if (SelectorPtr && SelectorPtr->SelectedKeyName == KeyName)
+                {
+                    ++PerAssetMatches;
+                    ++ConsumerSelectorMatches;
+                }
+            }
+        }
+        if (PerAssetMatches > 0)
+        {
+            TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+            Row->SetStringField(TEXT("path"), Asset->GetPathName());
+            Row->SetStringField(TEXT("class"), Asset->GetClass()->GetName());
+            Row->SetNumberField(TEXT("selector_matches"), PerAssetMatches);
+            ConsumerAssetsJson.Add(MakeShared<FJsonValueObject>(Row));
+        }
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    SaveBlackboardIfRequested(BBData, bSave);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("change_blackboard_key_type"));
+    Result->SetStringField(TEXT("blackboard"), BBData->GetPathName());
+    Result->SetStringField(TEXT("key_name"), KeyName.ToString());
+    Result->SetNumberField(TEXT("key_index"), KeyIndex);
+    Result->SetStringField(TEXT("old_key_class"), OldKeyTypeName);
+    if (!OldKeyTypePath.IsEmpty())
+    {
+        Result->SetStringField(TEXT("old_key_class_path"), OldKeyTypePath);
+    }
+    Result->SetStringField(TEXT("new_key_class"), NewKeyTypeClass->GetName());
+    Result->SetStringField(TEXT("new_key_class_path"), NewKeyTypeClass->GetPathName());
+    Result->SetNumberField(TEXT("referencer_packages_scanned"), ReferencerPackages.Num());
+    Result->SetNumberField(TEXT("consumer_asset_count"), ConsumerAssetsJson.Num());
+    Result->SetNumberField(TEXT("consumer_selector_matches"), ConsumerSelectorMatches);
+    Result->SetArrayField(TEXT("consumer_assets"), ConsumerAssetsJson);
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;
 }

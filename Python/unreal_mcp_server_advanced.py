@@ -6448,6 +6448,20 @@ def behavior_tree(
           other IBlackboardAssetProvider asset) that Hard-references
           the Blackboard's package. ``old_name`` / ``new_name`` are
           required.
+        - ``change_blackboard_key_type``: replace the UBlackboardKeyType
+          instance on an own key of the target Blackboard with a
+          freshly NewObject'd instance of a new class. ``key_name``
+          selects the entry; ``key_class`` selects the new type
+          (``bool`` / ``int`` / ``float`` / ``string`` / ``name`` /
+          ``vector`` / ``rotator`` / ``object`` / ``class`` /
+          ``enum`` / ``struct``). Inner-type hints (``base_class``
+          for Object / Class, ``enum_path`` for Enum, ``struct_path``
+          for Struct) land on the new instance. The same Hard-
+          referencer walk used by ``rename_blackboard_key`` flags
+          every consuming asset whose ``FBlackboardKeySelector``
+          points at this key under ``consumer_assets`` so the
+          caller can audit the touch area without us silently
+          rewriting consumer pin shapes.
 
     Args:
         tree: Short asset name or full ``/Game/...`` Behavior Tree

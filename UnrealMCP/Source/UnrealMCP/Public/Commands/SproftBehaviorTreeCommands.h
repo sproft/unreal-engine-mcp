@@ -82,6 +82,21 @@
  *     empty new name. `UpdateIfHasSynchronizedKeys` + `UpdateKeyIDs`
  *     + `PropagateKeyChangesToDerivedBlackboardAssets` fix-up runs
  *     after the rename so derived Blackboards stay consistent.
+ *   - `change_blackboard_key_type`: replace the UBlackboardKeyType
+ *     instance on an own key of a target Blackboard with a freshly
+ *     NewObject'd instance of the requested class (`bool` / `int` /
+ *     `float` / `string` / `name` / `vector` / `rotator` / `object`
+ *     / `class` / `enum` / `struct`, plus inner-type hints
+ *     `base_class` / `enum_path` / `struct_path` on the typed
+ *     subclasses). The new key type outers under the Blackboard so
+ *     it travels with the asset on save. The same Hard-referencer
+ *     walk used by `rename_blackboard_key` flags every consuming
+ *     asset whose `FBlackboardKeySelector` references this key
+ *     under `consumer_assets`; the type change does not rewrite
+ *     consumer pin shapes (the selector slot stores only the
+ *     FName), but a consumer that filters on a specific
+ *     `AllowedTypes` set may need a manual revisit, and we surface
+ *     that surface area without silently rewriting anything.
  *
  * Inputs (inspect):
  *   - tree:                short asset name or full `/Game/...` path
@@ -255,4 +270,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddBlackboardKey(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRemoveBlackboardKey(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRenameBlackboardKey(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleChangeBlackboardKeyType(const TSharedPtr<FJsonObject>& Params);
 };
