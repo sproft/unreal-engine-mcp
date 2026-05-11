@@ -552,9 +552,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return SetMaterialFlags(Params);
     }
+    if (Operation == TEXT("set_shading_model") || Operation == TEXT("set_shadingmodel")
+        || Operation == TEXT("shading_model") || Operation == TEXT("set_material_shading_model"))
+    {
+        return SetShadingModel(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter, add_fresnel, set_blend_mode, set_material_flags"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math, add_uv_node, add_dynamic_parameter, add_fresnel, set_blend_mode, set_material_flags, set_shading_model"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -5497,6 +5502,227 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetMaterialFlags(const TSha
     ResultObj->SetNumberField(TEXT("applied_count"), AppliedArr.Num());
     ResultObj->SetNumberField(TEXT("skipped_count"), SkippedArr.Num());
     ResultObj->SetBoolField(TEXT("recompiled"), bRecompile && AppliedArr.Num() > 0);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Resolve a user-supplied shading-model token to the
+     *  EMaterialShadingModel enum value the engine stores on
+     *  UMaterial::ShadingModel. The token set mirrors the engine's
+     *  EMaterialShadingModel declarations through UE 5.7
+     *  (`Engine/Source/Runtime/Engine/Classes/Engine/EngineTypes.h`).
+     *  Accepts the bare token (`Unlit`, `DefaultLit`, etc.) and the
+     *  fully-qualified UPROPERTY meta form (`MSM_Unlit` etc.); the
+     *  match runs case-insensitively after stripping underscores /
+     *  spaces / dashes so casual snake_case (`default_lit`,
+     *  `single_layer_water`) lands on the same enum value as the
+     *  engine spelling. */
+    bool ResolveShadingModelToken(const FString& InToken, EMaterialShadingModel& OutModel, FString& OutCanonical)
+    {
+        FString T = InToken.TrimStartAndEnd().ToLower();
+        if (T.StartsWith(TEXT("msm_")))
+        {
+            T = T.RightChop(4);
+        }
+        T = T.Replace(TEXT("_"), TEXT(""));
+        T = T.Replace(TEXT(" "), TEXT(""));
+        T = T.Replace(TEXT("-"), TEXT(""));
+
+        if (T == TEXT("unlit"))
+        {
+            OutModel = MSM_Unlit;
+            OutCanonical = TEXT("Unlit");
+            return true;
+        }
+        if (T == TEXT("defaultlit") || T == TEXT("lit") || T == TEXT("default"))
+        {
+            OutModel = MSM_DefaultLit;
+            OutCanonical = TEXT("DefaultLit");
+            return true;
+        }
+        if (T == TEXT("subsurface"))
+        {
+            OutModel = MSM_Subsurface;
+            OutCanonical = TEXT("Subsurface");
+            return true;
+        }
+        if (T == TEXT("preintegratedskin") || T == TEXT("preintegrated") || T == TEXT("skin"))
+        {
+            OutModel = MSM_PreintegratedSkin;
+            OutCanonical = TEXT("PreintegratedSkin");
+            return true;
+        }
+        if (T == TEXT("clearcoat") || T == TEXT("coat"))
+        {
+            OutModel = MSM_ClearCoat;
+            OutCanonical = TEXT("ClearCoat");
+            return true;
+        }
+        if (T == TEXT("subsurfaceprofile") || T == TEXT("subsurfaceprofileshading"))
+        {
+            OutModel = MSM_SubsurfaceProfile;
+            OutCanonical = TEXT("SubsurfaceProfile");
+            return true;
+        }
+        if (T == TEXT("twosidedfoliage") || T == TEXT("foliage"))
+        {
+            OutModel = MSM_TwoSidedFoliage;
+            OutCanonical = TEXT("TwoSidedFoliage");
+            return true;
+        }
+        if (T == TEXT("hair"))
+        {
+            OutModel = MSM_Hair;
+            OutCanonical = TEXT("Hair");
+            return true;
+        }
+        if (T == TEXT("cloth"))
+        {
+            OutModel = MSM_Cloth;
+            OutCanonical = TEXT("Cloth");
+            return true;
+        }
+        if (T == TEXT("eye"))
+        {
+            OutModel = MSM_Eye;
+            OutCanonical = TEXT("Eye");
+            return true;
+        }
+        if (T == TEXT("singlelayerwater") || T == TEXT("water"))
+        {
+            OutModel = MSM_SingleLayerWater;
+            OutCanonical = TEXT("SingleLayerWater");
+            return true;
+        }
+        if (T == TEXT("thintranslucent") || T == TEXT("thintranslucency"))
+        {
+            OutModel = MSM_ThinTranslucent;
+            OutCanonical = TEXT("ThinTranslucent");
+            return true;
+        }
+        return false;
+    }
+
+    FString ShadingModelToCanonicalToken(EMaterialShadingModel Model)
+    {
+        switch (Model)
+        {
+        case MSM_Unlit:              return TEXT("Unlit");
+        case MSM_DefaultLit:         return TEXT("DefaultLit");
+        case MSM_Subsurface:         return TEXT("Subsurface");
+        case MSM_PreintegratedSkin:  return TEXT("PreintegratedSkin");
+        case MSM_ClearCoat:          return TEXT("ClearCoat");
+        case MSM_SubsurfaceProfile:  return TEXT("SubsurfaceProfile");
+        case MSM_TwoSidedFoliage:    return TEXT("TwoSidedFoliage");
+        case MSM_Hair:               return TEXT("Hair");
+        case MSM_Cloth:              return TEXT("Cloth");
+        case MSM_Eye:                return TEXT("Eye");
+        case MSM_SingleLayerWater:   return TEXT("SingleLayerWater");
+        case MSM_ThinTranslucent:    return TEXT("ThinTranslucent");
+        default: return FString::Printf(TEXT("Unknown(%d)"), static_cast<int32>(Model));
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetShadingModel(const TSharedPtr<FJsonObject>& Params)
+{
+    // Writer for UMaterial::ShadingModel. The engine carries a paired
+    // ShadingModels bitset (FMaterialShadingModelField; the multi-model
+    // surface From Material attributes lit), but the legacy single
+    // ShadingModel enum is what the static permutation key consults on
+    // the BasePass shader compile when bUseMaterialAttributes is off;
+    // we route through the enum slot since that's the documented
+    // single-shading-model authoring path. Translation to the bitset is
+    // engine-internal (UMaterial::RebuildShadingModelField runs on
+    // PostEditChangeProperty so it stays consistent). Refuses Material
+    // Instances since the override surface lives on
+    // FMaterialInstanceBasePropertyOverrides::ShadingModel and routes
+    // through set_attribute_blendable.
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(MaterialPath);
+    UMaterial* Material = Cast<UMaterial>(Asset);
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial (Material Instances route through set_attribute_blendable)"), *MaterialPath));
+    }
+
+    FString ShadingToken;
+    if (!Params->TryGetStringField(TEXT("shading_model"), ShadingToken)
+        && !Params->TryGetStringField(TEXT("shadingmodel"), ShadingToken)
+        && !Params->TryGetStringField(TEXT("model"), ShadingToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'shading_model' parameter (Unlit / DefaultLit / Subsurface / PreintegratedSkin / ClearCoat / SubsurfaceProfile / TwoSidedFoliage / Hair / Cloth / Eye / SingleLayerWater / ThinTranslucent)"));
+    }
+
+    EMaterialShadingModel NewModel;
+    FString CanonicalToken;
+    if (!ResolveShadingModelToken(ShadingToken, NewModel, CanonicalToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown shading model '%s'. Supported: Unlit, DefaultLit, Subsurface, PreintegratedSkin, ClearCoat, SubsurfaceProfile, TwoSidedFoliage, Hair, Cloth, Eye, SingleLayerWater, ThinTranslucent"), *ShadingToken));
+    }
+
+    // Capture the previous value for the diff payload.
+    const EMaterialShadingModel PreviousModel = Material->GetShadingModels().GetFirstShadingModel();
+    const FString PreviousToken = ShadingModelToCanonicalToken(PreviousModel);
+
+    // Resolve the ShadingModel UPROPERTY so PreEditChange / PostEditChange
+    // route the static-permutation refresh through the right slot. The
+    // engine's PostEditChangeProperty on ShadingModel runs
+    // RebuildShadingModelField, which keeps the paired ShadingModels
+    // bitset in sync, plus invalidates the shader permutation map since
+    // the basepass shaders fork per shading model.
+    FProperty* ShadingModelProperty = Material->GetClass()->FindPropertyByName(TEXT("ShadingModel"));
+    if (!ShadingModelProperty)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Reflection database does not expose 'ShadingModel' on UMaterial"));
+    }
+
+    Material->PreEditChange(ShadingModelProperty);
+    Material->ShadingModel = NewModel;
+
+    // PostEditChangeProperty on ShadingModel rebuilds the cached shader
+    // permutation map plus the ShadingModels bitset, which is what we
+    // need to land here.
+    FPropertyChangedEvent ChangeEvent(ShadingModelProperty, EPropertyChangeType::ValueSet);
+    Material->PostEditChangeProperty(ChangeEvent);
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_shading_model"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetStringField(TEXT("shading_model"), CanonicalToken);
+    ResultObj->SetStringField(TEXT("previous_shading_model"), PreviousToken);
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
     ResultObj->SetBoolField(TEXT("saved"), bSave);
     return ResultObj;
 }

@@ -329,4 +329,5 @@ private:
     TSharedPtr<FJsonObject> AddFresnel(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetBlendMode(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetMaterialFlags(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetShadingModel(const TSharedPtr<FJsonObject>& Params);
 };

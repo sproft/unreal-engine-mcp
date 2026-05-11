@@ -3994,6 +3994,7 @@ def material_edit(
     blend_mode: Optional[str] = None,
     opacity_mask_clip_value: Optional[float] = None,
     flags: Optional[Dict[str, Any]] = None,
+    shading_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -4257,6 +4258,27 @@ def material_edit(
           one flag landed (controlled by ``recompile`` / default
           true) and saves the asset when ``save`` is true (the
           default).
+        - "set_shading_model": writes the master ``UMaterial``'s
+          ``ShadingModel`` UPROPERTY (the legacy single-shading-model
+          enum slot the static permutation key consults when
+          ``bUseMaterialAttributes`` is off). ``shading_model``
+          (alias ``model``) accepts ``Unlit`` / ``DefaultLit`` /
+          ``Subsurface`` / ``PreintegratedSkin`` / ``ClearCoat`` /
+          ``SubsurfaceProfile`` / ``TwoSidedFoliage`` / ``Hair`` /
+          ``Cloth`` / ``Eye`` / ``SingleLayerWater`` /
+          ``ThinTranslucent``, case-insensitive, with or without
+          the ``MSM_`` prefix. Routes through PreEditChange /
+          PostEditChangeProperty against the ShadingModel
+          UPROPERTY so the engine's
+          ``UMaterial::RebuildShadingModelField`` runs on
+          PostEdit (keeps the paired ShadingModels bitset in
+          sync) and the static permutation recompiles for the
+          new basepass shader. The response carries the previous
+          + new shading-model tokens. Refuses non-UMaterial
+          assets (Material Instances flow through
+          ``set_attribute_blendable`` instead since the override
+          surface is on the FMaterialInstanceBasePropertyOverrides
+          struct, not on the MIC's UPROPERTY directly).
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.
@@ -4443,6 +4465,8 @@ def material_edit(
         params["opacity_mask_clip_value"] = opacity_mask_clip_value
     if flags is not None:
         params["flags"] = flags
+    if shading_model is not None:
+        params["shading_model"] = shading_model
 
     try:
         response = unreal.send_command("material_edit", params)
