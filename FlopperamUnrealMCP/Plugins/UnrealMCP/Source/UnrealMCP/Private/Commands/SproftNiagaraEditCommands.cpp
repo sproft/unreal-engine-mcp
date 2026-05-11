@@ -178,8 +178,15 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleAddUserParameter(Params);
     }
+    if (Op.Equals(TEXT("remove_emitter"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("delete_emitter"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("remove_emitter_handle"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("drop_emitter"), ESearchCase::IgnoreCase))
+    {
+        return HandleRemoveEmitter(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup, set_emitter_loop, set_emitter_property, set_emitter_renderer, set_renderer_property, add_user_parameter"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter, set_system_warmup, set_emitter_loop, set_emitter_property, set_emitter_renderer, set_renderer_property, add_user_parameter, remove_emitter"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -3108,5 +3115,114 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleAddUserParameter(const
 #else
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         TEXT("niagara_edit add_user_parameter requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleRemoveEmitter(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    // Cleanup helper that strips an existing emitter handle off a
+    // UNiagaraSystem. Pairs with `add_emitter_from_asset` (the canonical
+    // add op that lands a fresh handle). The engine exposes
+    // `UNiagaraSystem::RemoveEmitterHandlesById` as the public bulk
+    // remover; it takes a TArray<FGuid> of handle IDs and rebuilds the
+    // system's compiled state internally. We resolve the emitter handle
+    // by the same name-or-source-name match every other per-emitter op
+    // uses (FindEmitterHandleByName), pull the handle's FGuid through
+    // `FNiagaraEmitterHandle::GetId()`, and route the remove through the
+    // single-element TArray overload so the system's internal
+    // bookkeeping (cached compiled emitters, simulation cache, etc.)
+    // gets the same teardown the editor's Selected->Remove command runs.
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("remove_emitter: missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("remove_emitter: could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString HandleToken;
+    if (!Params->TryGetStringField(TEXT("emitter"), HandleToken)
+        && !Params->TryGetStringField(TEXT("emitter_handle"), HandleToken)
+        && !Params->TryGetStringField(TEXT("handle_name"), HandleToken)
+        && !Params->TryGetStringField(TEXT("name"), HandleToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("remove_emitter: missing 'emitter' parameter (the FName of the handle on the system)"));
+    }
+    int32 HandleIndex = INDEX_NONE;
+    FNiagaraEmitterHandle* MatchedHandle = FindEmitterHandleByName(System, HandleToken, HandleIndex);
+    if (!MatchedHandle)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("remove_emitter: could not resolve emitter handle '%s' on system '%s'"),
+                *HandleToken, *System->GetPathName()));
+    }
+
+    // Snapshot the handle's identity for the diff payload before the
+    // call - the FNiagaraEmitterHandle reference is invalidated after
+    // the underlying TArray shifts.
+    const FGuid HandleId = MatchedHandle->GetId();
+    const FString HandleName = MatchedHandle->GetName().ToString();
+    FString SourceEmitterPath;
+    if (UNiagaraEmitter* SrcEmitter = MatchedHandle->GetInstance().Emitter)
+    {
+        SourceEmitterPath = SrcEmitter->GetPathName();
+    }
+    const int32 PrevCount = System->GetEmitterHandles().Num();
+
+    System->Modify();
+    TArray<FGuid> ToRemove;
+    ToRemove.Add(HandleId);
+    System->RemoveEmitterHandlesById(ToRemove);
+
+    const int32 NewCount = System->GetEmitterHandles().Num();
+    const bool bRemoved = (NewCount == PrevCount - 1);
+
+    if (!bRemoved)
+    {
+        // The engine silently keeps the handle when the system is in a
+        // state that refuses the remove (e.g. transient cooked systems).
+        // Surface this as a structured failure rather than a silent
+        // no-op so callers can tell whether the remove landed.
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("remove_emitter: UNiagaraSystem::RemoveEmitterHandlesById did not change the handle count (was %d, still %d). Handle id '%s' may be referenced by a parent override or the system is read-only."),
+                PrevCount, NewCount, *HandleId.ToString()));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("remove_emitter"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("emitter_handle"), HandleName);
+    Out->SetStringField(TEXT("emitter_handle_id"), HandleId.ToString());
+    Out->SetNumberField(TEXT("previous_handle_index"), HandleIndex);
+    if (!SourceEmitterPath.IsEmpty())
+    {
+        Out->SetStringField(TEXT("source_emitter"), SourceEmitterPath);
+    }
+    Out->SetNumberField(TEXT("previous_emitter_count"), PrevCount);
+    Out->SetNumberField(TEXT("emitter_count"), NewCount);
+    Out->SetBoolField(TEXT("removed"), bRemoved);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit remove_emitter requires WITH_EDITORONLY_DATA"));
 #endif
 }

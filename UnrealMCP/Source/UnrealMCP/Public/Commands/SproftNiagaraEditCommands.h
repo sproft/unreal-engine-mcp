@@ -255,4 +255,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetEmitterRenderer(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetRendererProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddUserParameter(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveEmitter(const TSharedPtr<FJsonObject>& Params);
 };

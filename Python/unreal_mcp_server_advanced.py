@@ -9570,6 +9570,25 @@ def niagara_edit(
           ``{"location": [x, y, z], "rotation": [pitch, yaw,
           roll] or [x, y, z, w], "scale": [x, y, z]}``. Save
           the system on success.
+        - ``remove_emitter``: strips an existing emitter handle
+          off a ``UNiagaraSystem``. Pairs with
+          ``add_emitter_from_asset``. ``system`` resolves the
+          target system; ``emitter`` (alias ``emitter_handle`` /
+          ``handle_name`` / ``name``) matches the handle by
+          display name (case-insensitive) or by the source
+          emitter's ``GetName()`` so handles that have not been
+          renamed still resolve. The remove routes through the
+          public ``UNiagaraSystem::RemoveEmitterHandlesById``
+          (NIAGARA_API) against a single-element TArray<FGuid>
+          so the system's internal bookkeeping (cached compiled
+          emitters, simulation cache, etc.) runs the same
+          teardown the editor's Selected->Remove command runs.
+          The response carries the previous emitter count, the
+          handle's name and GUID, the source emitter path when
+          present, and the new count. Surfaces a structured
+          error when the remove did not change the count (the
+          handle may be referenced by a parent override). Save
+          the system on success.
 
     The broader authoring surface beyond exposed-parameter writes
     stays in BACKLOG.md.
