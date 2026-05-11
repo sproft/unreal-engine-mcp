@@ -162,6 +162,24 @@
  *      `add_expression` (`position`, `name`, `properties`,
  *      `property` / `connect_to` / `connect_input` for one-shot
  *      downstream wiring, `recompile`, `save`).
+ *   - "add_math": single-call wrapper that spawns the common math
+ *      expression nodes by short token. `op` accepts one of `Add` /
+ *      `Subtract` / `Multiply` / `Divide` / `Min` / `Max` / `Lerp`
+ *      / `Power` / `Sin` / `Cos` / `Abs` / `Saturate` / `OneMinus`
+ *      / `Normalize` / `DotProduct` / `CrossProduct` (case-
+ *      insensitive). Optional `A` / `B` / `T` (alpha for Lerp) /
+ *      `input` / `base` / `exponent` are names of existing
+ *      expressions on the same material whose first output (or the
+ *      pin named by `<slot>_output`) wires into the matching input.
+ *      Two-input math nodes (Add / Subtract / Multiply / Divide /
+ *      Min / Max) accept a literal `constant` / `constant_a` /
+ *      `constant_b` for the `ConstA` / `ConstB` slots; `Power`
+ *      accepts `constant_exponent`; `Lerp` accepts `constant_a` /
+ *      `constant_b` / `constant_alpha` (alias `t`). Same downstream
+ *      knobs as `add_expression` and `add_constant` (`position`,
+ *      `name`, `properties`, `property` / `connect_to` /
+ *      `connect_input` for one-shot downstream wiring, `recompile`,
+ *      `save`).
  *   - "set_attribute_blendable": flips a per-attribute override toggle
  *      on a UMaterialInstanceConstant's
  *      `FMaterialInstanceBasePropertyOverrides` struct. The
@@ -230,4 +248,5 @@ private:
     TSharedPtr<FJsonObject> AddTextureSampleCube(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddTexture2DArraySample(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddConstant(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddMath(const TSharedPtr<FJsonObject>& Params);
 };

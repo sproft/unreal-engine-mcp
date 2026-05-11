@@ -3813,6 +3813,19 @@ def material_edit(
     texture: Optional[str] = None,
     coordinates: Optional[str] = None,
     coordinates_output: Optional[str] = None,
+    op: Optional[str] = None,
+    a: Optional[str] = None,
+    b: Optional[str] = None,
+    t: Optional[str] = None,
+    alpha: Optional[str] = None,
+    base: Optional[str] = None,
+    exponent: Optional[str] = None,
+    input: Optional[str] = None,
+    constant: Optional[float] = None,
+    constant_a: Optional[float] = None,
+    constant_b: Optional[float] = None,
+    constant_alpha: Optional[float] = None,
+    constant_exponent: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Material authoring. Supports asset creation, instance overrides, and
@@ -3954,6 +3967,26 @@ def material_edit(
           ``properties``, ``property`` / ``connect_to`` /
           ``connect_input`` for one-shot wiring, ``recompile``,
           ``save``).
+        - "add_math": single-call wrapper that spawns the common
+          math expression nodes by short ``op`` token. ``op``
+          accepts ``Add`` / ``Subtract`` / ``Multiply`` /
+          ``Divide`` / ``Min`` / ``Max`` / ``Lerp`` / ``Power`` /
+          ``Sin`` / ``Cos`` / ``Abs`` / ``Saturate`` /
+          ``OneMinus`` / ``Normalize`` / ``DotProduct`` /
+          ``CrossProduct``. Optional ``a`` / ``b`` / ``t`` (or
+          ``alpha``) / ``input`` / ``base`` / ``exponent`` name
+          sibling expressions on the same material whose first
+          output (or the pin named by ``<slot>_output`` via the
+          flat passthrough) wires into the matching input slot.
+          Two-input math nodes accept ``constant_a`` /
+          ``constant_b`` for the ``ConstA`` / ``ConstB`` fallback
+          slots; bare ``constant`` populates the second slot for
+          the "* scalar" idiom. ``Lerp`` adds ``constant_alpha``,
+          ``Power`` adds ``constant_exponent``. Same downstream
+          knobs as ``add_expression`` / ``add_constant``
+          (``position``, ``name``, ``properties``, ``property`` /
+          ``connect_to`` / ``connect_input`` for one-shot
+          downstream wiring, ``recompile``, ``save``).
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.
@@ -4094,6 +4127,32 @@ def material_edit(
         params["coordinates"] = coordinates
     if coordinates_output is not None:
         params["coordinates_output"] = coordinates_output
+    if op is not None:
+        params["op"] = op
+    if a is not None:
+        params["a"] = a
+    if b is not None:
+        params["b"] = b
+    if t is not None:
+        params["t"] = t
+    if alpha is not None:
+        params["alpha"] = alpha
+    if base is not None:
+        params["base"] = base
+    if exponent is not None:
+        params["exponent"] = exponent
+    if input is not None:
+        params["input"] = input
+    if constant is not None:
+        params["constant"] = constant
+    if constant_a is not None:
+        params["constant_a"] = constant_a
+    if constant_b is not None:
+        params["constant_b"] = constant_b
+    if constant_alpha is not None:
+        params["constant_alpha"] = constant_alpha
+    if constant_exponent is not None:
+        params["constant_exponent"] = constant_exponent
 
     try:
         response = unreal.send_command("material_edit", params)

@@ -15,6 +15,7 @@
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "Materials/MaterialExpression.h"
+#include "Materials/MaterialExpressionAbs.h"
 #include "Materials/MaterialExpressionAdd.h"
 #include "Materials/MaterialExpressionClamp.h"
 #include "Materials/MaterialExpressionComponentMask.h"
@@ -23,7 +24,9 @@
 #include "Materials/MaterialExpressionConstant3Vector.h"
 #include "Materials/MaterialExpressionConstant4Vector.h"
 #include "Materials/MaterialExpressionCosine.h"
+#include "Materials/MaterialExpressionCrossProduct.h"
 #include "Materials/MaterialExpressionDivide.h"
+#include "Materials/MaterialExpressionDotProduct.h"
 #include "Materials/MaterialExpressionFresnel.h"
 #include "Materials/MaterialExpressionFunctionInput.h"
 #include "Materials/MaterialExpressionFunctionOutput.h"
@@ -31,7 +34,10 @@
 #include "Materials/MaterialExpressionLinearInterpolate.h"
 #include "Materials/MaterialExpressionMakeMaterialAttributes.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
+#include "Materials/MaterialExpressionMax.h"
+#include "Materials/MaterialExpressionMin.h"
 #include "Materials/MaterialExpressionMultiply.h"
+#include "Materials/MaterialExpressionNormalize.h"
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialExpressionOneMinus.h"
 #include "Materials/MaterialExpressionPanner.h"
@@ -510,9 +516,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddConstant(Params);
     }
+    if (Operation == TEXT("add_math") || Operation == TEXT("add_math_op")
+        || Operation == TEXT("add_math_node") || Operation == TEXT("add_op"))
+    {
+        return AddMath(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant, add_math"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -3586,6 +3597,540 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddConstant(const TSharedPt
     ResultObj->SetStringField(TEXT("constant_class"), ConstantClassTokenEcho);
     ResultObj->SetNumberField(TEXT("channel_count"), ChannelCount);
     ResultObj->SetArrayField(TEXT("channels"), ChannelArr);
+    ResultObj->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
+    if (PropertyErrors.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& E : PropertyErrors)
+        {
+            Arr.Add(MakeShared<FJsonValueString>(E));
+        }
+        ResultObj->SetArrayField(TEXT("property_errors"), Arr);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_property"), bConnectedToProperty);
+    if (bConnectedToProperty)
+    {
+        ResultObj->SetStringField(TEXT("property"), PropertyConnected);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_expression"), bConnectedToExpression);
+    if (bConnectedToExpression)
+    {
+        ResultObj->SetStringField(TEXT("connect_to"), ExpressionConnected);
+    }
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddMath(const TSharedPtr<FJsonObject>& Params)
+{
+    // Wraps the common math expression-node creates so callers do not
+    // need to spell out the long `UMaterialExpressionXyz` class names.
+    // The `op` token picks the subclass; optional input names wire
+    // sibling expressions on the same material into the matching
+    // FExpressionInput slot through `UMaterialEditingLibrary::
+    // ConnectMaterialExpressions`. The Const* fallback slots accept
+    // literal floats so a "* 0.5" multiply lands in one call.
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+    UMaterial* Material = Cast<UMaterial>(UEditorAssetLibrary::LoadAsset(MaterialPath));
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial"), *MaterialPath));
+    }
+
+    FString OpToken;
+    if (!Params->TryGetStringField(TEXT("op"), OpToken)
+        && !Params->TryGetStringField(TEXT("math_op"), OpToken)
+        && !Params->TryGetStringField(TEXT("math"), OpToken)
+        && !Params->TryGetStringField(TEXT("operation_token"), OpToken)
+        && !Params->TryGetStringField(TEXT("op_name"), OpToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'op' parameter (Add / Subtract / Multiply / Divide / Min / Max / Lerp / Power / Sin / Cos / Abs / Saturate / OneMinus / Normalize / DotProduct / CrossProduct)"));
+    }
+
+    // Resolve the math subclass + classify its input slot shape in
+    // one pass so the rest of the op can fan out from a single token.
+    enum class EMathShape
+    {
+        TwoInputAB,        // Add / Subtract / Multiply / Divide / Min / Max
+        ThreeInputLerp,    // LinearInterpolate (A / B / Alpha)
+        TwoInputBase,      // Power (Base / Exponent)
+        OneInput,          // Sin / Cos / Abs / Saturate / OneMinus
+        OneInputNormalize, // Normalize (VectorInput slot)
+        TwoInputDotCross,  // DotProduct / CrossProduct (no Const slots)
+    };
+
+    TSubclassOf<UMaterialExpression> MathClass = nullptr;
+    EMathShape Shape = EMathShape::OneInput;
+    FString CanonicalToken;
+    const FString OpLower = OpToken.ToLower();
+
+    if (OpLower == TEXT("add") || OpLower == TEXT("+"))
+    {
+        MathClass = UMaterialExpressionAdd::StaticClass();
+        Shape = EMathShape::TwoInputAB;
+        CanonicalToken = TEXT("Add");
+    }
+    else if (OpLower == TEXT("subtract") || OpLower == TEXT("sub") || OpLower == TEXT("-"))
+    {
+        MathClass = UMaterialExpressionSubtract::StaticClass();
+        Shape = EMathShape::TwoInputAB;
+        CanonicalToken = TEXT("Subtract");
+    }
+    else if (OpLower == TEXT("multiply") || OpLower == TEXT("mul") || OpLower == TEXT("*"))
+    {
+        MathClass = UMaterialExpressionMultiply::StaticClass();
+        Shape = EMathShape::TwoInputAB;
+        CanonicalToken = TEXT("Multiply");
+    }
+    else if (OpLower == TEXT("divide") || OpLower == TEXT("div") || OpLower == TEXT("/"))
+    {
+        MathClass = UMaterialExpressionDivide::StaticClass();
+        Shape = EMathShape::TwoInputAB;
+        CanonicalToken = TEXT("Divide");
+    }
+    else if (OpLower == TEXT("min"))
+    {
+        MathClass = UMaterialExpressionMin::StaticClass();
+        Shape = EMathShape::TwoInputAB;
+        CanonicalToken = TEXT("Min");
+    }
+    else if (OpLower == TEXT("max"))
+    {
+        MathClass = UMaterialExpressionMax::StaticClass();
+        Shape = EMathShape::TwoInputAB;
+        CanonicalToken = TEXT("Max");
+    }
+    else if (OpLower == TEXT("lerp") || OpLower == TEXT("linear_interpolate")
+        || OpLower == TEXT("linearinterpolate") || OpLower == TEXT("mix"))
+    {
+        MathClass = UMaterialExpressionLinearInterpolate::StaticClass();
+        Shape = EMathShape::ThreeInputLerp;
+        CanonicalToken = TEXT("Lerp");
+    }
+    else if (OpLower == TEXT("power") || OpLower == TEXT("pow") || OpLower == TEXT("^"))
+    {
+        MathClass = UMaterialExpressionPower::StaticClass();
+        Shape = EMathShape::TwoInputBase;
+        CanonicalToken = TEXT("Power");
+    }
+    else if (OpLower == TEXT("sin") || OpLower == TEXT("sine"))
+    {
+        MathClass = UMaterialExpressionSine::StaticClass();
+        Shape = EMathShape::OneInput;
+        CanonicalToken = TEXT("Sin");
+    }
+    else if (OpLower == TEXT("cos") || OpLower == TEXT("cosine"))
+    {
+        MathClass = UMaterialExpressionCosine::StaticClass();
+        Shape = EMathShape::OneInput;
+        CanonicalToken = TEXT("Cos");
+    }
+    else if (OpLower == TEXT("abs") || OpLower == TEXT("absolute"))
+    {
+        MathClass = UMaterialExpressionAbs::StaticClass();
+        Shape = EMathShape::OneInput;
+        CanonicalToken = TEXT("Abs");
+    }
+    else if (OpLower == TEXT("saturate") || OpLower == TEXT("clamp01"))
+    {
+        MathClass = UMaterialExpressionSaturate::StaticClass();
+        Shape = EMathShape::OneInput;
+        CanonicalToken = TEXT("Saturate");
+    }
+    else if (OpLower == TEXT("oneminus") || OpLower == TEXT("one_minus")
+        || OpLower == TEXT("1-x") || OpLower == TEXT("one-minus"))
+    {
+        MathClass = UMaterialExpressionOneMinus::StaticClass();
+        Shape = EMathShape::OneInput;
+        CanonicalToken = TEXT("OneMinus");
+    }
+    else if (OpLower == TEXT("normalize"))
+    {
+        MathClass = UMaterialExpressionNormalize::StaticClass();
+        Shape = EMathShape::OneInputNormalize;
+        CanonicalToken = TEXT("Normalize");
+    }
+    else if (OpLower == TEXT("dot") || OpLower == TEXT("dot_product")
+        || OpLower == TEXT("dotproduct"))
+    {
+        MathClass = UMaterialExpressionDotProduct::StaticClass();
+        Shape = EMathShape::TwoInputDotCross;
+        CanonicalToken = TEXT("DotProduct");
+    }
+    else if (OpLower == TEXT("cross") || OpLower == TEXT("cross_product")
+        || OpLower == TEXT("crossproduct"))
+    {
+        MathClass = UMaterialExpressionCrossProduct::StaticClass();
+        Shape = EMathShape::TwoInputDotCross;
+        CanonicalToken = TEXT("CrossProduct");
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unknown 'op' token '%s'. Use Add / Subtract / Multiply / Divide / Min / Max / Lerp / Power / Sin / Cos / Abs / Saturate / OneMinus / Normalize / DotProduct / CrossProduct"),
+                *OpToken));
+    }
+
+    // Position cascade reuses the same DeriveDefaultPosition helper
+    // that add_expression / add_constant share.
+    int32 PosX = 0, PosY = 0;
+    bool bExplicitPos = false;
+    if (Params->HasField(TEXT("position")))
+    {
+        const TSharedPtr<FJsonValue> PosVal = Params->TryGetField(TEXT("position"));
+        if (PosVal.IsValid() && PosVal->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = PosVal->AsArray();
+            if (Arr.Num() >= 2)
+            {
+                PosX = static_cast<int32>(Arr[0]->AsNumber());
+                PosY = static_cast<int32>(Arr[1]->AsNumber());
+                bExplicitPos = true;
+            }
+        }
+        else if (PosVal.IsValid() && PosVal->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject> PosObj = PosVal->AsObject();
+            double X = 0.0, Y = 0.0;
+            if (PosObj.IsValid()
+                && (PosObj->TryGetNumberField(TEXT("x"), X) || PosObj->TryGetNumberField(TEXT("X"), X))
+                && (PosObj->TryGetNumberField(TEXT("y"), Y) || PosObj->TryGetNumberField(TEXT("Y"), Y)))
+            {
+                PosX = static_cast<int32>(X);
+                PosY = static_cast<int32>(Y);
+                bExplicitPos = true;
+            }
+        }
+    }
+    if (!bExplicitPos)
+    {
+        DeriveDefaultPosition(Material, PosX, PosY);
+    }
+
+    UMaterialExpression* NewExpr = UMaterialEditingLibrary::CreateMaterialExpression(
+        Material, MathClass, PosX, PosY);
+    if (!NewExpr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("CreateMaterialExpression failed for class '%s'"), *MathClass->GetName()));
+    }
+
+    // Optional `name` renames the spawned node so follow-up wiring
+    // calls can address it by FName.
+    FString NameOverride;
+    if (Params->TryGetStringField(TEXT("name"), NameOverride) && !NameOverride.IsEmpty())
+    {
+        NewExpr->Rename(*NameOverride, NewExpr->GetOuter(), REN_DontCreateRedirectors);
+    }
+
+    // Helper lambda: resolve a sibling expression name + optional
+    // explicit output pin, then wire it into the new node's named
+    // input slot through ConnectMaterialExpressions.
+    TArray<FString> InputWireErrors;
+    auto TryWireSlot = [&](const FString& SlotName, const FString& InputToken, const FString& OutputToken) -> bool
+    {
+        if (InputToken.IsEmpty())
+        {
+            return false;
+        }
+        UMaterialExpression* SourceExpr = FindExpressionByName(Material, InputToken);
+        if (!SourceExpr)
+        {
+            InputWireErrors.Add(FString::Printf(TEXT("input '%s' for slot '%s' not found"), *InputToken, *SlotName));
+            return false;
+        }
+        if (!UMaterialEditingLibrary::ConnectMaterialExpressions(SourceExpr, OutputToken, NewExpr, SlotName))
+        {
+            InputWireErrors.Add(FString::Printf(TEXT("ConnectMaterialExpressions failed: %s -> %s.%s"),
+                *InputToken, *NewExpr->GetName(), *SlotName));
+            return false;
+        }
+        return true;
+    };
+
+    TArray<TSharedPtr<FJsonValue>> InputsConnectedJson;
+    auto RecordInputConnection = [&](const FString& SlotName, const FString& SourceName)
+    {
+        TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+        Row->SetStringField(TEXT("slot"), SlotName);
+        Row->SetStringField(TEXT("source"), SourceName);
+        InputsConnectedJson.Add(MakeShared<FJsonValueObject>(Row));
+    };
+
+    // Per-shape input wiring + literal land.
+    if (Shape == EMathShape::TwoInputAB)
+    {
+        FString AToken, BToken, AOut, BOut;
+        Params->TryGetStringField(TEXT("A"), AToken) || Params->TryGetStringField(TEXT("a"), AToken)
+            || Params->TryGetStringField(TEXT("input_a"), AToken);
+        Params->TryGetStringField(TEXT("B"), BToken) || Params->TryGetStringField(TEXT("b"), BToken)
+            || Params->TryGetStringField(TEXT("input_b"), BToken);
+        Params->TryGetStringField(TEXT("a_output"), AOut);
+        Params->TryGetStringField(TEXT("b_output"), BOut);
+        if (TryWireSlot(TEXT("A"), AToken, AOut)) { RecordInputConnection(TEXT("A"), AToken); }
+        if (TryWireSlot(TEXT("B"), BToken, BOut)) { RecordInputConnection(TEXT("B"), BToken); }
+
+        // Const slots: ConstA / ConstB float fallbacks when the input
+        // pin is not wired up. `constant_a` / `constant_b` map onto
+        // those slots; a bare `constant` populates ConstB for the "*
+        // scalar" idiom.
+        double ConstA = 0.0, ConstB = 0.0, BareConstant = 0.0;
+        bool bHasA = Params->TryGetNumberField(TEXT("constant_a"), ConstA)
+            || Params->TryGetNumberField(TEXT("const_a"), ConstA)
+            || Params->TryGetNumberField(TEXT("ConstA"), ConstA);
+        bool bHasB = Params->TryGetNumberField(TEXT("constant_b"), ConstB)
+            || Params->TryGetNumberField(TEXT("const_b"), ConstB)
+            || Params->TryGetNumberField(TEXT("ConstB"), ConstB);
+        bool bHasBare = Params->TryGetNumberField(TEXT("constant"), BareConstant)
+            || Params->TryGetNumberField(TEXT("value"), BareConstant)
+            || Params->TryGetNumberField(TEXT("scalar"), BareConstant);
+        // Each concrete two-input math node carries its own ConstA /
+        // ConstB pair. Branch by class so the writes hit the typed
+        // member without needing reflection.
+        if (UMaterialExpressionAdd* AsAdd = Cast<UMaterialExpressionAdd>(NewExpr))
+        {
+            if (bHasA) AsAdd->ConstA = static_cast<float>(ConstA);
+            if (bHasB) AsAdd->ConstB = static_cast<float>(ConstB);
+            if (bHasBare && !bHasB) AsAdd->ConstB = static_cast<float>(BareConstant);
+        }
+        else if (UMaterialExpressionSubtract* AsSub = Cast<UMaterialExpressionSubtract>(NewExpr))
+        {
+            if (bHasA) AsSub->ConstA = static_cast<float>(ConstA);
+            if (bHasB) AsSub->ConstB = static_cast<float>(ConstB);
+            if (bHasBare && !bHasB) AsSub->ConstB = static_cast<float>(BareConstant);
+        }
+        else if (UMaterialExpressionMultiply* AsMul = Cast<UMaterialExpressionMultiply>(NewExpr))
+        {
+            if (bHasA) AsMul->ConstA = static_cast<float>(ConstA);
+            if (bHasB) AsMul->ConstB = static_cast<float>(ConstB);
+            if (bHasBare && !bHasB) AsMul->ConstB = static_cast<float>(BareConstant);
+        }
+        else if (UMaterialExpressionDivide* AsDiv = Cast<UMaterialExpressionDivide>(NewExpr))
+        {
+            if (bHasA) AsDiv->ConstA = static_cast<float>(ConstA);
+            if (bHasB) AsDiv->ConstB = static_cast<float>(ConstB);
+            if (bHasBare && !bHasB) AsDiv->ConstB = static_cast<float>(BareConstant);
+        }
+        else if (UMaterialExpressionMin* AsMin = Cast<UMaterialExpressionMin>(NewExpr))
+        {
+            if (bHasA) AsMin->ConstA = static_cast<float>(ConstA);
+            if (bHasB) AsMin->ConstB = static_cast<float>(ConstB);
+            if (bHasBare && !bHasB) AsMin->ConstB = static_cast<float>(BareConstant);
+        }
+        else if (UMaterialExpressionMax* AsMax = Cast<UMaterialExpressionMax>(NewExpr))
+        {
+            if (bHasA) AsMax->ConstA = static_cast<float>(ConstA);
+            if (bHasB) AsMax->ConstB = static_cast<float>(ConstB);
+            if (bHasBare && !bHasB) AsMax->ConstB = static_cast<float>(BareConstant);
+        }
+    }
+    else if (Shape == EMathShape::ThreeInputLerp)
+    {
+        FString AToken, BToken, AlphaToken, AOut, BOut, AlphaOut;
+        Params->TryGetStringField(TEXT("A"), AToken) || Params->TryGetStringField(TEXT("a"), AToken)
+            || Params->TryGetStringField(TEXT("input_a"), AToken);
+        Params->TryGetStringField(TEXT("B"), BToken) || Params->TryGetStringField(TEXT("b"), BToken)
+            || Params->TryGetStringField(TEXT("input_b"), BToken);
+        Params->TryGetStringField(TEXT("Alpha"), AlphaToken) || Params->TryGetStringField(TEXT("alpha"), AlphaToken)
+            || Params->TryGetStringField(TEXT("T"), AlphaToken) || Params->TryGetStringField(TEXT("t"), AlphaToken);
+        Params->TryGetStringField(TEXT("a_output"), AOut);
+        Params->TryGetStringField(TEXT("b_output"), BOut);
+        Params->TryGetStringField(TEXT("alpha_output"), AlphaOut);
+        if (TryWireSlot(TEXT("A"), AToken, AOut)) { RecordInputConnection(TEXT("A"), AToken); }
+        if (TryWireSlot(TEXT("B"), BToken, BOut)) { RecordInputConnection(TEXT("B"), BToken); }
+        if (TryWireSlot(TEXT("Alpha"), AlphaToken, AlphaOut)) { RecordInputConnection(TEXT("Alpha"), AlphaToken); }
+
+        UMaterialExpressionLinearInterpolate* AsLerp = Cast<UMaterialExpressionLinearInterpolate>(NewExpr);
+        if (AsLerp)
+        {
+            double ConstA = 0.0, ConstB = 0.0, ConstAlpha = 0.0;
+            if (Params->TryGetNumberField(TEXT("constant_a"), ConstA)
+                || Params->TryGetNumberField(TEXT("const_a"), ConstA)
+                || Params->TryGetNumberField(TEXT("ConstA"), ConstA))
+            {
+                AsLerp->ConstA = static_cast<float>(ConstA);
+            }
+            if (Params->TryGetNumberField(TEXT("constant_b"), ConstB)
+                || Params->TryGetNumberField(TEXT("const_b"), ConstB)
+                || Params->TryGetNumberField(TEXT("ConstB"), ConstB))
+            {
+                AsLerp->ConstB = static_cast<float>(ConstB);
+            }
+            if (Params->TryGetNumberField(TEXT("constant_alpha"), ConstAlpha)
+                || Params->TryGetNumberField(TEXT("const_alpha"), ConstAlpha)
+                || Params->TryGetNumberField(TEXT("ConstAlpha"), ConstAlpha)
+                || Params->TryGetNumberField(TEXT("constant_t"), ConstAlpha)
+                || Params->TryGetNumberField(TEXT("constant"), ConstAlpha))
+            {
+                AsLerp->ConstAlpha = static_cast<float>(ConstAlpha);
+            }
+        }
+    }
+    else if (Shape == EMathShape::TwoInputBase)
+    {
+        FString BaseToken, ExpToken, BaseOut, ExpOut;
+        Params->TryGetStringField(TEXT("Base"), BaseToken) || Params->TryGetStringField(TEXT("base"), BaseToken)
+            || Params->TryGetStringField(TEXT("input"), BaseToken)
+            || Params->TryGetStringField(TEXT("A"), BaseToken) || Params->TryGetStringField(TEXT("a"), BaseToken);
+        Params->TryGetStringField(TEXT("Exponent"), ExpToken) || Params->TryGetStringField(TEXT("exponent"), ExpToken)
+            || Params->TryGetStringField(TEXT("B"), ExpToken) || Params->TryGetStringField(TEXT("b"), ExpToken);
+        Params->TryGetStringField(TEXT("base_output"), BaseOut);
+        Params->TryGetStringField(TEXT("exponent_output"), ExpOut);
+        if (TryWireSlot(TEXT("Base"), BaseToken, BaseOut)) { RecordInputConnection(TEXT("Base"), BaseToken); }
+        if (TryWireSlot(TEXT("Exponent"), ExpToken, ExpOut)) { RecordInputConnection(TEXT("Exponent"), ExpToken); }
+
+        UMaterialExpressionPower* AsPow = Cast<UMaterialExpressionPower>(NewExpr);
+        if (AsPow)
+        {
+            double ConstExp = 0.0;
+            if (Params->TryGetNumberField(TEXT("constant_exponent"), ConstExp)
+                || Params->TryGetNumberField(TEXT("const_exponent"), ConstExp)
+                || Params->TryGetNumberField(TEXT("ConstExponent"), ConstExp)
+                || Params->TryGetNumberField(TEXT("constant"), ConstExp)
+                || Params->TryGetNumberField(TEXT("exponent_value"), ConstExp))
+            {
+                AsPow->ConstExponent = static_cast<float>(ConstExp);
+            }
+        }
+    }
+    else if (Shape == EMathShape::OneInput)
+    {
+        FString InputToken, InputOut;
+        Params->TryGetStringField(TEXT("input"), InputToken)
+            || Params->TryGetStringField(TEXT("Input"), InputToken)
+            || Params->TryGetStringField(TEXT("A"), InputToken)
+            || Params->TryGetStringField(TEXT("a"), InputToken);
+        Params->TryGetStringField(TEXT("input_output"), InputOut);
+        if (TryWireSlot(TEXT("Input"), InputToken, InputOut)) { RecordInputConnection(TEXT("Input"), InputToken); }
+    }
+    else if (Shape == EMathShape::OneInputNormalize)
+    {
+        FString InputToken, InputOut;
+        Params->TryGetStringField(TEXT("input"), InputToken)
+            || Params->TryGetStringField(TEXT("Input"), InputToken)
+            || Params->TryGetStringField(TEXT("VectorInput"), InputToken)
+            || Params->TryGetStringField(TEXT("vector_input"), InputToken)
+            || Params->TryGetStringField(TEXT("A"), InputToken)
+            || Params->TryGetStringField(TEXT("a"), InputToken);
+        Params->TryGetStringField(TEXT("input_output"), InputOut);
+        if (TryWireSlot(TEXT("VectorInput"), InputToken, InputOut)) { RecordInputConnection(TEXT("VectorInput"), InputToken); }
+    }
+    else if (Shape == EMathShape::TwoInputDotCross)
+    {
+        FString AToken, BToken, AOut, BOut;
+        Params->TryGetStringField(TEXT("A"), AToken) || Params->TryGetStringField(TEXT("a"), AToken)
+            || Params->TryGetStringField(TEXT("input_a"), AToken);
+        Params->TryGetStringField(TEXT("B"), BToken) || Params->TryGetStringField(TEXT("b"), BToken)
+            || Params->TryGetStringField(TEXT("input_b"), BToken);
+        Params->TryGetStringField(TEXT("a_output"), AOut);
+        Params->TryGetStringField(TEXT("b_output"), BOut);
+        if (TryWireSlot(TEXT("A"), AToken, AOut)) { RecordInputConnection(TEXT("A"), AToken); }
+        if (TryWireSlot(TEXT("B"), BToken, BOut)) { RecordInputConnection(TEXT("B"), BToken); }
+    }
+
+    // Optional flat properties dict applies any remaining UPROPERTY
+    // values (Period on Sin / Cos, Description, etc.) through
+    // ImportText_InContainer; mirrors add_expression.
+    TArray<FString> PropertyErrors;
+    int32 PropertyAppliedCount = 0;
+    if (Params->HasField(TEXT("properties")))
+    {
+        const TSharedPtr<FJsonValue> PropsVal = Params->TryGetField(TEXT("properties"));
+        if (PropsVal.IsValid() && PropsVal->Type == EJson::Object)
+        {
+            PropertyAppliedCount = MaterialEdit_ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
+        }
+    }
+
+    // Optional one-shot wiring into a material attribute or another
+    // expression's named input pin. Same shape as add_expression.
+    bool bConnectedToProperty = false;
+    bool bConnectedToExpression = false;
+    FString PropertyConnected;
+    FString ExpressionConnected;
+
+    FString PropertyToken;
+    if (Params->TryGetStringField(TEXT("property"), PropertyToken)
+        || Params->TryGetStringField(TEXT("connect_property"), PropertyToken))
+    {
+        EMaterialProperty MaterialProperty;
+        if (!TryParseMaterialProperty(PropertyToken, MaterialProperty))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unknown material property token '%s'. Use BaseColor, Metallic, Roughness, EmissiveColor, etc."), *PropertyToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialProperty(NewExpr, FromOutput, MaterialProperty))
+        {
+            bConnectedToProperty = true;
+            PropertyConnected = PropertyToken;
+        }
+    }
+
+    FString ConnectToToken;
+    FString ConnectInputToken;
+    if (Params->TryGetStringField(TEXT("connect_to"), ConnectToToken))
+    {
+        Params->TryGetStringField(TEXT("connect_input"), ConnectInputToken);
+        UMaterialExpression* ToExpr = FindExpressionByName(Material, ConnectToToken);
+        if (!ToExpr)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("connect_to expression '%s' not found on material"), *ConnectToToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialExpressions(NewExpr, FromOutput, ToExpr, ConnectInputToken))
+        {
+            bConnectedToExpression = true;
+            ExpressionConnected = ToExpr->GetName();
+        }
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_math"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetStringField(TEXT("math_op"), CanonicalToken);
+    ResultObj->SetStringField(TEXT("expression_class"), MathClass->GetName());
+    ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
+    ResultObj->SetArrayField(TEXT("inputs_connected"), InputsConnectedJson);
+    if (InputWireErrors.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& E : InputWireErrors)
+        {
+            Arr.Add(MakeShared<FJsonValueString>(E));
+        }
+        ResultObj->SetArrayField(TEXT("input_errors"), Arr);
+    }
     ResultObj->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
     if (PropertyErrors.Num() > 0)
     {
