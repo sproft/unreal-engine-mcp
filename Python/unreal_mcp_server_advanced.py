@@ -3263,6 +3263,32 @@ def widget_edit(
           engine's layout-invalidate path fires. Complements
           ``set_canvas_slot`` for the overlay-anchored UMG
           layout case.
+        - "set_box_slot": single-call sugar over
+          ``set_slot_property`` for both UHorizontalBoxSlot and
+          UVerticalBoxSlot surfaces. ``widget`` is the FName of
+          the target child widget on the WBP's WidgetTree; the
+          child's slot must be a UHorizontalBoxSlot or
+          UVerticalBoxSlot (i.e. the parent panel is a
+          UHorizontalBox or UVerticalBox). The op detects which
+          orientation the child carries and routes through the
+          matching setter list. ``horizontal_alignment`` (alias
+          ``h_align`` / ``halign``) accepts ``Fill`` / ``Left``
+          / ``Center`` / ``Right``; ``vertical_alignment``
+          (alias ``v_align`` / ``valign``) accepts ``Fill`` /
+          ``Top`` / ``Center`` / ``Bottom``. ``padding`` accepts
+          ``[left, top, right, bottom]`` / ``[horizontal,
+          vertical]`` / a uniform number / ``{Left, Top, Right,
+          Bottom}``. Optional ``size`` writes the box slot's
+          FSlateChildSize and accepts ``"Auto"`` / ``"Fill"``
+          (Fill with weight 1.0), a bare number (treated as
+          Fill weight), ``["Fill", weight]``, or ``{rule:
+          "Fill", value: weight}``. Routes through
+          ``UHorizontalBoxSlot::SetHorizontalAlignment`` /
+          ``SetVerticalAlignment`` / ``SetPadding`` / ``SetSize``
+          (and the matching UVerticalBoxSlot setters) so the
+          parent panel's layout invalidates. Complements
+          ``set_canvas_slot`` and ``set_overlay_slot`` for the
+          box-stack UMG case.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or

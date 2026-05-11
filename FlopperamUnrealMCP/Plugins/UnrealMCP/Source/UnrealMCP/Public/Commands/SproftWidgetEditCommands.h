@@ -207,4 +207,5 @@ private:
     TSharedPtr<FJsonObject> SetWidgetNavigation(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetCanvasSlot(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetOverlaySlot(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetBoxSlot(const TSharedPtr<FJsonObject>& Params);
 };

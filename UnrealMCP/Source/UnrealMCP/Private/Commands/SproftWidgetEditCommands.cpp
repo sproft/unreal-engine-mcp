@@ -13,6 +13,7 @@
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
 #include "Components/Image.h"
 #include "Components/Overlay.h"
 #include "Components/OverlaySlot.h"
@@ -23,6 +24,7 @@
 #include "Components/Spacer.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
+#include "Components/VerticalBoxSlot.h"
 #include "Components/PanelSlot.h"
 #include "Components/Widget.h"
 #include "EditorAssetLibrary.h"
@@ -371,9 +373,15 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetOverlaySlot(Params);
     }
+    if (Operation == TEXT("set_box_slot") || Operation == TEXT("box_slot")
+        || Operation == TEXT("set_vertical_box_slot") || Operation == TEXT("set_horizontal_box_slot")
+        || Operation == TEXT("vertical_box_slot") || Operation == TEXT("horizontal_box_slot"))
+    {
+        return SetBoxSlot(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation, set_canvas_slot, set_overlay_slot"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation, set_canvas_slot, set_overlay_slot, set_box_slot"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -4376,6 +4384,433 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetOverlaySlot(const TSharedP
     ResultObj->SetStringField(TEXT("previous_horizontal_alignment"), HAlignToToken(PrevHAlign));
     ResultObj->SetStringField(TEXT("previous_vertical_alignment"), VAlignToToken(PrevVAlign));
     ResultObj->SetArrayField(TEXT("previous_padding"), MarginToArray(PrevPadding));
+
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+namespace
+{
+    /** Resolve a user-supplied `size` shape to an FSlateChildSize. The
+     *  box slot stores the rule on `SizeRule` (ESlateSizeRule::Type
+     *  Auto / Fill) and a per-rule float weight on `Value`. We accept
+     *  several shapes so callers do not have to spell the engine token
+     *  out:
+     *    - a plain string `"Auto"` (alias `"auto_size"`)
+     *    - a plain string `"Fill"` with `Value=1.0` (alias `"fill"`)
+     *    - a number `N` interpreted as `{Fill, N}` (weight)
+     *    - an object `{rule: "Auto" | "Fill", value: N}` (alias
+     *      `size_rule` for `rule`, `weight` for `value`)
+     *    - an array `["Fill", N]` or `[N]` (broadcasts to Fill)
+     */
+    bool BoxSlot_ParseSize(const TSharedPtr<FJsonValue>& Value, FSlateChildSize& OutSize, FString& OutCanonical)
+    {
+        if (!Value.IsValid())
+        {
+            return false;
+        }
+
+        auto Apply = [&OutSize, &OutCanonical](ESlateSizeRule::Type Rule, float Weight)
+        {
+            OutSize.SizeRule = Rule;
+            OutSize.Value = Weight;
+            OutCanonical = (Rule == ESlateSizeRule::Fill)
+                ? FString::Printf(TEXT("Fill(%.4g)"), Weight)
+                : FString(TEXT("Auto"));
+        };
+
+        auto ParseRuleToken = [](const FString& InToken, ESlateSizeRule::Type& OutRule) -> bool
+        {
+            FString T = InToken.TrimStartAndEnd().ToLower();
+            T = T.Replace(TEXT("_"), TEXT(""));
+            T = T.Replace(TEXT(" "), TEXT(""));
+            if (T.StartsWith(TEXT("sizerule")))
+            {
+                T = T.RightChop(8);
+            }
+            if (T.StartsWith(TEXT("eslate")))
+            {
+                T = T.RightChop(6);
+            }
+            if (T == TEXT("auto") || T == TEXT("autosize"))      { OutRule = ESlateSizeRule::Automatic; return true; }
+            if (T == TEXT("fill") || T == TEXT("fillweight"))    { OutRule = ESlateSizeRule::Fill;      return true; }
+            return false;
+        };
+
+        if (Value->Type == EJson::String)
+        {
+            ESlateSizeRule::Type Rule;
+            if (!ParseRuleToken(Value->AsString(), Rule))
+            {
+                return false;
+            }
+            // The Auto rule ignores Value; the Fill rule defaults to 1.0
+            // weight when the caller only passes the token.
+            Apply(Rule, Rule == ESlateSizeRule::Fill ? 1.0f : 1.0f);
+            return true;
+        }
+        if (Value->Type == EJson::Number)
+        {
+            // A bare number is treated as Fill(weight). The Auto rule
+            // does not carry a numeric knob so the bare-number shape
+            // routes through Fill.
+            Apply(ESlateSizeRule::Fill, static_cast<float>(Value->AsNumber()));
+            return true;
+        }
+        if (Value->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = Value->AsArray();
+            if (Arr.Num() == 1)
+            {
+                if (Arr[0]->Type == EJson::String)
+                {
+                    ESlateSizeRule::Type Rule;
+                    if (!ParseRuleToken(Arr[0]->AsString(), Rule)) { return false; }
+                    Apply(Rule, 1.0f);
+                    return true;
+                }
+                if (Arr[0]->Type == EJson::Number)
+                {
+                    Apply(ESlateSizeRule::Fill, static_cast<float>(Arr[0]->AsNumber()));
+                    return true;
+                }
+                return false;
+            }
+            if (Arr.Num() == 2)
+            {
+                ESlateSizeRule::Type Rule = ESlateSizeRule::Fill;
+                if (Arr[0]->Type == EJson::String)
+                {
+                    if (!ParseRuleToken(Arr[0]->AsString(), Rule)) { return false; }
+                }
+                else
+                {
+                    return false;
+                }
+                const float Weight = (Arr[1]->Type == EJson::Number)
+                    ? static_cast<float>(Arr[1]->AsNumber())
+                    : 1.0f;
+                Apply(Rule, Weight);
+                return true;
+            }
+            return false;
+        }
+        if (Value->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject>& Obj = Value->AsObject();
+            FString RuleStr;
+            ESlateSizeRule::Type Rule = ESlateSizeRule::Fill;
+            bool bHasRule = false;
+            if (Obj->TryGetStringField(TEXT("rule"), RuleStr)
+                || Obj->TryGetStringField(TEXT("Rule"), RuleStr)
+                || Obj->TryGetStringField(TEXT("size_rule"), RuleStr)
+                || Obj->TryGetStringField(TEXT("SizeRule"), RuleStr))
+            {
+                if (!ParseRuleToken(RuleStr, Rule)) { return false; }
+                bHasRule = true;
+            }
+            double Weight = 1.0;
+            const bool bHasValue =
+                Obj->TryGetNumberField(TEXT("value"), Weight)
+                || Obj->TryGetNumberField(TEXT("Value"), Weight)
+                || Obj->TryGetNumberField(TEXT("weight"), Weight)
+                || Obj->TryGetNumberField(TEXT("Weight"), Weight);
+            if (!bHasRule && !bHasValue)
+            {
+                return false;
+            }
+            if (!bHasRule)
+            {
+                // A bare weight reads as Fill(weight).
+                Rule = ESlateSizeRule::Fill;
+            }
+            Apply(Rule, static_cast<float>(Weight));
+            return true;
+        }
+        return false;
+    }
+
+    FString SizeRuleToToken(ESlateSizeRule::Type InRule)
+    {
+        switch (InRule)
+        {
+        case ESlateSizeRule::Automatic: return TEXT("Auto");
+        case ESlateSizeRule::Fill:      return TEXT("Fill");
+        default: return FString::Printf(TEXT("Unknown(%d)"), static_cast<int32>(InRule));
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetBoxSlot(const TSharedPtr<FJsonObject>& Params)
+{
+    // Sugar over set_slot_property for the UHorizontalBoxSlot /
+    // UVerticalBoxSlot pair. Both slot classes carry the same writable
+    // surface (HorizontalAlignment / VerticalAlignment / Padding /
+    // Size) since they share UBoxSlotBase under the hood; the engine
+    // exposes the canonical `SetPadding` / `SetHorizontalAlignment` /
+    // `SetVerticalAlignment` / `SetSize` setters on each class. We
+    // detect which slot class the child got parented under and route
+    // through the matching setter so the parent UHorizontalBox /
+    // UVerticalBox cached slate widget refreshes on the next tick.
+    // Mirrors the shape of set_overlay_slot / set_canvas_slot from the
+    // prior batch.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_box_slot: missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_box_slot: asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+    if (!WBP->WidgetTree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_box_slot: WidgetBlueprint has no WidgetTree"));
+    }
+
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_box_slot: missing 'widget' parameter (target child widget FName)"));
+    }
+    UWidget* TargetWidget = WBP->WidgetTree->FindWidget(FName(*WidgetNameStr));
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_box_slot: could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    // Detect which UPanelSlot subclass the child carries and refuse
+    // anything that is not a UHorizontalBoxSlot / UVerticalBoxSlot.
+    // The slot class is decided by the parent panel when the child
+    // attaches; the box-only knobs do not live on UCanvasPanelSlot or
+    // UOverlaySlot. We resolve both branches up front so the writes
+    // route through the concrete setter list rather than reflection.
+    UHorizontalBoxSlot* HBoxSlot = Cast<UHorizontalBoxSlot>(TargetWidget->Slot);
+    UVerticalBoxSlot* VBoxSlot = Cast<UVerticalBoxSlot>(TargetWidget->Slot);
+    if (!HBoxSlot && !VBoxSlot)
+    {
+        UClass* SlotClass = TargetWidget->Slot ? TargetWidget->Slot->GetClass() : nullptr;
+        const FString SlotClassName = SlotClass ? SlotClass->GetName() : FString(TEXT("<null>"));
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_box_slot: widget '%s' is not parented to a UHorizontalBox / UVerticalBox (slot class is '%s'). Reparent the child to a box or use 'set_slot_property' for non-box slots."),
+                *WidgetNameStr, *SlotClassName));
+    }
+
+    const bool bIsHorizontal = (HBoxSlot != nullptr);
+
+    auto GetHAlign = [&]() -> EHorizontalAlignment
+    {
+        return bIsHorizontal ? HBoxSlot->GetHorizontalAlignment() : VBoxSlot->GetHorizontalAlignment();
+    };
+    auto GetVAlign = [&]() -> EVerticalAlignment
+    {
+        return bIsHorizontal ? HBoxSlot->GetVerticalAlignment() : VBoxSlot->GetVerticalAlignment();
+    };
+    auto GetPadding = [&]() -> FMargin
+    {
+        return bIsHorizontal ? HBoxSlot->GetPadding() : VBoxSlot->GetPadding();
+    };
+    auto GetSize = [&]() -> FSlateChildSize
+    {
+        return bIsHorizontal ? HBoxSlot->GetSize() : VBoxSlot->GetSize();
+    };
+
+    // Capture the previous values for the diff payload.
+    const EHorizontalAlignment PrevHAlign = GetHAlign();
+    const EVerticalAlignment PrevVAlign = GetVAlign();
+    const FMargin PrevPadding = GetPadding();
+    const FSlateChildSize PrevSize = GetSize();
+
+    EHorizontalAlignment NewHAlign = PrevHAlign;
+    EVerticalAlignment NewVAlign = PrevVAlign;
+    FMargin NewPadding = PrevPadding;
+    FSlateChildSize NewSize = PrevSize;
+
+    TArray<FString> Applied;
+
+    FString HAlignToken;
+    FString HAlignCanonical = HAlignToToken(PrevHAlign);
+    bool bWroteHAlign = false;
+    if (Params->TryGetStringField(TEXT("horizontal_alignment"), HAlignToken)
+        || Params->TryGetStringField(TEXT("h_align"), HAlignToken)
+        || Params->TryGetStringField(TEXT("halign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("hAlign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("HAlign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("horizontal"), HAlignToken))
+    {
+        if (!OverlaySlot_ParseHAlign(HAlignToken, NewHAlign, HAlignCanonical))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_box_slot: unknown horizontal_alignment '%s'. Supported: Fill, Left, Center, Right"), *HAlignToken));
+        }
+        bWroteHAlign = true;
+        Applied.Add(TEXT("horizontal_alignment"));
+    }
+
+    FString VAlignToken;
+    FString VAlignCanonical = VAlignToToken(PrevVAlign);
+    bool bWroteVAlign = false;
+    if (Params->TryGetStringField(TEXT("vertical_alignment"), VAlignToken)
+        || Params->TryGetStringField(TEXT("v_align"), VAlignToken)
+        || Params->TryGetStringField(TEXT("valign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("vAlign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("VAlign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("vertical"), VAlignToken))
+    {
+        if (!OverlaySlot_ParseVAlign(VAlignToken, NewVAlign, VAlignCanonical))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_box_slot: unknown vertical_alignment '%s'. Supported: Fill, Top, Center, Bottom"), *VAlignToken));
+        }
+        bWroteVAlign = true;
+        Applied.Add(TEXT("vertical_alignment"));
+    }
+
+    bool bWrotePadding = false;
+    {
+        const TSharedPtr<FJsonValue> Val = Params->TryGetField(TEXT("padding"));
+        if (Val.IsValid())
+        {
+            if (!CanvasSlot_ParseMargin(Val, NewPadding))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_box_slot: 'padding' must be [left, top, right, bottom] or {left, top, right, bottom}"));
+            }
+            bWrotePadding = true;
+            Applied.Add(TEXT("padding"));
+        }
+    }
+
+    FString SizeCanonical = (PrevSize.SizeRule == ESlateSizeRule::Fill)
+        ? FString::Printf(TEXT("Fill(%.4g)"), PrevSize.Value)
+        : FString(TEXT("Auto"));
+    bool bWroteSize = false;
+    {
+        const TSharedPtr<FJsonValue> Val = Params->TryGetField(TEXT("size"));
+        if (Val.IsValid())
+        {
+            if (!BoxSlot_ParseSize(Val, NewSize, SizeCanonical))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("set_box_slot: 'size' must be one of: 'Auto', 'Fill', a number weight, ['Fill', weight], or {rule: 'Fill', value: weight}"));
+            }
+            bWroteSize = true;
+            Applied.Add(TEXT("size"));
+        }
+    }
+
+    if (Applied.Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_box_slot: pass at least one of 'horizontal_alignment' / 'vertical_alignment' / 'padding' / 'size'"));
+    }
+
+    // Route writes through the slot's canonical setters so the engine's
+    // layout-invalidate path fires. Each setter calls Invalidate on the
+    // parent panel so an open UMG designer picks the change up.
+    if (bIsHorizontal)
+    {
+        HBoxSlot->Modify();
+        if (bWroteHAlign)  { HBoxSlot->SetHorizontalAlignment(NewHAlign); }
+        if (bWroteVAlign)  { HBoxSlot->SetVerticalAlignment(NewVAlign); }
+        if (bWrotePadding) { HBoxSlot->SetPadding(NewPadding); }
+        if (bWroteSize)    { HBoxSlot->SetSize(NewSize); }
+    }
+    else
+    {
+        VBoxSlot->Modify();
+        if (bWroteHAlign)  { VBoxSlot->SetHorizontalAlignment(NewHAlign); }
+        if (bWroteVAlign)  { VBoxSlot->SetVerticalAlignment(NewVAlign); }
+        if (bWrotePadding) { VBoxSlot->SetPadding(NewPadding); }
+        if (bWroteSize)    { VBoxSlot->SetSize(NewSize); }
+    }
+
+#if WITH_EDITOR
+    if (bIsHorizontal) { HBoxSlot->PostEditChange(); }
+    else               { VBoxSlot->PostEditChange(); }
+    TargetWidget->PostEditChange();
+#endif
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+    bool bCompile = false;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (UPackage* Package = WBP->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    auto MarginToArray = [](const FMargin& M)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Left));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Top));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Right));
+        Arr.Add(MakeShared<FJsonValueNumber>(M.Bottom));
+        return Arr;
+    };
+    auto SizeToObject = [](const FSlateChildSize& S)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("rule"), SizeRuleToToken(S.SizeRule));
+        Obj->SetNumberField(TEXT("value"), S.Value);
+        return Obj;
+    };
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    for (const FString& Name : Applied)
+    {
+        AppliedJson.Add(MakeShared<FJsonValueString>(Name));
+    }
+
+    UClass* ResolvedSlotClass = bIsHorizontal
+        ? UHorizontalBoxSlot::StaticClass()
+        : UVerticalBoxSlot::StaticClass();
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_box_slot"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("widget"), WidgetNameStr);
+    ResultObj->SetStringField(TEXT("widget_class"), TargetWidget->GetClass()->GetPathName());
+    ResultObj->SetStringField(TEXT("slot_class"), ResolvedSlotClass->GetName());
+    ResultObj->SetStringField(TEXT("orientation"), bIsHorizontal ? TEXT("Horizontal") : TEXT("Vertical"));
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetNumberField(TEXT("applied_count"), Applied.Num());
+
+    ResultObj->SetStringField(TEXT("horizontal_alignment"), HAlignToToken(GetHAlign()));
+    ResultObj->SetStringField(TEXT("vertical_alignment"), VAlignToToken(GetVAlign()));
+    ResultObj->SetArrayField(TEXT("padding"), MarginToArray(GetPadding()));
+    ResultObj->SetObjectField(TEXT("size"), SizeToObject(GetSize()));
+
+    ResultObj->SetStringField(TEXT("previous_horizontal_alignment"), HAlignToToken(PrevHAlign));
+    ResultObj->SetStringField(TEXT("previous_vertical_alignment"), VAlignToToken(PrevVAlign));
+    ResultObj->SetArrayField(TEXT("previous_padding"), MarginToArray(PrevPadding));
+    ResultObj->SetObjectField(TEXT("previous_size"), SizeToObject(PrevSize));
 
     ResultObj->SetBoolField(TEXT("compiled"), bCompile);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
