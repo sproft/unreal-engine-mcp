@@ -3438,6 +3438,7 @@ def bp_input(
     position: Optional[List[float]] = None,
     modifier_class: Optional[str] = None,
     trigger_class: Optional[str] = None,
+    chord_action: Optional[str] = None,
     properties: Optional[Dict[str, Any]] = None,
     compile: bool = True,
     save: bool = True,
@@ -3481,6 +3482,19 @@ def bp_input(
           ``ChordAction`` on a chord trigger, etc., in the same call.
           Failed property entries surface under ``skipped`` with a
           reason.
+        - "add_action_chord": declarative one-call wrapper that spawns
+          a ``UInputTriggerChordAction`` on a mapping row and binds
+          its ``ChordAction`` slot to a sibling UInputAction asset in
+          one step. Resolves the host row by ``(input_action, key)``,
+          loads the chord-action sibling from ``chord_action``
+          (``/Game/...`` path or unique short name), and appends the
+          new chord trigger to the row's ``Triggers`` array. Refuses
+          a self-chord (the runtime never resolves a row chorded
+          against its own action). The chord-action IA must exist
+          before the call so topology stays explicit. Optional
+          ``properties`` lands on the trigger through
+          ``FProperty::ImportText_InContainer`` for any extra fields
+          a future UE version adds beyond ``ChordAction``.
 
     Args:
         operation: "create_input_action", "create_input_mapping_context",
@@ -3548,6 +3562,8 @@ def bp_input(
         params["modifier_class"] = modifier_class
     if trigger_class is not None:
         params["trigger_class"] = trigger_class
+    if chord_action is not None:
+        params["chord_action"] = chord_action
     if properties is not None:
         params["properties"] = properties
     params["compile"] = compile

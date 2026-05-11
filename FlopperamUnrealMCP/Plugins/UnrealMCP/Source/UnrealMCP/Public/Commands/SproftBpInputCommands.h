@@ -40,6 +40,21 @@
  *      `HoldTimeThreshold` on a hold trigger, `TapReleaseTimeThreshold`
  *      on a tap trigger, `ChordAction` on a chord trigger, etc., in
  *      the same call.
+ *   - "add_action_chord": declarative one-call wrapper that spawns
+ *      a UInputTriggerChordAction on a mapping row and binds its
+ *      `ChordAction` slot to a sibling UInputAction asset path in
+ *      one step. Resolves the host mapping row by `(input_action,
+ *      key)` pair the same way `add_action_trigger` does, NewObject's
+ *      a UInputTriggerChordAction subobject outered to the IMC, sets
+ *      its `ChordAction` member to the resolved sibling UInputAction
+ *      asset (loaded from a `/Game/...` path or short name), and
+ *      appends the trigger to the mapping row's `Triggers` array.
+ *      The chord action must exist before the call: this op refuses
+ *      to silently create the sibling IA so topology stays explicit.
+ *      Optional flat `properties` dict lands on the new trigger
+ *      through `ImportText_InContainer` for any additional fields a
+ *      future UE version adds beyond `ChordAction`. Saves the IMC on
+ *      success unless `save=false`.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - UInputAction (UDataAsset subclass, EnhancedInput plugin)
@@ -75,4 +90,5 @@ private:
     TSharedPtr<FJsonObject> AddActionEventNode(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddActionModifier(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddActionTrigger(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddActionChord(const TSharedPtr<FJsonObject>& Params);
 };

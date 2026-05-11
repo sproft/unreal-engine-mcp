@@ -2311,6 +2311,30 @@ ability" alongside `tag_registry_edit`.
   per-row Triggers array (next to Modifiers on
   FEnhancedActionKeyMapping) and per-action Modifier surface on
   the UInputAction asset stay on this list.
+- `bp_input add_action_chord` (small) — declarative one-call
+  wrapper that lays a `UInputTriggerChordAction` down on a mapping
+  row and binds its `ChordAction` slot to a sibling `UInputAction`
+  in one step. The existing `add_action_trigger` op already covers
+  the generic trigger-class side; this op fronts the canonical
+  chord-action shape so the caller does not have to assemble a
+  `chord_action` short token + `properties = {ChordAction =
+  /Game/...}` dict on the way in. Resolves the host mapping row by
+  `(input_action, key)` pair the same way `add_action_trigger`
+  does, walks `IMC->GetMappings()` for the match, NewObject's a
+  `UInputTriggerChordAction` outered to the IMC (matching the
+  editor's `Instanced` UPROPERTY convention on
+  `FEnhancedActionKeyMapping::Triggers`), writes the resolved
+  sibling UInputAction to the trigger's public
+  `ChordAction TObjectPtr<const UInputAction>` member, and appends
+  the trigger to the row's `Triggers` array. The chord-action
+  sibling resolves through a `/Game/...` path or a unique short
+  name probed against the asset registry's UInputAction index.
+  Refuses self-chord (the runtime never resolves a row chorded
+  against its own action). Saves the IMC by default unless
+  `save=false`. Optional flat `properties` dict lands on the new
+  trigger through `FProperty::ImportText_InContainer` for any
+  additional fields a future UE version drops on the
+  UInputTriggerChordAction surface beyond `ChordAction`.
 - `material_edit add_texture_sample` (small) — adds a
   `UMaterialExpressionTextureSample` to a target UMaterial and binds
   the new node's `Texture` property to a chosen UTexture asset in one

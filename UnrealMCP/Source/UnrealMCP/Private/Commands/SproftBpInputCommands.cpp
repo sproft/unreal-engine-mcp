@@ -151,9 +151,14 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::HandleBpInput(const TSharedPtr<F
     {
         return AddActionTrigger(Params);
     }
+    if (Operation == TEXT("add_action_chord") || Operation == TEXT("add_chord")
+        || Operation == TEXT("add_mapping_chord") || Operation == TEXT("add_chorded_action"))
+    {
+        return AddActionChord(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported bp_input operation '%s'. Supported: create_input_action, create_input_mapping_context, add_mapping, add_action_event_node, add_action_modifier, add_action_trigger"), *Operation));
+        FString::Printf(TEXT("Unsupported bp_input operation '%s'. Supported: create_input_action, create_input_mapping_context, add_mapping, add_action_event_node, add_action_modifier, add_action_trigger, add_action_chord"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftBpInputCommands::CreateInputAction(const TSharedPtr<FJsonObject>& Params)
@@ -1120,6 +1125,236 @@ TSharedPtr<FJsonObject> FSproftBpInputCommands::AddActionTrigger(const TSharedPt
     ResultObj->SetNumberField(TEXT("mapping_index"), MatchedIndex);
     ResultObj->SetStringField(TEXT("trigger_class"), TriggerClass->GetName());
     ResultObj->SetStringField(TEXT("trigger_class_path"), TriggerClass->GetPathName());
+    ResultObj->SetNumberField(TEXT("trigger_count"), Row.Triggers.Num());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetArrayField(TEXT("skipped"), SkippedJson);
+    ResultObj->SetNumberField(TEXT("applied_count"), AppliedJson.Num());
+    ResultObj->SetNumberField(TEXT("skipped_count"), SkippedJson.Num());
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftBpInputCommands::AddActionChord(const TSharedPtr<FJsonObject>& Params)
+{
+    // Declarative one-call wrapper that lays a UInputTriggerChordAction
+    // down on a mapping row and binds its `ChordAction` slot to a
+    // sibling UInputAction in one step. The existing `add_action_trigger`
+    // op already covers the trigger-class side; this op fronts the
+    // canonical chord-action shape so the caller does not have to
+    // assemble the `chord_action` short token + `properties =
+    // {ChordAction = /Game/...}` dict on the way in.
+    FString IMCPath;
+    if (!Params->TryGetStringField(TEXT("input_mapping_context"), IMCPath)
+        && !Params->TryGetStringField(TEXT("imc"), IMCPath)
+        && !Params->TryGetStringField(TEXT("mapping_context"), IMCPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'input_mapping_context' parameter"));
+    }
+
+    FString ActionName;
+    if (!Params->TryGetStringField(TEXT("input_action"), ActionName)
+        && !Params->TryGetStringField(TEXT("action"), ActionName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'input_action' parameter (path or short name of the UInputAction the row binds)"));
+    }
+
+    FString KeyText;
+    if (!Params->TryGetStringField(TEXT("key"), KeyText))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'key' parameter (matches the FKey on the mapping row)"));
+    }
+
+    FString ChordActionParam;
+    if (!Params->TryGetStringField(TEXT("chord_action"), ChordActionParam)
+        && !Params->TryGetStringField(TEXT("chorded_action"), ChordActionParam)
+        && !Params->TryGetStringField(TEXT("chord"), ChordActionParam))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'chord_action' parameter (path or short name of the sibling UInputAction this trigger needs held)"));
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+
+    // Resolve the IMC.
+    UObject* IMCAsset = UEditorAssetLibrary::LoadAsset(IMCPath);
+    UInputMappingContext* IMC = Cast<UInputMappingContext>(IMCAsset);
+    if (!IMC)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UInputMappingContext: %s"), *IMCPath));
+    }
+
+    // Resolve the row-target UInputAction (the action the row binds).
+    const UInputAction* TargetAction = nullptr;
+    if (ActionName.StartsWith(TEXT("/")))
+    {
+        if (UObject* AsAsset = UEditorAssetLibrary::LoadAsset(ActionName))
+        {
+            TargetAction = Cast<UInputAction>(AsAsset);
+        }
+    }
+
+    const FKey TargetKey(*KeyText);
+    if (!TargetKey.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("FKey '%s' is not a known engine key. Pass an FKey FName like 'SpaceBar', 'W', or 'Gamepad_FaceButton_Bottom'."), *KeyText));
+    }
+
+    const TArray<FEnhancedActionKeyMapping>& Mappings = IMC->GetMappings();
+    int32 MatchedIndex = INDEX_NONE;
+    for (int32 i = 0; i < Mappings.Num(); ++i)
+    {
+        const FEnhancedActionKeyMapping& Row = Mappings[i];
+        if (Row.Key != TargetKey)
+        {
+            continue;
+        }
+        if (TargetAction)
+        {
+            if (Row.Action == TargetAction)
+            {
+                MatchedIndex = i;
+                break;
+            }
+        }
+        else if (Row.Action && Row.Action->GetName().Equals(ActionName, ESearchCase::IgnoreCase))
+        {
+            MatchedIndex = i;
+            break;
+        }
+    }
+    if (MatchedIndex == INDEX_NONE)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find a mapping row for action '%s' + key '%s' on %s. Run bp_input add_mapping first."),
+                *ActionName, *KeyText, *IMCPath));
+    }
+
+    // Resolve the sibling UInputAction (the chord action; the IA the
+    // user must be holding for this row to fire).
+    UInputAction* ChordAction = nullptr;
+    if (ChordActionParam.StartsWith(TEXT("/")))
+    {
+        if (UObject* AsAsset = UEditorAssetLibrary::LoadAsset(ChordActionParam))
+        {
+            ChordAction = Cast<UInputAction>(AsAsset);
+        }
+    }
+    else
+    {
+        // Asset registry fallback for a short name (matches the
+        // documented behaviour of the bp_input action resolvers).
+        FAssetRegistryModule& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        TArray<FAssetData> Found;
+        AssetRegistry.Get().GetAssetsByClass(UInputAction::StaticClass()->GetClassPathName(), Found, /*bSearchSubClasses=*/false);
+        for (const FAssetData& Data : Found)
+        {
+            if (Data.AssetName.ToString().Equals(ChordActionParam, ESearchCase::IgnoreCase))
+            {
+                ChordAction = Cast<UInputAction>(Data.GetAsset());
+                if (ChordAction) break;
+            }
+        }
+    }
+    if (!ChordAction)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve chord_action '%s' to a UInputAction. Pass a /Game/... path or a unique short name. The chord-action IA must exist before add_action_chord."),
+                *ChordActionParam));
+    }
+
+    // Refuse self-chord. The engine accepts it but the runtime never
+    // resolves: the row's own action cannot fire as its own chord
+    // prerequisite. Surface a clear error rather than silently land a
+    // broken trigger.
+    if (TargetAction && TargetAction == ChordAction)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("chord_action '%s' is the same as input_action; a row cannot be chorded against its own action."),
+                *ChordActionParam));
+    }
+
+    // NewObject the UInputTriggerChordAction subobject outered to the
+    // IMC (matching the editor's `Instanced` UPROPERTY convention on
+    // FEnhancedActionKeyMapping::Triggers).
+    UInputTriggerChordAction* NewChord = NewObject<UInputTriggerChordAction>(
+        IMC, UInputTriggerChordAction::StaticClass(), NAME_None, RF_Transactional);
+    if (!NewChord)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to construct UInputTriggerChordAction"));
+    }
+    NewChord->ChordAction = ChordAction;
+
+    // Optional flat property dict for future-proofing (any extra
+    // EditAnywhere UPROPERTY a future UE version drops on the
+    // UInputTriggerChordAction surface). Mirrors the convention shipped
+    // by add_action_trigger / add_action_modifier.
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    TArray<TSharedPtr<FJsonValue>> SkippedJson;
+    const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+    if (Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid())
+    {
+        FOutputDeviceNull NullDevice;
+        for (const auto& Pair : (*PropsObj)->Values)
+        {
+            const FString& PropName = Pair.Key;
+            const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
+
+            FProperty* Prop = FindFProperty<FProperty>(UInputTriggerChordAction::StaticClass(), *PropName);
+            if (!Prop)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), PropName);
+                Skip->SetStringField(TEXT("reason"), TEXT("not_a_uproperty"));
+                SkippedJson.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            const FString TextValue = BpInput_JsonValueToImportText(JsonVal);
+            const TCHAR* TextPtr = *TextValue;
+            const TCHAR* Result = Prop->ImportText_InContainer(TextPtr, NewChord, NewChord, PPF_None, &NullDevice);
+            if (Result == nullptr)
+            {
+                TSharedPtr<FJsonObject> Skip = MakeShared<FJsonObject>();
+                Skip->SetStringField(TEXT("name"), PropName);
+                Skip->SetStringField(TEXT("reason"), TEXT("import_text_failed"));
+                Skip->SetStringField(TEXT("attempted_value"), TextValue);
+                SkippedJson.Add(MakeShared<FJsonValueObject>(Skip));
+                continue;
+            }
+            TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+            Applied->SetStringField(TEXT("name"), PropName);
+            Applied->SetStringField(TEXT("type"), Prop->GetCPPType());
+            AppliedJson.Add(MakeShared<FJsonValueObject>(Applied));
+        }
+    }
+
+    // Append the new chord trigger to the mapping row.
+    FEnhancedActionKeyMapping& Row = IMC->GetMapping(MatchedIndex);
+    Row.Triggers.Add(NewChord);
+
+    if (UPackage* Package = IMC->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(IMCPath, /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_action_chord"));
+    ResultObj->SetStringField(TEXT("input_mapping_context"), IMC->GetPathName());
+    if (Row.Action)
+    {
+        ResultObj->SetStringField(TEXT("input_action"), Row.Action->GetPathName());
+    }
+    ResultObj->SetStringField(TEXT("key"), Row.Key.ToString());
+    ResultObj->SetNumberField(TEXT("mapping_index"), MatchedIndex);
+    ResultObj->SetStringField(TEXT("chord_action"), ChordAction->GetPathName());
+    ResultObj->SetStringField(TEXT("trigger_class"), UInputTriggerChordAction::StaticClass()->GetName());
+    ResultObj->SetStringField(TEXT("trigger_class_path"), UInputTriggerChordAction::StaticClass()->GetPathName());
     ResultObj->SetNumberField(TEXT("trigger_count"), Row.Triggers.Num());
     ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
     ResultObj->SetArrayField(TEXT("skipped"), SkippedJson);
