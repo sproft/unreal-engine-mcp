@@ -8,7 +8,71 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped four deepening additions across
+The most recent pass shipped three deepening additions across
+existing tools: `niagara_edit` gains `add_user_parameter`
+(declares a new user-tunable parameter on
+`UNiagaraSystem::GetExposedParameters()`, the `User.` namespace
+`FNiagaraUserRedirectionParameterStore`; routes through the
+documented `FNiagaraParameterStore::AddParameter` NIAGARA_API
+overload so a caller can declare a new system-tunable through
+MCP even when no initial value is supplied; sister op to
+`set_system_exposed_parameter` which writes an existing
+parameter's bytes; extends the shared `ResolveNiagaraTypeToken`
+helper with `position` (LWC vec3 backed by
+`FNiagaraTypeDefinition::GetPositionDef`) and `transform`
+(FTransform UScriptStruct wrapped through the explicit
+`FNiagaraTypeDefinition` ctor) on top of the existing scalar /
+vec / color / quat tokens; optional `value` or `default` lands
+an initial value through `SetParameterData(bAdd=false)` after
+the add; the Transform shape accepts an object form
+`{location, rotation, scale}` or a 10-channel flat array; the
+`User.` namespace prefix lands automatically per the redirection
+store's contract), `material_edit` gains `add_dynamic_parameter`
+(spawns a `UMaterialExpressionDynamicParameter` on a target
+UMaterial graph; dynamic parameter expressions give Niagara
+renderers (and other runtime systems) four extra material
+inputs they can drive per particle / per instance without
+shipping a Material Instance for every variation;
+`parameter_index` (0..3) picks the per-material slot since each
+material can host up to four dynamic parameter expressions;
+`param_names` accepts a 4-entry list of FName strings mapped to
+R / G / B / A in order, or an object `{r, g, b, a}` so callers
+can patch a subset without padding; optional `default_values`
+lands the editor-side FLinearColor preview / fallback used when
+no Niagara driver is bound (accepts an array, an object, or a
+scalar number that drives every channel); reuses the same
+`DeriveDefaultPosition` cascade, `MaterialEdit_ApplyPropertyDict`,
+`FindExpressionByName`, and `TryParseMaterialProperty` helpers
+the other `add_*` ops share; same downstream knobs (`position` /
+`name` / `properties` / `property` / `connect_to` /
+`connect_input` / `recompile` / `save`)), and `animation_edit`
+gains `set_compression_scheme` (writes the per-sequence
+compression slot; UE5 routes compression through
+`UAnimSequence::BoneCompressionSettings`, a
+`UAnimBoneCompressionSettings` DataAsset whose `Codecs` array
+holds the `UAnimBoneCompressionCodec` subclass instances the
+engine runs in turn; two input shapes share the op:
+`compression_settings` for a `/Game/...` DataAsset path written
+into the slot directly, or `compression_codec` (alias
+`compression_scheme` / `scheme`) for a codec class path or
+short class name (the legacy `UAnimCompress_BitwiseCompressOnly`
+/ `UAnimCompress_RemoveLinearKeys` /
+`UAnimCompress_RemoveTrivialKeys` codecs all survived the 5.x
+refactor as `UAnimBoneCompressionCodec` subclasses); the
+codec-class shape NewObject's a per-sequence
+`UAnimBoneCompressionSettings` outered to the sequence so the
+codec choice does not bleed into any other sequence on the
+project; optional `request_compile` (alias `recompile`) triggers
+`UAnimSequence::RequestAnimCompression` with the default
+synchronous `FRequestAnimCompressionParams` so the DDC bake
+reruns with the new codec before save; saves the sequence on
+success unless `save=false`). The three additions together
+close the user-parameter declaration gap on the niagara_edit
+side, the Niagara-renderer-input authoring gap on the
+material_edit side, and the compression-scheme authoring gap on
+the animation_edit side.
+
+The pass before that shipped four deepening additions across
 existing tools: `behavior_tree` gains `set_parent_blackboard`
 (rebinds a target UBlackboardData's `Parent` UPROPERTY to another
 UBlackboardData, or unbinds when `clear=true` / `parent='none'` is
