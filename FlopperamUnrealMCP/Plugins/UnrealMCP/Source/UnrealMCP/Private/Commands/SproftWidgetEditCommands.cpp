@@ -2931,11 +2931,17 @@ namespace
         if (V->Type == EJson::String)
         {
             // Allow `(R=1,G=0,B=0,A=1)` style ImportText through.
+            // FLinearColor is a non-USTRUCT POD in UE5.7's engine snapshot,
+            // so the generated ::StaticStruct() accessor is not in scope.
+            // TBaseStructure<FLinearColor>::Get() returns the canonical
+            // UScriptStruct registered for that built-in type at boot.
             FString Str = V->AsString();
             FOutputDeviceNull NullDevice;
             FLinearColor Imported;
             const TCHAR* Ptr = *Str;
-            if (FLinearColor::StaticStruct()->ImportText(Ptr, &Imported, nullptr, PPF_None, &NullDevice, FLinearColor::StaticStruct()->GetName()) != nullptr)
+            UScriptStruct* LinearColorStruct = TBaseStructure<FLinearColor>::Get();
+            if (LinearColorStruct
+                && LinearColorStruct->ImportText(Ptr, &Imported, nullptr, PPF_None, &NullDevice, LinearColorStruct->GetName()) != nullptr)
             {
                 OutColor = Imported;
                 return true;
