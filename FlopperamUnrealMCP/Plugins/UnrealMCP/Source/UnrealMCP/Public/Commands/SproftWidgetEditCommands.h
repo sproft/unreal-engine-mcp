@@ -84,6 +84,21 @@
  *      Replacing an existing conversion runs
  *      `RemoveWrapperGraph` on the old slot so the wrapper graph
  *      garbage collects.
+ *   - "add_event_binding": spawn (or focus) a
+ *      `UK2Node_ComponentBoundEvent` in the WBP's event graph for a
+ *      named child widget's multicast delegate property
+ *      (`OnClicked` / `OnHovered` / `OnTextCommitted` /
+ *      `OnValueChanged`, etc.). Resolves the FObjectProperty for
+ *      the child widget on the WBP's SkeletonGeneratedClass and
+ *      the FMulticastDelegateProperty on that widget's UClass,
+ *      then routes through
+ *      `FKismetEditorUtilities::CreateNewBoundEventForClass` to
+ *      land the bound-event node in the last edited ubergraph.
+ *      Existing matching nodes (same component + delegate) get
+ *      reused so the op is idempotent. An optional
+ *      `handler_function` runs `FBlueprintEditorUtils::RenameNode`
+ *      on the spawned event so the K2Node's CustomFunctionName
+ *      lands on the caller's chosen handler.
  *
  * Clean-room implementation derived from the public UE5 API:
  *   - FKismetEditorUtilities::CreateBlueprint for asset creation
@@ -118,4 +133,5 @@ private:
     TSharedPtr<FJsonObject> SetViewModel(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddPropertyBinding(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetBindingConversion(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddEventBinding(const TSharedPtr<FJsonObject>& Params);
 };

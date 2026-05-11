@@ -23,6 +23,8 @@
 #include "Components/PanelSlot.h"
 #include "Components/Widget.h"
 #include "EditorAssetLibrary.h"
+#include "K2Node_ComponentBoundEvent.h"
+#include "K2Node_Event.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/OutputDeviceNull.h"
@@ -331,9 +333,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetBindingConversion(Params);
     }
+    if (Operation == TEXT("add_event_binding") || Operation == TEXT("bind_event")
+        || Operation == TEXT("add_event") || Operation == TEXT("add_widget_event"))
+    {
+        return AddEventBinding(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -2289,6 +2296,258 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetBindingConversion(const TS
     {
         ResultObj->SetStringField(TEXT("previous_function"), PreviousFunctionPath);
     }
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::AddEventBinding(const TSharedPtr<FJsonObject>& Params)
+{
+    // Spawn (or focus) a UK2Node_ComponentBoundEvent in the WBP's
+    // event graph for a child widget's multicast delegate. Mirrors
+    // the editor's "+ event" picker that
+    // FBlueprintWidgetCustomization::HandleAddOrViewEventForVariable
+    // hooks up: find the FObjectProperty for the child widget on
+    // the SkeletonGeneratedClass, find the FMulticastDelegateProperty
+    // by name on that widget's UClass, then route the pair through
+    // FKismetEditorUtilities::CreateNewBoundEventForClass. The
+    // existing-node guard runs FindBoundEventForComponent so a
+    // second call with the same (widget, event) pair stays
+    // idempotent.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+
+    // Resolve the target child widget. Caller passes its FName as
+    // it appears in the WidgetTree (which is also the variable
+    // name on the WBP's generated class).
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target_widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("component"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget' parameter (target child widget FName)"));
+    }
+
+    // Walk the WidgetTree so we can fail closed when the child
+    // does not exist, and so we have its UClass for the delegate
+    // lookup. The variable property on the BP class is the runtime
+    // surface CreateNewBoundEventForClass needs.
+    UWidget* TargetWidget = nullptr;
+    if (UWidgetTree* Tree = WBP->WidgetTree)
+    {
+        Tree->ForEachWidget([&](UWidget* W)
+        {
+            if (TargetWidget) return;
+            if (W && W->GetFName() == FName(*WidgetNameStr))
+            {
+                TargetWidget = W;
+            }
+        });
+    }
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    UClass* WidgetClass = TargetWidget->GetClass();
+    const FName WidgetFName = TargetWidget->GetFName();
+
+    // Resolve the delegate property by name on the widget's
+    // UClass. UMG buttons expose OnClicked / OnHovered etc. as
+    // FMulticastDelegateProperty fields on UButton; text input
+    // boxes expose OnTextCommitted; sliders expose OnValueChanged.
+    FString DelegateNameStr;
+    if (!Params->TryGetStringField(TEXT("event"), DelegateNameStr)
+        && !Params->TryGetStringField(TEXT("event_name"), DelegateNameStr)
+        && !Params->TryGetStringField(TEXT("delegate"), DelegateNameStr)
+        && !Params->TryGetStringField(TEXT("delegate_name"), DelegateNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'event' parameter (multicast delegate property name, e.g. OnClicked)"));
+    }
+    const FName DelegateFName(*DelegateNameStr);
+    FMulticastDelegateProperty* DelegateProperty = FindFProperty<FMulticastDelegateProperty>(WidgetClass, DelegateFName);
+    if (!DelegateProperty)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("No FMulticastDelegateProperty named '%s' on widget class '%s' (looking for an OnClicked / OnHovered / OnTextCommitted / OnValueChanged style multicast event)"),
+                *DelegateNameStr, *WidgetClass->GetPathName()));
+    }
+
+    // The variable property is the runtime FObjectProperty on the
+    // WBP's SkeletonGeneratedClass: that is what
+    // CreateNewBoundEventForClass binds the event node to. The
+    // SkeletonGeneratedClass is what the UMG editor inspects on
+    // the +event button path (see
+    // FBlueprintWidgetCustomization::HandleAddOrViewEventForVariable),
+    // since it stays in sync with the variable list even when the
+    // BP has not yet recompiled after a new child widget add.
+    UClass* SkeletonClass = WBP->SkeletonGeneratedClass;
+    if (!SkeletonClass)
+    {
+        SkeletonClass = WBP->GeneratedClass;
+    }
+    FObjectProperty* VariableProperty = nullptr;
+    if (SkeletonClass)
+    {
+        VariableProperty = FindFProperty<FObjectProperty>(SkeletonClass, WidgetFName);
+    }
+    if (!VariableProperty)
+    {
+        // The widget may not be marked as a Blueprint variable yet
+        // (the UMG editor exposes the "Is Variable" checkbox per
+        // child). Without that flag the BP's class has no
+        // FObjectProperty by that name, which means the bound-event
+        // surface cannot wire the runtime delegate. Flip
+        // bIsVariable + recompile and try again so the op stays
+        // declarative.
+        const bool bIsVariable = TargetWidget->bIsVariable;
+        if (!bIsVariable)
+        {
+            TargetWidget->bIsVariable = true;
+            FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+            FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+            SkeletonClass = WBP->SkeletonGeneratedClass;
+            if (SkeletonClass)
+            {
+                VariableProperty = FindFProperty<FObjectProperty>(SkeletonClass, WidgetFName);
+            }
+        }
+        if (!VariableProperty)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Widget '%s' is not exposed as a Blueprint variable on '%s' (set 'expose_as_variable=true' on add_child_widget); event binding needs an FObjectProperty on the generated class"),
+                    *WidgetNameStr, *WBPPath));
+        }
+    }
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+    bool bCompile = true;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    // Optional handler-function rename. The K2Node spawned by
+    // CreateNewBoundEventForClass picks its CustomFunctionName from
+    // the delegate property name plus the variable name (the
+    // ubergraph compiler turns that into a stable BP entry point).
+    // Callers can override the handler name through this knob so
+    // the resulting function shows up under their chosen label;
+    // matches the editor's "rename event" flow.
+    FString HandlerFunctionName;
+    Params->TryGetStringField(TEXT("handler_function"), HandlerFunctionName);
+    if (HandlerFunctionName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("handler"), HandlerFunctionName);
+    }
+    if (HandlerFunctionName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("function_name"), HandlerFunctionName);
+    }
+
+    // Idempotency. The editor uses FindBoundEventForComponent
+    // before spawning a fresh node; we mirror that so a second
+    // call returns the existing node's coordinates without
+    // doubling up the graph.
+    const UK2Node_ComponentBoundEvent* Existing =
+        FKismetEditorUtilities::FindBoundEventForComponent(WBP, DelegateFName, VariableProperty->GetFName());
+    UK2Node_ComponentBoundEvent* EventNode = nullptr;
+    bool bReused = false;
+    if (Existing)
+    {
+        EventNode = const_cast<UK2Node_ComponentBoundEvent*>(Existing);
+        bReused = true;
+    }
+    else
+    {
+        FKismetEditorUtilities::CreateNewBoundEventForClass(WidgetClass, DelegateFName, WBP, VariableProperty);
+        Existing = FKismetEditorUtilities::FindBoundEventForComponent(WBP, DelegateFName, VariableProperty->GetFName());
+        EventNode = const_cast<UK2Node_ComponentBoundEvent*>(Existing);
+    }
+    if (!EventNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("CreateNewBoundEventForClass returned no node for delegate '%s' on widget '%s' (the WBP may have no event graph)"),
+                *DelegateNameStr, *WidgetNameStr));
+    }
+
+    // Rename the spawned event's CustomFunctionName so the
+    // resulting BP entry point lands on the caller's handler
+    // label. We avoid renaming when the requested name collides
+    // with another node so the existing graph stays intact.
+    FString ResolvedHandlerName;
+    if (!HandlerFunctionName.IsEmpty())
+    {
+        const FName NewHandlerFName(*HandlerFunctionName);
+        bool bNameInUse = false;
+        if (UEdGraph* OwningGraph = EventNode->GetGraph())
+        {
+            for (const UEdGraphNode* Other : OwningGraph->Nodes)
+            {
+                if (!Other || Other == EventNode) continue;
+                if (const UK2Node_Event* AsEvent = Cast<UK2Node_Event>(Other))
+                {
+                    if (AsEvent->CustomFunctionName == NewHandlerFName)
+                    {
+                        bNameInUse = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!bNameInUse)
+        {
+            EventNode->CustomFunctionName = NewHandlerFName;
+            EventNode->ReconstructNode();
+        }
+        ResolvedHandlerName = EventNode->CustomFunctionName.ToString();
+    }
+    else
+    {
+        ResolvedHandlerName = EventNode->CustomFunctionName.ToString();
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+    if (bCompile && !bReused)
+    {
+        FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_event_binding"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("widget"), WidgetNameStr);
+    ResultObj->SetStringField(TEXT("widget_class"), WidgetClass->GetPathName());
+    ResultObj->SetStringField(TEXT("event"), DelegateNameStr);
+    ResultObj->SetStringField(TEXT("delegate_property"), DelegateProperty->GetFName().ToString());
+    ResultObj->SetStringField(TEXT("variable_property"), VariableProperty->GetFName().ToString());
+    ResultObj->SetStringField(TEXT("handler_function"), ResolvedHandlerName);
+    ResultObj->SetStringField(TEXT("node_name"), EventNode->GetFName().ToString());
+    if (UEdGraph* OwningGraph = EventNode->GetGraph())
+    {
+        ResultObj->SetStringField(TEXT("graph"), OwningGraph->GetFName().ToString());
+    }
+    ResultObj->SetNumberField(TEXT("node_position_x"), EventNode->NodePosX);
+    ResultObj->SetNumberField(TEXT("node_position_y"), EventNode->NodePosY);
+    ResultObj->SetBoolField(TEXT("reused_existing"), bReused);
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile && !bReused);
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }

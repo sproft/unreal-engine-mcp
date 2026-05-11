@@ -3038,6 +3038,9 @@ def widget_edit(
     direction: Optional[str] = None,
     conversion_function: Optional[str] = None,
     clear: Optional[bool] = None,
+    event: Optional[str] = None,
+    handler_function: Optional[str] = None,
+    compile: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Edit a Widget Blueprint asset.
@@ -3125,6 +3128,21 @@ def widget_edit(
           ``Initialize(WBP, CreateWrapperName(Binding, dir),
           FMVVMBlueprintFunctionReference(WBP, Function))``;
           existing wrappers get ``RemoveWrapperGraph`` first).
+        - "add_event_binding": spawn (or focus) a
+          ``UK2Node_ComponentBoundEvent`` in the WBP's event graph
+          for a named child widget's multicast delegate property
+          (``OnClicked`` / ``OnHovered`` / ``OnTextCommitted`` /
+          ``OnValueChanged``, etc.). ``widget`` is the FName of
+          the child widget on the WBP's WidgetTree; ``event`` is
+          the FMulticastDelegateProperty name on that widget's
+          class. Routes through
+          ``FKismetEditorUtilities::CreateNewBoundEventForClass``
+          so the runtime wiring matches the UMG editor's "+ event"
+          path. Optional ``handler_function`` renames the spawned
+          K2Node's ``CustomFunctionName`` so the resulting BP
+          entry point lands on the caller's label.
+          ``FindBoundEventForComponent`` is run first so a second
+          call returns the existing node rather than doubling up.
 
     Args:
         operation: "create_widget_blueprint", "add_child_widget", or
@@ -3253,6 +3271,12 @@ def widget_edit(
         params["conversion_function"] = conversion_function
     if clear is not None:
         params["clear"] = clear
+    if event is not None:
+        params["event"] = event
+    if handler_function is not None:
+        params["handler_function"] = handler_function
+    if compile is not None:
+        params["compile"] = compile
     params["expose_as_variable"] = expose_as_variable
     params["save"] = save
     params["overwrite"] = overwrite
