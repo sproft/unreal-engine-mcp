@@ -3913,6 +3913,19 @@ def material_edit(
           spawn the sample and drop its ``RGB`` output into
           ``BaseColor`` (or another material attribute). Optional
           ``name`` renames the new expression.
+        - "add_texture_sample_cube": cube-texture sibling of
+          ``add_texture_sample``. Spawns a
+          ``UMaterialExpressionTextureSampleParameterCube`` and
+          binds the new node's ``Texture`` property to a chosen
+          UTextureCube asset. The cube-sample expression carries a
+          ``ParameterName`` slot the caller can populate through
+          the ``name`` / ``properties`` knobs ``add_expression``
+          exposes. If the resolved asset is a UTexture2D the op
+          falls back to the 2D variant
+          (``UMaterialExpressionTextureSample``), so a generic
+          "wire this texture up" call still lands. All the
+          downstream knobs apply (``coordinates`` / ``connect_to``
+          / ``connect_input`` / ``property`` / ``name``).
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.

@@ -108,6 +108,23 @@
  *      Position cascades the same way as `add_expression`.
  *      Recompiles + saves on success unless `recompile=false` /
  *      `save=false` is passed.
+ *   - "add_texture_sample_cube": cube-texture sibling of
+ *      `add_texture_sample`. Spawns a
+ *      `UMaterialExpressionTextureSampleParameterCube` and binds its
+ *      `Texture` property to a chosen `UTextureCube` asset. The
+ *      cube-sample expression carries a `ParameterName` slot the
+ *      caller can populate through the same `name` / `properties`
+ *      knobs `add_expression` exposes. If the resolved asset is a
+ *      UTexture2D instead the op falls back to the 2D variant
+ *      (`UMaterialExpressionTextureSample`) so callers can pass a
+ *      generic "texture" path without first probing the asset class.
+ *      All the same downstream knobs apply: optional `coordinates`
+ *      wires the UV / vector input from a named expression;
+ *      optional `connect_to` / `connect_input` / `property` drops
+ *      the RGB output into another expression or a material
+ *      attribute; optional `name` renames the spawned expression.
+ *      Recompiles + saves on success unless `recompile=false` /
+ *      `save=false` is passed.
  *   - "set_attribute_blendable": flips a per-attribute override toggle
  *      on a UMaterialInstanceConstant's
  *      `FMaterialInstanceBasePropertyOverrides` struct. The
@@ -173,4 +190,5 @@ private:
     TSharedPtr<FJsonObject> SetAttributeBlendable(const TSharedPtr<FJsonObject>& Params);
 
     TSharedPtr<FJsonObject> AddTextureSample(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddTextureSampleCube(const TSharedPtr<FJsonObject>& Params);
 };
