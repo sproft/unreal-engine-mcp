@@ -8,7 +8,67 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped four deepening edit slices that
+The most recent pass shipped three deepening edit slices that
+close the per-attribute Material Instance override gap, the
+system-side Niagara exposed-parameter gap, and the GameplayEffect
+executions-array gap. `material_edit` gains
+`set_attribute_blendable`: flips a per-attribute override toggle
+on a `UMaterialInstanceConstant`'s
+`FMaterialInstanceBasePropertyOverrides` struct. The attribute
+token resolves to a matching `bOverride_X` slot (`blend_mode` /
+`shading_model` / `two_sided` / `opacity_mask_clip_value` /
+`dithered_lod_transition` / `cast_dynamic_shadow_as_masked` /
+`is_thin_surface` / `output_translucent_velocity` /
+`has_pixel_animation` / `enable_tessellation` /
+`displacement_scaling` / `enable_displacement_fade` /
+`displacement_fade_range` /
+`max_world_position_offset_displacement` /
+`compatible_with_lumen_card_sharing`). The `enabled` boolean
+lands on the `bOverride_X` flag through
+`FBoolProperty::SetPropertyValue_InContainer` so the override's
+bit-packed uint8 stays correct, and the optional `value` lands on
+the matching payload field through
+`FProperty::ImportText_Direct` so callers can set
+`BlendMode = "BLEND_Masked"` / `OpacityMaskClipValue = 0.333` /
+`TwoSided = true` in the same call. After the writes the op fires
+`PostEditChangeProperty` on the MIC (which is what the editor
+UI calls on the override-checkbox toggle path; the engine code
+routes that through `UpdateStaticPermutation`) and follows up with
+`UpdateOverridableBaseProperties` so the renderer-side cached
+fields stay in sync. `niagara_edit` gains
+`set_system_exposed_parameter`: resolves an existing
+UNiagaraSystem and writes a parameter into the system's
+`ExposedParameters` store
+(`FNiagaraUserRedirectionParameterStore`). Reuses the same
+type-token resolver and tightly-packed byte-buffer marshaling the
+per-emitter `set_emitter_local_parameter` variant uses
+(`float` / `int` / `bool` / `vec2` / `vec3` / `vec4` / `color` /
+`quat`), and routes through the documented NIAGARA_API
+`FNiagaraParameterStore::SetParameterData(buffer, var, bAdd=true)`
+overload. When the parameter is missing the base store's
+`SetParameterData` calls the virtual `AddParameter`, and the
+user-redirect store's override normalises the bare token into the
+`User.X` namespace and updates the redirection map automatically;
+callers may therefore pass either the bare form (`MyFloat`) or the
+fully-qualified `User.MyFloat` form. `gas_edit` gains
+`add_execution`: appends an `FGameplayEffectExecutionDefinition`
+to a UGameplayEffect's `Executions` array on the GE CDO. The
+`calculation_class` token resolves to a
+`UGameplayEffectExecutionCalculation` subclass through a
+`/Script/Module.ClassName` reflection path, a `/Game/.../BP` class
+path, or a bare class name fallback that walks
+`TObjectIterator<UClass>`. Abstract subclasses fail closed. Optional
+`passed_in_tags` lands on the entry's `PassedInTags`
+`FGameplayTagContainer`; each tag flows through
+`UGameplayTagsManager::RequestGameplayTag` with
+`bErrorIfNotFound=false` so unknown tags surface in the response's
+`unknown_tags` array rather than abort the op. `MarkBlueprintAsModified`
++ `CompileBlueprint` follow the same compile-on-write pattern
+`add_modifier` uses; recompiles + saves on success. The
+`CalculationModifiers` and `ConditionalGameplayEffects` rows stay
+on the BACKLOG for follow-on edit ops.
+
+The pass before that shipped four deepening edit slices that
 close the Niagara sim-stage / sim-target gap, the GameplayEffect
 magnitude variant gap, the Material Function reuse gap, and the
 full MVVM property-binding row authoring gap. `niagara_edit`
