@@ -5167,6 +5167,742 @@ def bp_function_create(
         return {"success": False, "message": str(e)}
 
 
+# --- Blueprint authoring orchestration: bp_author / bp_dry_run / bp_skills ---
+#
+# Thin Python-side compositors over the existing bp_create / bp_variable /
+# bp_component / bp_nodes / bp_wire / bp_function_create / bp_commit tools.
+# No new C++ wiring: each helper walks a declarative JSON spec and runs the
+# matching dedicated tool for each section. The dry-run variant runs the
+# parent-class / type-token / class-token resolvers against `unreal_api`
+# but never calls a write op.
+
+# Token shapes the dry-run validator accepts without contacting Unreal.
+# Keep in sync with the bp_variable / bp_function_create C++ resolvers.
+_BP_AUTHOR_SCALAR_TYPES = frozenset(
+    [
+        "bool",
+        "int",
+        "int32",
+        "int64",
+        "byte",
+        "uint8",
+        "float",
+        "double",
+        "string",
+        "name",
+        "text",
+    ]
+)
+_BP_AUTHOR_STRUCT_TYPES = frozenset(
+    [
+        "vector",
+        "vector2d",
+        "rotator",
+        "transform",
+        "color",
+        "linear_color",
+        "linearcolor",
+    ]
+)
+_BP_AUTHOR_CONTAINER_TYPES = frozenset(["single", "array", "set", "map"])
+
+
+def _bp_author_validate_variable_type(type_token: str) -> Optional[str]:
+    """Return None when the type token looks valid offline, else a reason."""
+    if not type_token:
+        return "missing_type"
+    lower = type_token.lower()
+    if lower in _BP_AUTHOR_SCALAR_TYPES or lower in _BP_AUTHOR_STRUCT_TYPES:
+        return None
+    if type_token.startswith("/Script/") or type_token.startswith("/Game/"):
+        return None
+    if type_token.startswith("struct:/"):
+        return None
+    return "unresolved_type_token"
+
+
+def _bp_author_validate_class_token(token: str) -> Optional[str]:
+    """Return None when the class token looks valid offline, else a reason."""
+    if not token:
+        return "missing_class"
+    if token.startswith("/Script/") or token.startswith("/Game/"):
+        return None
+    # Bare class name: defer to live unreal_api at runtime, but accept the
+    # spec here so the dry-run does not over-block.
+    return None
+
+
+def _bp_author_resolve_class_live(token: str) -> Optional[Dict[str, Any]]:
+    """Probe `unreal_api describe` to see if a class token resolves.
+
+    Returns the unreal_api response on success, None on failure. Used by
+    bp_dry_run to flag unresolved parent / target classes against the
+    live reflection database rather than the static token shape.
+    """
+    if not token:
+        return None
+    try:
+        resp = unreal_api(cls=token, op="describe", max_properties=1, max_functions=1)
+    except Exception:  # pragma: no cover - the live call may fail offline.
+        return None
+    if isinstance(resp, dict) and resp.get("success") is not False:
+        return resp
+    return None
+
+
+def _bp_author_full_path(spec_name: str, spec_path: Optional[str]) -> str:
+    base_path = spec_path or "/Game/Blueprints"
+    base = base_path.rstrip("/")
+    return f"{base}/{spec_name}"
+
+
+@mcp.tool()
+def bp_author(
+    spec: Dict[str, Any],
+    compile_each: Optional[bool] = None,
+    stop_on_error: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Lay down a Blueprint from a declarative spec in one call.
+
+    Orchestration tool. Walks a JSON ``spec`` and runs the matching
+    dedicated Blueprint authoring tools in order:
+
+      1. ``bp_create`` (asset + parent class + initial CDO defaults).
+      2. ``bp_variable add`` for each variable.
+      3. ``bp_component`` for each component.
+      4. ``bp_function_create`` for each declared function graph.
+      5. ``bp_nodes`` for each requested node, scoped to the chosen
+         graph (defaults to the first event graph).
+      6. ``bp_wire`` for each declared edge between named nodes.
+      7. ``bp_commit`` (final compile + save).
+
+    No new C++ surface; this is a Python-side compositor over the
+    existing tools.
+
+    Spec shape::
+
+        {
+            "name": "BP_Crate",
+            "parent_class": "Actor",                   # short name / class path
+            "path": "/Game/World/Crates",              # optional, default /Game/Blueprints
+            "properties": { ... },                     # passed through to bp_create
+            "variables": [                             # each entry feeds bp_variable add
+                {
+                    "name": "Health",
+                    "type": "float",
+                    "default": 100.0,
+                    "category": "Combat",
+                    "instance_editable": true
+                },
+                ...
+            ],
+            "components": [                            # each entry feeds bp_component
+                {
+                    "name": "Mesh",
+                    "component_class": "StaticMeshComponent",
+                    "properties": {"Mobility": "Static"}
+                },
+                ...
+            ],
+            "graphs": {
+                "functions": [                         # each entry feeds bp_function_create
+                    {
+                        "function_name": "ApplyDamage",
+                        "inputs": [{"name": "Amount", "type": "float"}],
+                        "outputs": [{"name": "Killed", "type": "bool"}],
+                        "pure": false
+                    }
+                ],
+                "events": [                            # event graph node specs
+                    {
+                        "graph": "EventGraph",          # optional, defaults to first event graph
+                        "nodes": [                      # passed through to bp_nodes
+                            {"class": "event", "event_name": "ReceiveBeginPlay", "name": "BeginPlay"},
+                            {"class": "call_function",
+                             "function": "KismetSystemLibrary:PrintString",
+                             "name": "Print",
+                             "pin_defaults": {"InString": "Crate spawned"}}
+                        ],
+                        "connections": [                # passed through to bp_wire
+                            {"source_node": "BeginPlay", "source_pin": "then",
+                             "dest_node": "Print", "dest_pin": "execute"}
+                        ]
+                    }
+                ]
+            }
+        }
+
+    Args:
+        spec: The declarative spec described above. Required.
+        compile_each: When True every intermediate write op compiles
+            (default False so the run is fast; the final bp_commit
+            compiles + saves the asset).
+        stop_on_error: When True the orchestrator returns at the first
+            failing step. Defaults True; pass False to continue past
+            failures and surface every per-step result.
+
+    Returns:
+        Dict with the asset's resolved path, an ordered ``steps``
+        list (each entry: ``stage``, ``op``, ``ok`` bool, ``result``
+        with the sub-tool response, optional ``error`` string), plus
+        aggregate counts (``total`` / ``ok`` / ``failed``) and the
+        final commit response.
+    """
+    if not isinstance(spec, dict):
+        return {"success": False, "message": "bp_author: 'spec' must be an object"}
+    name = spec.get("name")
+    if not name:
+        return {"success": False, "message": "bp_author: 'spec.name' is required"}
+    parent_class = spec.get("parent_class") or "Actor"
+    path = spec.get("path") or "/Game/Blueprints"
+    stop = True if stop_on_error is None else bool(stop_on_error)
+    compile_each_step = bool(compile_each) if compile_each is not None else False
+
+    full_path = _bp_author_full_path(name, path)
+    steps: List[Dict[str, Any]] = []
+    aggregate_ok = 0
+    aggregate_failed = 0
+
+    def _push_step(stage: str, op_name: str, result: Any, ok: bool, err: Optional[str] = None) -> None:
+        nonlocal aggregate_ok, aggregate_failed
+        entry: Dict[str, Any] = {"stage": stage, "op": op_name, "ok": ok}
+        if isinstance(result, dict):
+            entry["result"] = result
+        if err:
+            entry["error"] = err
+        if ok:
+            aggregate_ok += 1
+        else:
+            aggregate_failed += 1
+        steps.append(entry)
+
+    def _result_ok(resp: Any) -> bool:
+        if not isinstance(resp, dict):
+            return False
+        if resp.get("success") is False:
+            return False
+        return True
+
+    # 1) bp_create
+    bp_create_resp = bp_create(
+        name=name,
+        parent_class=parent_class,
+        path=path,
+        properties=spec.get("properties"),
+        compile=False,
+        save=False,
+        overwrite=bool(spec.get("overwrite", False)),
+    )
+    create_ok = _result_ok(bp_create_resp)
+    _push_step("bp_create", "create", bp_create_resp, create_ok,
+               None if create_ok else "bp_create failed")
+    if not create_ok and stop:
+        return {
+            "success": False,
+            "message": "bp_author: bp_create failed; aborting (pass stop_on_error=false to continue)",
+            "name": name,
+            "blueprint": full_path,
+            "steps": steps,
+            "total": len(steps),
+            "ok": aggregate_ok,
+            "failed": aggregate_failed,
+        }
+
+    # 2) variables
+    for idx, var_spec in enumerate(spec.get("variables") or []):
+        if not isinstance(var_spec, dict) or not var_spec.get("name"):
+            _push_step("variables", "add", var_spec, False,
+                       f"entry {idx}: missing 'name'")
+            if stop:
+                break
+            continue
+        resp = bp_variable(
+            op="add",
+            blueprint=full_path,
+            name=var_spec.get("name"),
+            type=var_spec.get("type"),
+            value_type=var_spec.get("value_type"),
+            container=var_spec.get("container"),
+            default=var_spec.get("default"),
+            category=var_spec.get("category"),
+            friendly_name=var_spec.get("friendly_name"),
+            tooltip=var_spec.get("tooltip"),
+            editable=var_spec.get("editable"),
+            blueprint_read_only=var_spec.get("blueprint_read_only"),
+            blueprint_writable=var_spec.get("blueprint_writable"),
+            expose_on_spawn=var_spec.get("expose_on_spawn"),
+            replicated=var_spec.get("replicated"),
+            expose_to_cinematics=var_spec.get("expose_to_cinematics"),
+            instance_editable=var_spec.get("instance_editable"),
+            private=var_spec.get("private"),
+            flags=var_spec.get("flags"),
+            compile=compile_each_step,
+            save=False,
+        )
+        ok = _result_ok(resp)
+        _push_step("variables", "add", resp, ok,
+                   None if ok else f"variable '{var_spec.get('name')}' failed")
+        if not ok and stop:
+            break
+
+    # 3) components
+    if aggregate_failed == 0 or not stop:
+        for idx, comp_spec in enumerate(spec.get("components") or []):
+            if not isinstance(comp_spec, dict) or not comp_spec.get("name") or not comp_spec.get("component_class"):
+                _push_step("components", "add_component", comp_spec, False,
+                           f"entry {idx}: missing 'name' or 'component_class'")
+                if stop:
+                    break
+                continue
+            resp = bp_component(
+                blueprint=full_path,
+                component_class=comp_spec.get("component_class"),
+                component_name=comp_spec.get("name"),
+                parent_component=comp_spec.get("parent_component"),
+                properties=comp_spec.get("properties"),
+                location=comp_spec.get("location"),
+                rotation=comp_spec.get("rotation"),
+                scale=comp_spec.get("scale"),
+                compile=compile_each_step,
+                save=False,
+            )
+            ok = _result_ok(resp)
+            _push_step("components", "add_component", resp, ok,
+                       None if ok else f"component '{comp_spec.get('name')}' failed")
+            if not ok and stop:
+                break
+
+    # 4) function graphs
+    graphs_spec = spec.get("graphs") or {}
+    if aggregate_failed == 0 or not stop:
+        for idx, fn_spec in enumerate(graphs_spec.get("functions") or []):
+            if not isinstance(fn_spec, dict) or not fn_spec.get("function_name"):
+                _push_step("functions", "create", fn_spec, False,
+                           f"entry {idx}: missing 'function_name'")
+                if stop:
+                    break
+                continue
+            resp = bp_function_create(
+                blueprint=full_path,
+                function_name=fn_spec.get("function_name"),
+                inputs=fn_spec.get("inputs"),
+                outputs=fn_spec.get("outputs"),
+                pure=fn_spec.get("pure"),
+                category=fn_spec.get("category"),
+                keywords=fn_spec.get("keywords"),
+                tooltip=fn_spec.get("tooltip"),
+                call_in_editor=fn_spec.get("call_in_editor"),
+                compile=compile_each_step,
+                save=False,
+            )
+            ok = _result_ok(resp)
+            _push_step("functions", "create", resp, ok,
+                       None if ok else f"function '{fn_spec.get('function_name')}' failed")
+            if not ok and stop:
+                break
+
+    # 5) event-graph nodes + 6) wires (each entry in graphs.events is a
+    #    bp_nodes batch followed by an optional bp_wire batch on the same
+    #    graph)
+    if aggregate_failed == 0 or not stop:
+        for idx, ev_spec in enumerate(graphs_spec.get("events") or []):
+            if not isinstance(ev_spec, dict):
+                _push_step("events", "nodes", ev_spec, False,
+                           f"entry {idx}: not an object")
+                if stop:
+                    break
+                continue
+            graph_name = ev_spec.get("graph")
+            node_list = ev_spec.get("nodes") or []
+            if node_list:
+                resp = bp_nodes(
+                    blueprint=full_path,
+                    nodes=node_list,
+                    graph=graph_name,
+                    compile=compile_each_step,
+                )
+                ok = _result_ok(resp)
+                _push_step("events", "nodes", resp, ok,
+                           None if ok else f"events entry {idx} nodes failed")
+                if not ok and stop:
+                    break
+            edges = ev_spec.get("connections") or ev_spec.get("wires") or []
+            if edges:
+                resp = bp_wire(
+                    blueprint=full_path,
+                    connections=edges,
+                    graph=graph_name,
+                    compile=compile_each_step,
+                )
+                ok = _result_ok(resp)
+                _push_step("events", "wire", resp, ok,
+                           None if ok else f"events entry {idx} wires failed")
+                if not ok and stop:
+                    break
+
+    # 7) final commit
+    commit_resp = bp_commit(blueprint=full_path)
+    commit_ok = _result_ok(commit_resp)
+    _push_step("commit", "compile_save", commit_resp, commit_ok,
+               None if commit_ok else "bp_commit failed")
+
+    return {
+        "success": aggregate_failed == 0,
+        "name": name,
+        "blueprint": full_path,
+        "steps": steps,
+        "total": len(steps),
+        "ok": aggregate_ok,
+        "failed": aggregate_failed,
+        "final_commit": commit_resp,
+    }
+
+
+@mcp.tool()
+def bp_dry_run(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate a Blueprint authoring spec without applying any writes.
+
+    Walks the same ``spec`` shape ``bp_author`` accepts. Resolves the
+    parent class token through ``unreal_api describe`` (live
+    reflection probe), runs the type-token shape checker against each
+    declared variable, runs the class-token shape checker against
+    each declared component, and lists the would-do step plan in
+    order. Calls no write op; the editor world stays untouched.
+
+    Returns:
+        ``{would_do, unresolved, warnings}`` plus aggregate counts.
+        Each ``would_do`` row carries ``stage`` / ``op`` /
+        ``target`` so a designer can review the plan before running
+        ``bp_author``.
+    """
+    if not isinstance(spec, dict):
+        return {"success": False, "message": "bp_dry_run: 'spec' must be an object"}
+    name = spec.get("name")
+    if not name:
+        return {"success": False, "message": "bp_dry_run: 'spec.name' is required"}
+    parent_class = spec.get("parent_class") or "Actor"
+    path = spec.get("path") or "/Game/Blueprints"
+    full_path = _bp_author_full_path(name, path)
+
+    would_do: List[Dict[str, Any]] = []
+    unresolved: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+
+    # 1) parent class resolution (live probe)
+    parent_resp = _bp_author_resolve_class_live(parent_class)
+    parent_resolved_path: Optional[str] = None
+    if isinstance(parent_resp, dict):
+        parent_resolved_path = parent_resp.get("class_path") or parent_resp.get("class") or None
+    if parent_resolved_path is None:
+        unresolved.append(
+            {"stage": "bp_create", "token": parent_class, "reason": "parent_class_not_found"}
+        )
+    would_do.append(
+        {
+            "stage": "bp_create",
+            "op": "create",
+            "target": full_path,
+            "parent_class": parent_class,
+            "parent_class_path": parent_resolved_path,
+            "has_cdo_properties": bool(spec.get("properties")),
+        }
+    )
+
+    # 2) variables: validate type tokens offline; do not probe live
+    for idx, var_spec in enumerate(spec.get("variables") or []):
+        if not isinstance(var_spec, dict) or not var_spec.get("name"):
+            unresolved.append(
+                {"stage": "variables", "index": idx, "reason": "missing_name"}
+            )
+            continue
+        type_token = var_spec.get("type")
+        type_reason = _bp_author_validate_variable_type(type_token)
+        container = (var_spec.get("container") or "single").lower()
+        if container not in _BP_AUTHOR_CONTAINER_TYPES:
+            unresolved.append(
+                {
+                    "stage": "variables",
+                    "index": idx,
+                    "name": var_spec.get("name"),
+                    "reason": f"unknown_container '{container}'",
+                }
+            )
+        if container == "map" and not var_spec.get("value_type"):
+            unresolved.append(
+                {
+                    "stage": "variables",
+                    "index": idx,
+                    "name": var_spec.get("name"),
+                    "reason": "map_missing_value_type",
+                }
+            )
+        if type_reason is not None:
+            unresolved.append(
+                {
+                    "stage": "variables",
+                    "index": idx,
+                    "name": var_spec.get("name"),
+                    "type": type_token,
+                    "reason": type_reason,
+                }
+            )
+        would_do.append(
+            {
+                "stage": "variables",
+                "op": "add",
+                "target": var_spec.get("name"),
+                "type": type_token,
+                "container": container,
+            }
+        )
+
+    # 3) components: validate class tokens offline (the live class probe
+    #    is deferred to bp_author runtime; we only flag obvious shape
+    #    issues here)
+    for idx, comp_spec in enumerate(spec.get("components") or []):
+        if not isinstance(comp_spec, dict) or not comp_spec.get("name"):
+            unresolved.append(
+                {"stage": "components", "index": idx, "reason": "missing_name"}
+            )
+            continue
+        comp_class = comp_spec.get("component_class")
+        comp_reason = _bp_author_validate_class_token(comp_class)
+        if comp_reason is not None:
+            unresolved.append(
+                {
+                    "stage": "components",
+                    "index": idx,
+                    "name": comp_spec.get("name"),
+                    "component_class": comp_class,
+                    "reason": comp_reason,
+                }
+            )
+        would_do.append(
+            {
+                "stage": "components",
+                "op": "add_component",
+                "target": comp_spec.get("name"),
+                "component_class": comp_class,
+            }
+        )
+
+    # 4) functions
+    graphs_spec = spec.get("graphs") or {}
+    for idx, fn_spec in enumerate(graphs_spec.get("functions") or []):
+        if not isinstance(fn_spec, dict) or not fn_spec.get("function_name"):
+            unresolved.append(
+                {"stage": "functions", "index": idx, "reason": "missing_function_name"}
+            )
+            continue
+        for io_kind in ("inputs", "outputs"):
+            for pin_idx, pin_spec in enumerate(fn_spec.get(io_kind) or []):
+                if not isinstance(pin_spec, dict) or not pin_spec.get("name"):
+                    unresolved.append(
+                        {
+                            "stage": "functions",
+                            "index": idx,
+                            "function": fn_spec.get("function_name"),
+                            io_kind[:-1]: pin_idx,
+                            "reason": f"{io_kind[:-1]}_missing_name",
+                        }
+                    )
+                    continue
+                pin_type = pin_spec.get("type")
+                type_reason = _bp_author_validate_variable_type(pin_type)
+                if type_reason is not None:
+                    unresolved.append(
+                        {
+                            "stage": "functions",
+                            "index": idx,
+                            "function": fn_spec.get("function_name"),
+                            io_kind[:-1]: pin_spec.get("name"),
+                            "type": pin_type,
+                            "reason": type_reason,
+                        }
+                    )
+        would_do.append(
+            {
+                "stage": "functions",
+                "op": "create",
+                "target": fn_spec.get("function_name"),
+                "input_count": len(fn_spec.get("inputs") or []),
+                "output_count": len(fn_spec.get("outputs") or []),
+                "pure": bool(fn_spec.get("pure")),
+            }
+        )
+
+    # 5) event graphs / nodes
+    for idx, ev_spec in enumerate(graphs_spec.get("events") or []):
+        if not isinstance(ev_spec, dict):
+            unresolved.append(
+                {"stage": "events", "index": idx, "reason": "not_an_object"}
+            )
+            continue
+        graph_name = ev_spec.get("graph")
+        node_count = len(ev_spec.get("nodes") or [])
+        edge_count = len(ev_spec.get("connections") or ev_spec.get("wires") or [])
+        if node_count:
+            would_do.append(
+                {
+                    "stage": "events",
+                    "op": "nodes",
+                    "target": graph_name or "(first event graph)",
+                    "node_count": node_count,
+                }
+            )
+        if edge_count:
+            would_do.append(
+                {
+                    "stage": "events",
+                    "op": "wire",
+                    "target": graph_name or "(first event graph)",
+                    "edge_count": edge_count,
+                }
+            )
+        # Cheap node-class token sanity check; the real validation runs
+        # against the live K2 node short-name table inside the C++ side.
+        known_node_tokens = frozenset(
+            [
+                "variable_get",
+                "variable_set",
+                "call_function",
+                "branch",
+                "if_then_else",
+                "dynamic_cast",
+                "self",
+                "format_text",
+                "execution_sequence",
+                "sequence",
+                "knot",
+                "make_array",
+                "custom_event",
+                "event",
+            ]
+        )
+        for node_idx, node in enumerate(ev_spec.get("nodes") or []):
+            if not isinstance(node, dict):
+                unresolved.append(
+                    {
+                        "stage": "events",
+                        "index": idx,
+                        "node": node_idx,
+                        "reason": "node_not_an_object",
+                    }
+                )
+                continue
+            cls_token = (node.get("class") or "").lower()
+            if cls_token and cls_token not in known_node_tokens:
+                warnings.append(
+                    f"events entry {idx} node {node_idx}: node class '{cls_token}' is not in the bp_nodes short-name table; live op may still resolve it"
+                )
+
+    # 6) final commit
+    would_do.append({"stage": "commit", "op": "compile_save", "target": full_path})
+
+    return {
+        "success": True,
+        "name": name,
+        "blueprint": full_path,
+        "would_do": would_do,
+        "unresolved": unresolved,
+        "warnings": warnings,
+        "step_count": len(would_do),
+        "unresolved_count": len(unresolved),
+        "warning_count": len(warnings),
+    }
+
+
+def _bp_skills_collect(pattern: Optional[str] = None) -> List[Dict[str, str]]:
+    """Walk `Python/skills/` for entries whose slug starts with `blueprint-`."""
+    rows: List[Dict[str, str]] = []
+    for fname in _list_skill_files():
+        slug = fname[:-3] if fname.lower().endswith(".md") else fname
+        if not slug.lower().startswith("blueprint-"):
+            continue
+        full = _os.path.join(_SKILLS_DIR, fname)
+        title = _read_skill_first_heading(full)
+        if pattern:
+            haystack = (slug + " " + title).lower()
+            if pattern.strip().lower() not in haystack:
+                continue
+        rows.append({"topic": slug, "filename": fname, "title": title})
+    return rows
+
+
+@mcp.tool()
+def bp_skills(
+    topic: Optional[str] = None,
+    op: Optional[str] = None,
+    pattern: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    On-demand Blueprint authoring workflow docs (alias for the
+    ``skills`` tool, scoped to topics whose slug starts with
+    ``blueprint-``).
+
+    Same three ops keyed by ``op`` as the parent ``skills`` tool:
+
+      - ``get`` (default; ``topic`` required): return the markdown
+        body of one blueprint-prefixed skill.
+      - ``list``: return every blueprint-prefixed entry's topic +
+        title.
+      - ``search``: case-insensitive substring filter across slug +
+        first H1.
+
+    Adding a new entry is a file-add under ``Python/skills/`` with a
+    ``blueprint-*.md`` name; no code change required. Seed entries
+    in this fork: ``blueprint-events``, ``blueprint-variables``.
+
+    Args:
+        topic: Required for ``get``. Topic slug. The
+            ``blueprint-`` prefix is normalised onto the call so
+            ``events`` and ``blueprint-events`` both resolve to the
+            same entry.
+        op: ``get`` (default), ``list``, or ``search``.
+        pattern: Required for ``search``.
+
+    Returns:
+        For ``list`` / ``search``: ``{topics, count}``. For
+        ``get``: the markdown body plus topic / filename /
+        byte_size.
+    """
+    op_lower = (op or "get").lower()
+    if op_lower == "list":
+        rows = _bp_skills_collect()
+        return {"success": True, "topics": rows, "count": len(rows)}
+    if op_lower == "search":
+        if not pattern:
+            return {
+                "success": False,
+                "message": "bp_skills: 'pattern' required for the 'search' op",
+            }
+        rows = _bp_skills_collect(pattern=pattern)
+        return {
+            "success": True,
+            "topics": rows,
+            "count": len(rows),
+            "pattern": pattern,
+            "matched_total": len(rows),
+        }
+    if op_lower != "get":
+        return {
+            "success": False,
+            "message": (
+                "bp_skills: unsupported op '%s'. Supported: get, list, search"
+                % op_lower
+            ),
+        }
+    if not topic:
+        return {"success": False, "message": "bp_skills: 'topic' required"}
+    # Normalise: accept "events" the same as "blueprint-events".
+    bare = topic.strip()
+    norm = bare if bare.lower().startswith("blueprint-") else f"blueprint-{bare}"
+    resp = skills(topic=norm, op="get")
+    return resp
+
+
 @mcp.tool()
 def niagara_inspect(
     system: str,
