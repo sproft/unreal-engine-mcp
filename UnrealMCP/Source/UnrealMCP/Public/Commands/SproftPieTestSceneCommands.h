@@ -28,6 +28,21 @@
  *     against any read-only actor property (transform fields,
  *     Blueprint-exposed variables, gameplay tags, FString fields)
  *     in the editor world without needing PIE.
+ *   - `actor_has_class`: target = actor name, expected = a class
+ *     path (`/Script/Module.ClassName`, a `/Game/...` Blueprint
+ *     class path optionally suffixed `_C`, or a bare short class
+ *     name probed against the loaded class set). Pass = the
+ *     resolved actor's `GetClass()` matches the expected class or
+ *     is a subclass. Editor-world only; no PIE drive.
+ *   - `actor_tag_count`: target = actor name, expected = an
+ *     integer. Pass = the resolved actor's `Tags.Num()` equals the
+ *     expected count. Useful for verifying that an editor-world
+ *     mutation pass left exactly the right tag set.
+ *   - `level_actor_count`: target = a class path (same shape as
+ *     `actor_has_class`), expected = an integer. Pass = the
+ *     editor world contains exactly that many actors of the
+ *     resolved class (subclasses included; mirrors
+ *     `UGameplayStatics::GetAllActorsOfClass`).
  *
  * Inputs:
  *   - `assertions`: array of assertion specs. Each entry is a dict

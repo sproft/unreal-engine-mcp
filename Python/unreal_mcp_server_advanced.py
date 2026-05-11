@@ -7423,7 +7423,7 @@ def pie_test_scene(
     Runs a list of assertion specs against the active editor world and
     returns a per-assertion pass / fail record plus aggregate counts.
     Does not drive Play in Editor. Answers each supported assertion
-    statically against the editor world. Four assertion kinds are
+    statically against the editor world. Seven assertion kinds are
     supported:
 
         - ``actor_exists``: ``target`` is an actor name. Pass = an actor
@@ -7442,6 +7442,18 @@ def pie_test_scene(
           canonicalized representation of ``value``. Works against
           transform fields, gameplay tags, FString fields, and any
           other Blueprint-exposed variable.
+        - ``actor_has_class``: ``target`` is an actor name,
+          ``expected`` is a class path (``/Script/Module.ClassName``,
+          a ``/Game/...`` Blueprint class path, or a short class
+          name). Pass = the resolved actor's class matches the
+          expected class or is a subclass.
+        - ``actor_tag_count``: ``target`` is an actor name,
+          ``expected`` is an integer. Pass = the resolved actor's
+          ``Tags.Num()`` equals the expected count.
+        - ``level_actor_count``: ``target`` is a class path (same
+          shape as ``actor_has_class``), ``expected`` is an
+          integer. Pass = the editor world contains exactly that
+          many actors of the resolved class (subclasses included).
 
     Args:
         assertions: Array of assertion specs. Each entry is a dict

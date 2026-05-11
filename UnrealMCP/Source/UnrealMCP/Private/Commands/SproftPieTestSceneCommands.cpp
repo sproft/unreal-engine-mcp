@@ -152,6 +152,72 @@ namespace
         }
         return Actor->Tags.Contains(TagName);
     }
+
+    /** Resolve a UClass token against the live editor class set.
+     *  Accepts a full `/Script/Module.ClassName` path, a `/Game/...`
+     *  Blueprint class path (auto-suffixed with `_C` if missing), or a
+     *  bare short class name probed through `FindObject<UClass>` with
+     *  the standard A / U prefix variants and a `/Script/Engine.*`
+     *  fallback. Returns nullptr on miss. */
+    UClass* PieTestScene_ResolveClassByToken(const FString& Token)
+    {
+        if (Token.IsEmpty())
+        {
+            return nullptr;
+        }
+        if (Token.StartsWith(TEXT("/Script/")))
+        {
+            if (UClass* Cls = FindObject<UClass>(nullptr, *Token))
+            {
+                return Cls;
+            }
+        }
+        if (Token.StartsWith(TEXT("/Game/")))
+        {
+            FString Path = Token;
+            if (!Path.EndsWith(TEXT("_C")))
+            {
+                Path += TEXT("_C");
+            }
+            if (UClass* Cls = LoadObject<UClass>(nullptr, *Path))
+            {
+                return Cls;
+            }
+        }
+        // Bare short class name: try with A / U prefixes and the
+        // engine module fallback.
+        const TArray<FString> Variants =
+        {
+            FString::Printf(TEXT("/Script/Engine.%s"), *Token),
+            FString::Printf(TEXT("/Script/Engine.A%s"), *Token),
+            FString::Printf(TEXT("/Script/Engine.U%s"), *Token),
+        };
+        for (const FString& V : Variants)
+        {
+            if (UClass* Cls = FindObject<UClass>(nullptr, *V))
+            {
+                return Cls;
+            }
+        }
+        // Final pass: walk the loaded class set for an exact short
+        // name match. This is the slowest path, gated on a miss above.
+        UClass* Found = nullptr;
+        ForEachObjectOfClass(UClass::StaticClass(), [&Found, &Token](UObject* Obj)
+        {
+            UClass* Cls = Cast<UClass>(Obj);
+            if (!Cls) { return; }
+            const FString N = Cls->GetName();
+            if (N == Token
+                || (FString(TEXT("A")) + N) == Token
+                || (FString(TEXT("U")) + N) == Token
+                || N == (FString(TEXT("A")) + Token)
+                || N == (FString(TEXT("U")) + Token))
+            {
+                Found = Cls;
+            }
+        });
+        return Found;
+    }
 }
 
 FSproftPieTestSceneCommands::FSproftPieTestSceneCommands()
@@ -519,9 +585,217 @@ TSharedPtr<FJsonObject> FSproftPieTestSceneCommands::HandlePieTestScene(const TS
             continue;
         }
 
+        if (Kind == TEXT("actor_has_class"))
+        {
+            if (Target.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_has_class: missing 'target' actor name"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const TSharedPtr<FJsonValue> ExpectedField = Spec->TryGetField(TEXT("expected"));
+            FString ExpectedClassToken;
+            if (ExpectedField.IsValid())
+            {
+                if (!ExpectedField->TryGetString(ExpectedClassToken))
+                {
+                    ExpectedClassToken = PieTestScene_JsonValueToString(ExpectedField);
+                }
+            }
+            if (ExpectedClassToken.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_has_class: 'expected' must be a non-empty class path or short class name"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            UClass* ExpectedClass = PieTestScene_ResolveClassByToken(ExpectedClassToken);
+            if (!ExpectedClass)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("expected"), ExpectedClassToken);
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("actor_has_class: could not resolve expected class '%s'"), *ExpectedClassToken));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+
+            AActor* Found = PieTestScene_ResolveActorByName(World, Target);
+            if (!Found)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("expected"), ExpectedClass->GetPathName());
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("actor_has_class: no actor with name or label '%s'"), *Target));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            UClass* ActualClass = Found->GetClass();
+            const bool bPassed = ActualClass && ActualClass->IsChildOf(ExpectedClass);
+            Out->SetStringField(TEXT("expected"), ExpectedClass->GetPathName());
+            Out->SetStringField(TEXT("actual"), ActualClass ? ActualClass->GetPathName() : FString());
+            Out->SetBoolField(TEXT("passed"), bPassed);
+            Out->SetStringField(TEXT("message"),
+                bPassed
+                    ? FString::Printf(TEXT("Actor '%s' is a %s (matches %s)"),
+                        *Found->GetName(),
+                        *ActualClass->GetName(), *ExpectedClass->GetName())
+                    : FString::Printf(TEXT("Actor '%s' is a %s; expected %s or subclass"),
+                        *Found->GetName(),
+                        ActualClass ? *ActualClass->GetName() : TEXT("<null>"),
+                        *ExpectedClass->GetName()));
+            if (bPassed) { ++Passed; } else { ++Failed; }
+            Results.Add(MakeShared<FJsonValueObject>(Out));
+            continue;
+        }
+
+        if (Kind == TEXT("actor_tag_count"))
+        {
+            if (Target.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_tag_count: missing 'target' actor name"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const TSharedPtr<FJsonValue> ExpectedField = Spec->TryGetField(TEXT("expected"));
+            double ExpectedRaw = 0.0;
+            if (!ExpectedField.IsValid() || !ExpectedField->TryGetNumber(ExpectedRaw))
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("actor_tag_count: 'expected' must be an integer"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const int32 ExpectedCount = static_cast<int32>(ExpectedRaw);
+
+            AActor* Found = PieTestScene_ResolveActorByName(World, Target);
+            if (!Found)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetNumberField(TEXT("expected"), ExpectedCount);
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("actor_tag_count: no actor with name or label '%s'"), *Target));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const int32 ActualCount = Found->Tags.Num();
+            const bool bPassed = (ActualCount == ExpectedCount);
+            TArray<TSharedPtr<FJsonValue>> TagList;
+            for (const FName& T : Found->Tags)
+            {
+                TagList.Add(MakeShared<FJsonValueString>(T.ToString()));
+            }
+            Out->SetArrayField(TEXT("tags"), TagList);
+            Out->SetNumberField(TEXT("actual"), ActualCount);
+            Out->SetNumberField(TEXT("expected"), ExpectedCount);
+            Out->SetBoolField(TEXT("passed"), bPassed);
+            Out->SetStringField(TEXT("message"),
+                bPassed
+                    ? FString::Printf(TEXT("Actor '%s' has %d tag(s) (matches expected)"),
+                        *Found->GetName(), ActualCount)
+                    : FString::Printf(TEXT("Actor '%s' has %d tag(s); expected %d"),
+                        *Found->GetName(), ActualCount, ExpectedCount));
+            if (bPassed) { ++Passed; } else { ++Failed; }
+            Results.Add(MakeShared<FJsonValueObject>(Out));
+            continue;
+        }
+
+        if (Kind == TEXT("level_actor_count"))
+        {
+            // For level_actor_count `target` doubles as the class
+            // token: the caller is asking "how many things of class X
+            // exist". We accept the same class-token shapes the other
+            // class-resolving kinds accept.
+            if (Target.IsEmpty())
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("level_actor_count: missing 'target' class path"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const TSharedPtr<FJsonValue> ExpectedField = Spec->TryGetField(TEXT("expected"));
+            double ExpectedRaw = 0.0;
+            if (!ExpectedField.IsValid() || !ExpectedField->TryGetNumber(ExpectedRaw))
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetStringField(TEXT("message"),
+                    TEXT("level_actor_count: 'expected' must be an integer"));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            const int32 ExpectedCount = static_cast<int32>(ExpectedRaw);
+            UClass* TargetClass = PieTestScene_ResolveClassByToken(Target);
+            if (!TargetClass)
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetNumberField(TEXT("expected"), ExpectedCount);
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("level_actor_count: could not resolve class '%s'"), *Target));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            // The class must be an AActor subclass for the walk to
+            // make sense; everything else fails closed with a clear
+            // message.
+            if (!TargetClass->IsChildOf(AActor::StaticClass()))
+            {
+                Out->SetBoolField(TEXT("passed"), false);
+                Out->SetNumberField(TEXT("expected"), ExpectedCount);
+                Out->SetStringField(TEXT("class"), TargetClass->GetPathName());
+                Out->SetStringField(TEXT("message"),
+                    FString::Printf(TEXT("level_actor_count: '%s' is not an AActor subclass"),
+                        *TargetClass->GetPathName()));
+                ++Failed;
+                Results.Add(MakeShared<FJsonValueObject>(Out));
+                continue;
+            }
+            // Count actors of the class in the editor world. Mirrors
+            // UGameplayStatics::GetAllActorsOfClass (which includes
+            // subclasses through IsA<T>).
+            int32 ActualCount = 0;
+            for (TActorIterator<AActor> It(World, TargetClass); It; ++It)
+            {
+                if (*It)
+                {
+                    ++ActualCount;
+                }
+            }
+            const bool bPassed = (ActualCount == ExpectedCount);
+            Out->SetStringField(TEXT("class"), TargetClass->GetPathName());
+            Out->SetNumberField(TEXT("actual"), ActualCount);
+            Out->SetNumberField(TEXT("expected"), ExpectedCount);
+            Out->SetBoolField(TEXT("passed"), bPassed);
+            Out->SetStringField(TEXT("message"),
+                bPassed
+                    ? FString::Printf(TEXT("Editor world has %d actor(s) of class %s (matches expected)"),
+                        ActualCount, *TargetClass->GetName())
+                    : FString::Printf(TEXT("Editor world has %d actor(s) of class %s; expected %d"),
+                        ActualCount, *TargetClass->GetName(), ExpectedCount));
+            if (bPassed) { ++Passed; } else { ++Failed; }
+            Results.Add(MakeShared<FJsonValueObject>(Out));
+            continue;
+        }
+
         Out->SetBoolField(TEXT("passed"), false);
         Out->SetStringField(TEXT("message"),
-            FString::Printf(TEXT("Unsupported assertion kind '%s'; this build supports 'actor_exists', 'actor_at_location', 'actor_overlapping_tag', 'var_equals'"), *Kind));
+            FString::Printf(TEXT("Unsupported assertion kind '%s'; this build supports 'actor_exists', 'actor_at_location', 'actor_overlapping_tag', 'var_equals', 'actor_has_class', 'actor_tag_count', 'level_actor_count'"), *Kind));
         ++Unsupported;
         Results.Add(MakeShared<FJsonValueObject>(Out));
     }
