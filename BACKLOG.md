@@ -8,7 +8,58 @@ spec lifted from the README and a difficulty estimate (small / medium / large).
 All future work in this list must remain clean-room: derived from the public
 UE5 API and the documented behaviour, never from the proprietary FlopAI plugin.
 
-The most recent pass shipped four deepening additions across
+The most recent pass shipped two maintenance fixes that close
+the UE 5.7 build break (the `ENiagaraInterpolatedSpawnMode` enum
+tail dropped in this engine snapshot so the `bInterpolatedSpawning`
+branch on `niagara_edit` no longer compiled; the `FLinearColor`
+USTRUCT entry vanished in the same pass so the `FSlateBrush`
+tint reader on `widget_edit` no longer compiled) plus two
+deepening additions across existing tools: `material_edit`
+gains `add_2d_array_sample` (Texture2DArray sibling of
+`add_texture_sample` / `add_texture_sample_cube`; spawns a
+plain `UMaterialExpressionTextureSample` and binds a chosen
+`UTexture2DArray` directly when no `parameter_name` is supplied,
+or a `UMaterialExpressionTextureSampleParameter2DArray` when one
+is set, and lands the FName on the parent
+`UMaterialExpressionTextureSampleParameter::ParameterName` slot
+so the resulting material exposes a named array slot calling
+Material Instances can swap; auto-detects the spawn class from
+`Texture->IsA<UTexture2DArray>()` with a fallback to the 2D
+parameter variant when the resolved asset turns out to be a
+UTexture2D; same `coordinates` / `connect_to` / `connect_input`
+/ `property` / `name` / `properties` downstream knobs as the
+other two texture-sample ops), and `behavior_tree` gains
+`add_blackboard_decorator` (declarative one-call shortcut for
+the Blackboard decorator the editor's add-decorator picker
+spawns most often; spawns a `UBTDecorator_Blackboard` under a
+target child slot, wires the `FBlackboardKeySelector` against a
+named Blackboard key, picks the right operation family
+(`Basic` / `Arithmetic` / `Text`) from the resolved key's class
+(Int / Float / Bool / Enum -> Arithmetic, Name / String -> Text,
+the rest stay on Basic), and reflection-writes the matching
+`EBasicKeyOperation` / `EArithmeticKeyOperation` /
+`ETextKeyOperation` row plus the comparison payload field
+(`IntValue` / `FloatValue` / `StringValue`) through the property
+database so the protected UPROPERTY surface lands without us
+touching engine private headers; conditions cover `IsSet` /
+`IsNotSet` (Basic family) plus `IsEqualTo` / `IsNotEqualTo`
+(Arithmetic family for numeric / bool / enum keys, Text family
+for FName / FString keys); `NotifyObserver` defaults to
+`ResultChange` with an optional `notify_observer` override).
+The Niagara fix remaps both the `ResolveInterpolatedSpawnMode`
+canonical-token table and the `bInterpolatedSpawning` write path
+onto `ENiagaraInterpolatedSpawnMode::Interpolation` so the
+"turn interpolated spawning on" intent still resolves on a
+5.7 source build; legacy caller tokens
+(`run_update_script_with_interpolation` / `interpolated`) still
+point at the same value so existing automation keeps working.
+The `FLinearColor` fix routes the `FSlateBrush` tint reader's
+ImportText through `TBaseStructure<FLinearColor>::Get()` which
+returns the canonical UScriptStruct registered for the built-in
+POD types at boot; FSlateBrush's own `::StaticStruct()` calls
+(real USTRUCT) keep working as before.
+
+The pass before that shipped four deepening additions across
 existing tools: `animation_edit` gains `replace_blendspace_sample`
 plus `delete_blendspace_sample` (per-sample-slot edits paired off
 the existing `add_blendspace_sample` op; `replace` routes through
@@ -2408,6 +2459,71 @@ ability" alongside `tag_registry_edit`.
   trigger through `FProperty::ImportText_InContainer` for any
   additional fields a future UE version drops on the
   UInputTriggerChordAction surface beyond `ChordAction`.
+- `behavior_tree add_blackboard_decorator` (small) — declarative
+  one-call shortcut for the Blackboard decorator the editor's
+  add-decorator picker spawns most often. Spawns a
+  `UBTDecorator_Blackboard` under a target child slot, wires the
+  `FBlackboardKeySelector` against a named Blackboard key, picks
+  the right operation family (`Basic` / `Arithmetic` / `Text`) from
+  the resolved key's class (Int / Float / Bool / Enum -> Arithmetic,
+  Name / String -> Text, Object / Class / Vector / Rotator /
+  Struct -> Basic), and reflection-writes the matching
+  `EBasicKeyOperation` / `EArithmeticKeyOperation` /
+  `ETextKeyOperation` row plus the comparison payload field
+  (`IntValue` / `FloatValue` / `StringValue`) through the property
+  database so the protected UPROPERTY surface lands without
+  touching engine private headers (`OperationType` is a protected
+  uint8 on the decorator class; the operation tokens live behind
+  `WITH_EDITORONLY_DATA` TEnumAsByte fields the reflection cast
+  reads through). Conditions cover `IsSet` / `IsNotSet` (Basic
+  family) plus `IsEqualTo` / `IsNotEqualTo` (Arithmetic family for
+  numeric / bool / enum keys, Text family for FName / FString
+  keys). The optional `value` field accepts a number, bool, or
+  string and lands on all three payload fields so the engine's
+  enum-key resync path (UBTDecorator_Blackboard::RefreshEnumBasedDecorator)
+  has the StringValue mirror to read from. The `BlackboardKey`
+  selector's inner `SelectedKeyName` lands through the
+  FStructProperty + FNameProperty inner write; the engine's
+  `InitializeFromAsset(*Tree)` resolves SelectedKeyID + SelectedKeyType
+  off the tree's Blackboard before we attach the decorator to the
+  child slot. `NotifyObserver` defaults to `ResultChange`
+  (matches the editor's default); pass `notify_observer="value_change"`
+  to switch to `EBTBlackboardRestart::ValueChange`. The response
+  surfaces the resolved key + classified operation family + the
+  payload triple + the decorator FName so a follow-up call can
+  address the spawned decorator.
+- `material_edit add_2d_array_sample` (small) — Texture2DArray
+  sibling of `add_texture_sample` / `add_texture_sample_cube`.
+  Spawns either a plain `UMaterialExpressionTextureSample` and
+  binds a chosen `UTexture2DArray` directly when no
+  `parameter_name` is supplied, or a
+  `UMaterialExpressionTextureSampleParameter2DArray` when
+  `parameter_name` is set, and lands the FName on the parent
+  `UMaterialExpressionTextureSampleParameter::ParameterName`
+  slot so the resulting material exposes a named array slot
+  calling Material Instances can swap. The spawn class
+  auto-detects from `Texture->IsA<UTexture2DArray>()` with a
+  fallback to `UMaterialExpressionTextureSampleParameter2D` for
+  the parameter variant when the resolved asset is actually a
+  `UTexture2D`, mirroring the cube variant's fallback rule so
+  a generic "wire this texture up" call still lands. The
+  shared base class `UMaterialExpressionTextureBase` carries
+  the `Texture` UPROPERTY plus `AutoSetSampleType()` so the
+  same writer path applies regardless of which spawn class we
+  picked. All the downstream knobs `add_texture_sample` exposes
+  apply (`coordinates` / `coordinates_output`, `connect_to` /
+  `connect_input` / `property`, `name`, `properties`).
+  Recompiles + saves on success unless `recompile=false` /
+  `save=false`. The response surfaces `is_texture_2d_array` /
+  `fell_back_to_2d` / `as_parameter` / `parameter_name` so a
+  caller can verify which spawn class actually landed. With
+  this op landing the `add_texture_sample_cube` BACKLOG row's
+  follow-on list narrows to the
+  `TextureSampleParameterVolume` /
+  `TextureSampleParameterSubUV` /
+  `TextureSampleParameterCubeArray` variants, all of which the
+  existing `add_expression` short-name table can still cover
+  through the bare class-name fallback.
 - `material_edit add_texture_sample_cube` (small) — cube-texture
   sibling of `add_texture_sample`. Spawns a
   `UMaterialExpressionTextureSampleParameterCube` and binds the new
