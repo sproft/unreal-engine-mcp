@@ -82,6 +82,18 @@
  *     `gpu` / `CPUSim` / `GPUComputeSim`. The op runs the
  *     PostEditChangeProperty fix-up against the SimTarget UPROPERTY
  *     so the cached renderer / GPU-script state refreshes.
+ *   - `set_system_exposed_parameter`: resolves an existing
+ *     UNiagaraSystem and writes a parameter into the system's
+ *     `ExposedParameters` store
+ *     (`FNiagaraUserRedirectionParameterStore`). The op reuses the
+ *     same type-token resolver and byte-buffer packing the
+ *     per-emitter variant uses, then routes through the documented
+ *     `FNiagaraParameterStore::SetParameterData(Buffer, Param,
+ *     bAdd=true)` NIAGARA_API overload. The
+ *     `FNiagaraUserRedirectionParameterStore` accepts both the
+ *     bare token (`MyFloat`) and the fully-qualified
+ *     `User.MyFloat` form on the SetParameterData path because of
+ *     the store's redirection map. Save the system on success.
  *
  * Inputs (create_niagara_system):
  *   - path: `/Game/...` package path. Required.
@@ -156,4 +168,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetEmitterFlag(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddSimStage(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetEmitterSimTarget(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetSystemExposedParameter(const TSharedPtr<FJsonObject>& Params);
 };

@@ -7645,10 +7645,21 @@ def niagara_edit(
           ``set_emitter_local_parameter``) and writes
           ``FVersionedNiagaraEmitterData::SimTarget``. Tokens:
           ``cpu`` / ``gpu`` / ``CPUSim`` / ``GPUComputeSim``.
+        - ``set_system_exposed_parameter``: resolves an existing
+          system and writes a parameter into the system's
+          ``ExposedParameters`` store
+          (``FNiagaraUserRedirectionParameterStore``). Reuses the
+          same type-token and value packing as
+          ``set_emitter_local_parameter`` (``float`` / ``int`` /
+          ``bool`` / ``vec2`` / ``vec3`` / ``vec4`` / ``color`` /
+          ``quat``). Routes through the NIAGARA_API
+          ``SetParameterData(buffer, var, bAdd=True)`` overload;
+          callers may pass the bare token (``MyFloat``) or the
+          fully-qualified ``User.MyFloat`` form. Saves the system
+          on success.
 
-    The broader authoring surface (parameter store extensions
-    beyond emitter rapid-iteration writes, simulation stages,
-    sim-target flag writes) stays in BACKLOG.md.
+    The broader authoring surface beyond exposed-parameter writes
+    stays in BACKLOG.md.
 
     Args:
         path: create_niagara_system: ``/Game/...`` package path.

@@ -9,6 +9,7 @@
 #include "NiagaraNodeFunctionCall.h"
 #include "NiagaraNodeOutput.h"
 #include "NiagaraParameterStore.h"
+#include "NiagaraUserRedirectionParameterStore.h"
 #include "NiagaraScript.h"
 #include "NiagaraScriptSource.h"
 #include "NiagaraSimulationStageBase.h"
@@ -130,8 +131,14 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCommand(const FString&
     {
         return HandleSetEmitterSimTarget(Params);
     }
+    if (Op.Equals(TEXT("set_system_exposed_parameter"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_exposed_parameter"), ESearchCase::IgnoreCase)
+        || Op.Equals(TEXT("set_user_parameter"), ESearchCase::IgnoreCase))
+    {
+        return HandleSetSystemExposedParameter(Params);
+    }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target"), *Op));
+        FString::Printf(TEXT("niagara_edit: unsupported op '%s'. Supported: create_niagara_system, add_emitter_from_asset, set_emitter_local_parameter, add_module_to_stage, request_compile, set_emitter_flag, add_sim_stage, set_emitter_sim_target, set_system_exposed_parameter"), *Op));
 }
 
 TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleCreateSystem(const TSharedPtr<FJsonObject>& Params)
@@ -1495,5 +1502,161 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetEmitterSimTarget(co
 #else
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         TEXT("niagara_edit set_emitter_sim_target requires WITH_EDITORONLY_DATA"));
+#endif
+}
+
+TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleSetSystemExposedParameter(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITORONLY_DATA
+    FString SystemToken;
+    if (!Params->TryGetStringField(TEXT("system"), SystemToken)
+        && !Params->TryGetStringField(TEXT("system_path"), SystemToken)
+        && !Params->TryGetStringField(TEXT("path"), SystemToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system' parameter"));
+    }
+    UNiagaraSystem* System = ResolveAssetOfClass<UNiagaraSystem>(SystemToken);
+    if (!System)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve UNiagaraSystem '%s'"), *SystemToken));
+    }
+
+    FString ParameterName;
+    if (!Params->TryGetStringField(TEXT("parameter_name"), ParameterName)
+        && !Params->TryGetStringField(TEXT("parameter"), ParameterName)
+        && !Params->TryGetStringField(TEXT("name"), ParameterName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'parameter_name' parameter"));
+    }
+
+    FString TypeToken;
+    if (!Params->TryGetStringField(TEXT("parameter_type"), TypeToken)
+        && !Params->TryGetStringField(TEXT("type"), TypeToken))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'parameter_type' parameter"));
+    }
+
+    FNiagaraTypeDefinition TypeDef;
+    FString CanonicalType;
+    if (!ResolveNiagaraTypeToken(TypeToken, TypeDef, CanonicalType))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Unsupported 'parameter_type' '%s' (try float / int / bool / vec2 / vec3 / vec4 / color / quat)"), *TypeToken));
+    }
+
+    TSharedPtr<FJsonValue> ValueJson = Params->TryGetField(TEXT("value"));
+    if (!ValueJson.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'value' parameter"));
+    }
+
+    // Pack the JSON value into a flat byte buffer matching the
+    // parameter's TypeDef size. Logic mirrors the per-emitter variant
+    // so callers see the same shapes (float / int / bool / vecN / color
+    // / quat) regardless of which parameter store the value lands in.
+    const int32 TypeSize = TypeDef.GetSize();
+    TArray<uint8> Buffer;
+    Buffer.SetNumZeroed(TypeSize);
+
+    if (CanonicalType == TEXT("bool"))
+    {
+        if (ValueJson->Type != EJson::Boolean && ValueJson->Type != EJson::Number)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Expected boolean / number for 'value' on bool parameter"));
+        }
+        const bool bVal = (ValueJson->Type == EJson::Boolean) ? ValueJson->AsBool() : (ValueJson->AsNumber() != 0.0);
+        // FNiagaraBool encodes True as -1, False as 0 in a 4-byte slot.
+        const int32 EncodedBool = bVal ? -1 : 0;
+        if (TypeSize != static_cast<int32>(sizeof(int32)))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unexpected bool TypeDef size %d"), TypeSize));
+        }
+        FMemory::Memcpy(Buffer.GetData(), &EncodedBool, sizeof(int32));
+    }
+    else if (CanonicalType == TEXT("int"))
+    {
+        if (ValueJson->Type != EJson::Number && ValueJson->Type != EJson::Boolean)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Expected number for 'value' on int parameter"));
+        }
+        const int32 IntVal = static_cast<int32>(FMath::RoundToDouble(ValueJson->AsNumber()));
+        if (TypeSize != static_cast<int32>(sizeof(int32)))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unexpected int TypeDef size %d"), TypeSize));
+        }
+        FMemory::Memcpy(Buffer.GetData(), &IntVal, sizeof(int32));
+    }
+    else
+    {
+        int32 ExpectedFloats = 1;
+        if (CanonicalType == TEXT("vec2")) ExpectedFloats = 2;
+        else if (CanonicalType == TEXT("vec3")) ExpectedFloats = 3;
+        else if (CanonicalType == TEXT("vec4") || CanonicalType == TEXT("color") || CanonicalType == TEXT("quat"))
+        {
+            ExpectedFloats = 4;
+        }
+        const int32 ExpectedSize = ExpectedFloats * static_cast<int32>(sizeof(float));
+        if (ExpectedSize != TypeSize)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Channel count %d (size %d) does not match type size %d"),
+                    ExpectedFloats, ExpectedSize, TypeSize));
+        }
+        TArray<float> Channels;
+        FString ReadErr;
+        if (!ReadFloatChannels(ValueJson, ExpectedFloats, Channels, ReadErr))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(ReadErr);
+        }
+        FMemory::Memcpy(Buffer.GetData(), Channels.GetData(), TypeSize);
+    }
+
+    // FNiagaraUserRedirectionParameterStore::SetParameterData routes
+    // through the base FNiagaraParameterStore overload, which keys on
+    // (TypeDef, FName). The store's redirection map accepts both the
+    // bare and `User.X` forms; if the bare token resolves to an
+    // existing redirect, the store writes the canonical entry, and the
+    // `bAdd=true` flag covers the cold case where the parameter is
+    // brand new.
+    FNiagaraVariable Variable(TypeDef, FName(*ParameterName));
+    Variable.SetData(Buffer.GetData());
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    System->Modify();
+    FNiagaraUserRedirectionParameterStore& Store = System->GetExposedParameters();
+    // SetParameterData(buffer, var, bAdd=true) calls the virtual
+    // AddParameter when the parameter is missing. The user-redirect
+    // store's AddParameter override normalises bare tokens into the
+    // `User.X` namespace and updates the redirection map automatically,
+    // so callers landing either form see the canonical entry on the
+    // next FindParameter lookup.
+    const bool bAddIfMissing = true;
+    const bool bWroteData = Store.SetParameterData(Buffer.GetData(), Variable, bAddIfMissing);
+
+    System->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+    Out->SetStringField(TEXT("operation"), TEXT("set_system_exposed_parameter"));
+    Out->SetStringField(TEXT("system"), System->GetPathName());
+    Out->SetStringField(TEXT("parameter_name"), ParameterName);
+    Out->SetStringField(TEXT("parameter_type"), CanonicalType);
+    Out->SetNumberField(TEXT("parameter_size"), TypeSize);
+    Out->SetBoolField(TEXT("wrote_data"), bWroteData);
+    Out->SetBoolField(TEXT("saved"), bSave);
+    return Out;
+#else
+    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("niagara_edit set_system_exposed_parameter requires WITH_EDITORONLY_DATA"));
 #endif
 }
