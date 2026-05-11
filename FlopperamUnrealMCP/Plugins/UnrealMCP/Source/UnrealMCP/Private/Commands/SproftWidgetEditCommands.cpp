@@ -28,7 +28,11 @@
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Components/PanelSlot.h"
+#include "Components/UniformGridPanel.h"
+#include "Components/UniformGridSlot.h"
 #include "Components/Widget.h"
+#include "Components/WrapBox.h"
+#include "Components/WrapBoxSlot.h"
 #include "EditorAssetLibrary.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_Event.h"
@@ -386,9 +390,14 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::HandleWidgetEdit(const TShare
     {
         return SetGridSlot(Params);
     }
+    if (Operation == TEXT("set_uniform_grid_slot") || Operation == TEXT("uniform_grid_slot")
+        || Operation == TEXT("set_uniform_grid_panel_slot") || Operation == TEXT("uniform_grid_panel_slot"))
+    {
+        return SetUniformGridSlot(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation, set_canvas_slot, set_overlay_slot, set_box_slot, set_grid_slot"), *Operation));
+        FString::Printf(TEXT("Unsupported widget_edit operation '%s'. Supported: create_widget_blueprint, add_child_widget, set_slot_property, add_animation, add_animation_track, add_keyframe, set_viewmodel, add_property_binding, set_binding_conversion, add_event_binding, set_widget_style, set_widget_brush, set_widget_navigation, set_canvas_slot, set_overlay_slot, set_box_slot, set_grid_slot, set_uniform_grid_slot"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftWidgetEditCommands::CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -5129,3 +5138,257 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetGridSlot(const TSharedPtr<
     ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
     return ResultObj;
 }
+
+TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetUniformGridSlot(const TSharedPtr<FJsonObject>& Params)
+{
+    // Sugar over set_slot_property for the UUniformGridSlot surface.
+    // The uniform grid panel paints every cell at the same size so the
+    // slot exposes a narrower writable surface than UGridSlot:
+    // Row / Column plus HorizontalAlignment / VerticalAlignment. There
+    // is no row / column span (every entry occupies one cell) and no
+    // padding (the panel reads its own SlotPadding once for the whole
+    // grid, not per cell). The engine surfaces canonical setters on
+    // UUniformGridSlot for each writable field (`SetRow` / `SetColumn`
+    // / `SetHorizontalAlignment` / `SetVerticalAlignment`); routing
+    // through those tickles the parent UUniformGridPanel's cached
+    // slate widget so an open UMG editor refreshes on the next tick.
+    // Mirrors the shape of set_grid_slot but stays one slot class
+    // narrower since UUniformGridSlot is not a UGridSlot subclass.
+    FString WBPPath;
+    if (!Params->TryGetStringField(TEXT("widget_blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("widget_path"), WBPPath)
+        && !Params->TryGetStringField(TEXT("blueprint"), WBPPath)
+        && !Params->TryGetStringField(TEXT("path"), WBPPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_uniform_grid_slot: missing 'widget_blueprint' parameter"));
+    }
+    UObject* WBPAsset = UEditorAssetLibrary::LoadAsset(WBPPath);
+    UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(WBPAsset);
+    if (!WBP)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_uniform_grid_slot: asset is not a UWidgetBlueprint: %s"), *WBPPath));
+    }
+    if (!WBP->WidgetTree)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_uniform_grid_slot: WidgetBlueprint has no WidgetTree"));
+    }
+
+    FString WidgetNameStr;
+    if (!Params->TryGetStringField(TEXT("widget"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("widget_name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("name"), WidgetNameStr)
+        && !Params->TryGetStringField(TEXT("target"), WidgetNameStr))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_uniform_grid_slot: missing 'widget' parameter (target child widget FName)"));
+    }
+    UWidget* TargetWidget = WBP->WidgetTree->FindWidget(FName(*WidgetNameStr));
+    if (!TargetWidget)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_uniform_grid_slot: could not find widget '%s' on WBP '%s'"),
+                *WidgetNameStr, *WBPPath));
+    }
+
+    UUniformGridSlot* Slot = Cast<UUniformGridSlot>(TargetWidget->Slot);
+    if (!Slot)
+    {
+        // The slot class is decided by the parent panel when the child
+        // attaches. If the parent is not a UUniformGridPanel, the slot
+        // class is something else (UGridSlot / UCanvasPanelSlot / etc.)
+        // and the uniform-grid-specific knobs do not apply. Surface a
+        // clear error so the caller either reparents the child or routes
+        // through `set_grid_slot` for the regular grid panel.
+        UClass* SlotClass = TargetWidget->Slot ? TargetWidget->Slot->GetClass() : nullptr;
+        const FString SlotClassName = SlotClass ? SlotClass->GetName() : FString(TEXT("<null>"));
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("set_uniform_grid_slot: widget '%s' is not parented to a UUniformGridPanel (slot class is '%s'). Reparent the child to a uniform grid panel or use 'set_grid_slot' for a regular grid panel."),
+                *WidgetNameStr, *SlotClassName));
+    }
+
+    // Capture the previous values for the diff payload.
+    const int32 PrevRow = Slot->GetRow();
+    const int32 PrevColumn = Slot->GetColumn();
+    const EHorizontalAlignment PrevHAlign = Slot->GetHorizontalAlignment();
+    const EVerticalAlignment PrevVAlign = Slot->GetVerticalAlignment();
+
+    int32 NewRow = PrevRow;
+    int32 NewColumn = PrevColumn;
+    EHorizontalAlignment NewHAlign = PrevHAlign;
+    EVerticalAlignment NewVAlign = PrevVAlign;
+
+    TArray<FString> Applied;
+
+    // Row / Column are the only cell-coordinate knobs since each entry
+    // owns exactly one cell on the uniform grid. We default to the
+    // previous value so a partial update preserves untouched fields.
+    bool bWroteRow = false;
+    {
+        int32 Row = NewRow;
+        if (Params->TryGetNumberField(TEXT("row"), Row))
+        {
+            if (Row < 0)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_uniform_grid_slot: 'row' must be >= 0 (got %d)"), Row));
+            }
+            NewRow = Row;
+            bWroteRow = true;
+            Applied.Add(TEXT("row"));
+        }
+    }
+    bool bWroteColumn = false;
+    {
+        int32 Column = NewColumn;
+        if (Params->TryGetNumberField(TEXT("column"), Column))
+        {
+            if (Column < 0)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("set_uniform_grid_slot: 'column' must be >= 0 (got %d)"), Column));
+            }
+            NewColumn = Column;
+            bWroteColumn = true;
+            Applied.Add(TEXT("column"));
+        }
+    }
+
+    // Reject span / padding up front so the caller knows to route
+    // through `set_grid_slot` when those knobs are wanted; UUniformGridSlot
+    // does not carry them since every cell shares the same size on a
+    // uniform grid (padding lives on the parent's SlotPadding instead).
+    {
+        int32 IgnoredSpan = 0;
+        if (Params->TryGetNumberField(TEXT("row_span"), IgnoredSpan)
+            || Params->TryGetNumberField(TEXT("rowspan"), IgnoredSpan)
+            || Params->TryGetNumberField(TEXT("RowSpan"), IgnoredSpan)
+            || Params->TryGetNumberField(TEXT("column_span"), IgnoredSpan)
+            || Params->TryGetNumberField(TEXT("columnspan"), IgnoredSpan)
+            || Params->TryGetNumberField(TEXT("ColumnSpan"), IgnoredSpan))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("set_uniform_grid_slot: UUniformGridSlot does not support 'row_span' / 'column_span' (every cell is one entry). Route through 'set_grid_slot' for a UGridPanel with span support."));
+        }
+        const TSharedPtr<FJsonValue> Padding = Params->TryGetField(TEXT("padding"));
+        if (Padding.IsValid())
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("set_uniform_grid_slot: UUniformGridSlot has no per-cell padding (the UUniformGridPanel reads its own SlotPadding once for the whole grid). Route through 'set_slot_property' on the parent or use 'set_grid_slot' for per-cell padding."));
+        }
+    }
+
+    // The familiar HorizontalAlignment / VerticalAlignment pair. We
+    // reuse the parsers the box / overlay / grid slot ops already use
+    // so the alignment vocabulary stays consistent across the slot
+    // sugar surface.
+    FString HAlignToken;
+    FString HAlignCanonical = HAlignToToken(PrevHAlign);
+    bool bWroteHAlign = false;
+    if (Params->TryGetStringField(TEXT("horizontal_alignment"), HAlignToken)
+        || Params->TryGetStringField(TEXT("h_align"), HAlignToken)
+        || Params->TryGetStringField(TEXT("halign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("hAlign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("HAlign"), HAlignToken)
+        || Params->TryGetStringField(TEXT("horizontal"), HAlignToken))
+    {
+        if (!OverlaySlot_ParseHAlign(HAlignToken, NewHAlign, HAlignCanonical))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_uniform_grid_slot: unknown horizontal_alignment '%s'. Supported: Fill, Left, Center, Right"), *HAlignToken));
+        }
+        bWroteHAlign = true;
+        Applied.Add(TEXT("horizontal_alignment"));
+    }
+
+    FString VAlignToken;
+    FString VAlignCanonical = VAlignToToken(PrevVAlign);
+    bool bWroteVAlign = false;
+    if (Params->TryGetStringField(TEXT("vertical_alignment"), VAlignToken)
+        || Params->TryGetStringField(TEXT("v_align"), VAlignToken)
+        || Params->TryGetStringField(TEXT("valign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("vAlign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("VAlign"), VAlignToken)
+        || Params->TryGetStringField(TEXT("vertical"), VAlignToken))
+    {
+        if (!OverlaySlot_ParseVAlign(VAlignToken, NewVAlign, VAlignCanonical))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("set_uniform_grid_slot: unknown vertical_alignment '%s'. Supported: Fill, Top, Center, Bottom"), *VAlignToken));
+        }
+        bWroteVAlign = true;
+        Applied.Add(TEXT("vertical_alignment"));
+    }
+
+    if (Applied.Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("set_uniform_grid_slot: pass at least one of 'row' / 'column' / 'horizontal_alignment' / 'vertical_alignment'"));
+    }
+
+    // Route writes through the slot's canonical setters so the engine's
+    // layout-invalidate path fires. Each setter calls Invalidate on the
+    // parent UUniformGridPanel so an open UMG designer picks the change
+    // up.
+    Slot->Modify();
+    if (bWroteRow)    { Slot->SetRow(NewRow); }
+    if (bWroteColumn) { Slot->SetColumn(NewColumn); }
+    if (bWroteHAlign) { Slot->SetHorizontalAlignment(NewHAlign); }
+    if (bWroteVAlign) { Slot->SetVerticalAlignment(NewVAlign); }
+
+#if WITH_EDITOR
+    Slot->PostEditChange();
+    TargetWidget->PostEditChange();
+#endif
+
+    bool bSaveAfterEdit = true;
+    Params->TryGetBoolField(TEXT("save"), bSaveAfterEdit);
+    bool bCompile = false;
+    Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
+    if (UPackage* Package = WBP->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bCompile)
+    {
+        FKismetEditorUtilities::CompileBlueprint(WBP, EBlueprintCompileOptions::SkipGarbageCollection);
+    }
+    if (bSaveAfterEdit)
+    {
+        UEditorAssetLibrary::SaveAsset(WBP->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    for (const FString& Name : Applied)
+    {
+        AppliedJson.Add(MakeShared<FJsonValueString>(Name));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("set_uniform_grid_slot"));
+    ResultObj->SetStringField(TEXT("widget_blueprint"), WBP->GetPathName());
+    ResultObj->SetStringField(TEXT("widget"), WidgetNameStr);
+    ResultObj->SetStringField(TEXT("widget_class"), TargetWidget->GetClass()->GetPathName());
+    ResultObj->SetStringField(TEXT("slot_class"), UUniformGridSlot::StaticClass()->GetName());
+    ResultObj->SetArrayField(TEXT("applied"), AppliedJson);
+    ResultObj->SetNumberField(TEXT("applied_count"), Applied.Num());
+
+    ResultObj->SetNumberField(TEXT("row"), Slot->GetRow());
+    ResultObj->SetNumberField(TEXT("column"), Slot->GetColumn());
+    ResultObj->SetStringField(TEXT("horizontal_alignment"), HAlignToToken(Slot->GetHorizontalAlignment()));
+    ResultObj->SetStringField(TEXT("vertical_alignment"), VAlignToToken(Slot->GetVerticalAlignment()));
+
+    ResultObj->SetNumberField(TEXT("previous_row"), PrevRow);
+    ResultObj->SetNumberField(TEXT("previous_column"), PrevColumn);
+    ResultObj->SetStringField(TEXT("previous_horizontal_alignment"), HAlignToToken(PrevHAlign));
+    ResultObj->SetStringField(TEXT("previous_vertical_alignment"), VAlignToToken(PrevVAlign));
+
+    ResultObj->SetBoolField(TEXT("compiled"), bCompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSaveAfterEdit);
+    return ResultObj;
+}
+

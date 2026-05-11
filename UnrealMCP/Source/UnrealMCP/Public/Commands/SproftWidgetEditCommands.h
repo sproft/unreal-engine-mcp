@@ -166,6 +166,25 @@
  *      / `SetPadding` setters so the parent UGridPanel's cached slate
  *      widget invalidates. Complements `set_box_slot` for the
  *      two-dimensional grid layout case.
+ *   - "set_uniform_grid_slot": single-call sugar over
+ *      `set_slot_property` for the UUniformGridSlot surface. Mirrors
+ *      `set_grid_slot` but targets the uniform grid where every cell
+ *      shares the same size. Takes the widget blueprint plus a target
+ *      child widget FName plus any of the uniform grid slot knobs:
+ *      `row` / `column` (int cell coordinates the parent
+ *      UUniformGridPanel reads when it lays out the child) plus the
+ *      familiar `horizontal_alignment` / `vertical_alignment` tokens
+ *      (`Fill` / `Left` / `Center` / `Right` and `Fill` / `Top` /
+ *      `Center` / `Bottom`). UUniformGridSlot does not carry span or
+ *      padding fields since every cell shares the same size on a
+ *      uniform grid; the op refuses those knobs at parse time so the
+ *      caller can route through `set_grid_slot` if a regular grid is
+ *      wanted. Refuses children whose parent is not a
+ *      UUniformGridPanel. Routes through the concrete
+ *      `UUniformGridSlot::SetRow` / `SetColumn` /
+ *      `SetHorizontalAlignment` / `SetVerticalAlignment` setters so
+ *      the parent UUniformGridPanel's cached slate widget
+ *      invalidates.
  *   - "set_canvas_slot": single-call sugar over `set_slot_property`
  *      for the UCanvasPanelSlot surface. Takes the widget blueprint
  *      plus a target child widget FName plus any of the canonical
@@ -227,4 +246,5 @@ private:
     TSharedPtr<FJsonObject> SetOverlaySlot(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetBoxSlot(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> SetGridSlot(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> SetUniformGridSlot(const TSharedPtr<FJsonObject>& Params);
 };

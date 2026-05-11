@@ -3290,6 +3290,29 @@ def widget_edit(
           parent panel's layout invalidates. Complements
           ``set_box_slot`` for the two-dimensional grid
           layout case.
+        - "set_uniform_grid_slot": single-call sugar over
+          ``set_slot_property`` for the UUniformGridSlot
+          surface. Mirrors ``set_grid_slot`` but targets the
+          uniform grid where every cell shares the same
+          size. ``widget`` is the FName of the target child
+          widget on the WBP's WidgetTree; the child's slot
+          must be a UUniformGridSlot (the parent panel is a
+          UUniformGridPanel). ``row`` and ``column`` are int
+          cell coordinates (>= 0). UUniformGridSlot does
+          not carry per-cell span or padding (the parent's
+          SlotPadding reads once for the whole grid); the
+          op refuses those knobs at parse time so the
+          caller can route through ``set_grid_slot`` when a
+          regular grid is wanted. ``horizontal_alignment``
+          (alias ``h_align`` / ``halign``) accepts ``Fill``
+          / ``Left`` / ``Center`` / ``Right``;
+          ``vertical_alignment`` (alias ``v_align`` /
+          ``valign``) accepts ``Fill`` / ``Top`` /
+          ``Center`` / ``Bottom``. Routes through
+          ``UUniformGridSlot::SetRow`` / ``SetColumn`` /
+          ``SetHorizontalAlignment`` /
+          ``SetVerticalAlignment`` so the parent
+          UUniformGridPanel's layout invalidates.
         - "set_box_slot": single-call sugar over
           ``set_slot_property`` for both UHorizontalBoxSlot and
           UVerticalBoxSlot surfaces. ``widget`` is the FName of
