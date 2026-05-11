@@ -31,7 +31,16 @@
  *     by track / binding scoping plus the index.
  *   - `add_audio_track`: declarative one-call wrapper that lays a
  *     `UMovieSceneAudioTrack` plus a `UMovieSceneAudioSection` down
- *     in a single pass. Resolves the target `USoundBase` (any
+ *     in a single pass.
+ *   - `add_transform_section_keys`: declarative one-call writer for
+ *     per-channel transform keys on a binding's `UMovieScene3DTransformTrack`.
+ *     Finds or creates the transform track + section, then writes
+ *     each keyframe's location.x / .y / .z / rotation.x / .y / .z /
+ *     scale.x / .y / .z through the section's channel proxy (the
+ *     5.4+ FMovieSceneDoubleChannel storage shape). Each `keyframes`
+ *     entry takes `{time_frames, location?, rotation?, scale?}`. The
+ *     section's range expands to cover every key time, so the typical
+ *     "lay down a camera fly-through" workflow is one call. Resolves the target `USoundBase` (any
  *     USoundWave / USoundCue / USoundClass derived from the
  *     USoundBase shape; accepts a `/Game/...` path or short name),
  *     finds or creates the track (binding-scoped when `binding` /
@@ -146,4 +155,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddSection(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleMoveSection(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddAudioTrack(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddTransformSectionKeys(const TSharedPtr<FJsonObject>& Params);
 };

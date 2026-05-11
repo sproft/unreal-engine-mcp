@@ -6910,6 +6910,8 @@ def sequencer_edit(
     section_index: Optional[int] = None,
     sound: Optional[str] = None,
     force_new_track: Optional[bool] = None,
+    keyframes: Optional[List[Any]] = None,
+    interpolation: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Multi-op tool over a ULevelSequence asset.
@@ -6937,6 +6939,18 @@ def sequencer_edit(
           track to a new (start frame, duration) pair through
           ``UMovieSceneSection::SetRange``. The target section is
           resolved through the ``track`` plus a ``section_index``.
+        - ``add_transform_section_keys``: declarative one-call writer
+          for per-channel transform keys on a binding's
+          ``UMovieScene3DTransformTrack``. Finds or creates the track +
+          section, then writes per-channel location.x / .y / .z /
+          rotation.roll / .pitch / .yaw / scale.x / .y / .z through
+          the section's channel proxy (the 5.4+ FMovieSceneDoubleChannel
+          storage shape with a FMovieSceneFloatChannel fallback for
+          older sections). ``keyframes`` is a list of
+          ``{time_frames, location?, rotation?, scale?}`` rows. The
+          section's range expands to cover every key time, so a
+          camera fly-through is one call. Optional ``interpolation``
+          is ``cubic`` (default) / ``linear`` / ``constant``.
         - ``add_audio_track``: declarative one-call wrapper that
           spawns (or reuses) a ``UMovieSceneAudioTrack`` and adds
           a ``UMovieSceneAudioSection`` for a chosen
@@ -7045,6 +7059,10 @@ def sequencer_edit(
         params["sound"] = sound
     if force_new_track is not None:
         params["force_new_track"] = force_new_track
+    if keyframes is not None:
+        params["keyframes"] = keyframes
+    if interpolation is not None:
+        params["interpolation"] = interpolation
 
     try:
         response = unreal.send_command("sequencer_edit", params)

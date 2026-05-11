@@ -15,8 +15,13 @@
 #include "MovieSceneSequence.h"
 #include "MovieSceneSpawnable.h"
 #include "MovieSceneTrack.h"
+#include "Channels/MovieSceneChannelProxy.h"
+#include "Channels/MovieSceneDoubleChannel.h"
+#include "Channels/MovieSceneFloatChannel.h"
+#include "Sections/MovieScene3DTransformSection.h"
 #include "Sections/MovieSceneAudioSection.h"
 #include "Sound/SoundBase.h"
+#include "Tracks/MovieScene3DTransformTrack.h"
 #include "Tracks/MovieSceneAudioTrack.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
@@ -402,6 +407,12 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleCommand(const FStrin
         || Op == TEXT("audio_track"))
     {
         return HandleAddAudioTrack(Params);
+    }
+    if (Op == TEXT("add_transform_section_keys")
+        || Op == TEXT("add_transform_keys")
+        || Op == TEXT("write_transform_keys"))
+    {
+        return HandleAddTransformSectionKeys(Params);
     }
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("sequencer_edit: unsupported op '%s'"), *Op));
@@ -1368,6 +1379,442 @@ TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddAudioTrack(const 
         const float Seconds = Sound->GetDuration();
         Result->SetNumberField(TEXT("sound_duration_seconds"), Seconds);
         Result->SetBoolField(TEXT("sound_duration_finite"), (Seconds > 0.0f && Seconds < 1e5f));
+    }
+    Result->SetBoolField(TEXT("saved"), bSave);
+    return Result;
+}
+
+namespace
+{
+    /** Pull a 3-element number array out of a JSON value. Accepts an
+     *  `[x, y, z]` array or an `{x, y, z}` object. Returns false on
+     *  shape mismatch. */
+    bool TransformKey_TryParseVec3(const TSharedPtr<FJsonValue>& Value, FVector& Out)
+    {
+        if (!Value.IsValid())
+        {
+            return false;
+        }
+        if (Value->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = Value->AsArray();
+            if (Arr.Num() < 3) return false;
+            Out = FVector(Arr[0]->AsNumber(), Arr[1]->AsNumber(), Arr[2]->AsNumber());
+            return true;
+        }
+        if (Value->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject>& Obj = Value->AsObject();
+            double X = 0.0, Y = 0.0, Z = 0.0;
+            if (Obj->TryGetNumberField(TEXT("x"), X)
+                && Obj->TryGetNumberField(TEXT("y"), Y)
+                && Obj->TryGetNumberField(TEXT("z"), Z))
+            {
+                Out = FVector(X, Y, Z);
+                return true;
+            }
+            if (Obj->TryGetNumberField(TEXT("X"), X)
+                && Obj->TryGetNumberField(TEXT("Y"), Y)
+                && Obj->TryGetNumberField(TEXT("Z"), Z))
+            {
+                Out = FVector(X, Y, Z);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Apply a key shape to a FMovieSceneDoubleChannel. */
+    void TransformKey_WriteDoubleKey(FMovieSceneDoubleChannel* Channel,
+                                     FFrameNumber Frame, double Value,
+                                     const FString& Interpolation)
+    {
+        if (!Channel) return;
+        if (Interpolation == TEXT("linear"))
+        {
+            Channel->AddLinearKey(Frame, Value);
+        }
+        else if (Interpolation == TEXT("constant") || Interpolation == TEXT("step"))
+        {
+            Channel->AddConstantKey(Frame, Value);
+        }
+        else
+        {
+            Channel->AddCubicKey(Frame, Value);
+        }
+    }
+
+    /** Apply a key shape to a FMovieSceneFloatChannel; older transform
+     *  section variants and per-property float tracks use the float
+     *  channel shape. */
+    void TransformKey_WriteFloatKey(FMovieSceneFloatChannel* Channel,
+                                    FFrameNumber Frame, float Value,
+                                    const FString& Interpolation)
+    {
+        if (!Channel) return;
+        if (Interpolation == TEXT("linear"))
+        {
+            Channel->AddLinearKey(Frame, Value);
+        }
+        else if (Interpolation == TEXT("constant") || Interpolation == TEXT("step"))
+        {
+            Channel->AddConstantKey(Frame, Value);
+        }
+        else
+        {
+            Channel->AddCubicKey(Frame, Value);
+        }
+    }
+
+    /** Write one scalar component to either the double channel at
+     *  ChannelIndex on the section's channel proxy or the float channel
+     *  at the same slot when the section's storage shape predates the
+     *  5.4 double-channel migration. Returns true when a write landed. */
+    bool TransformKey_WriteChannel(FMovieSceneChannelProxy& Proxy, int32 ChannelIndex,
+                                   FFrameNumber Frame, double Value,
+                                   const FString& Interpolation,
+                                   FString& OutKind)
+    {
+        if (FMovieSceneDoubleChannel* DoubleChannel = Proxy.GetChannel<FMovieSceneDoubleChannel>(ChannelIndex))
+        {
+            TransformKey_WriteDoubleKey(DoubleChannel, Frame, Value, Interpolation);
+            OutKind = TEXT("double");
+            return true;
+        }
+        if (FMovieSceneFloatChannel* FloatChannel = Proxy.GetChannel<FMovieSceneFloatChannel>(ChannelIndex))
+        {
+            TransformKey_WriteFloatKey(FloatChannel, Frame, static_cast<float>(Value), Interpolation);
+            OutKind = TEXT("float");
+            return true;
+        }
+        return false;
+    }
+}
+
+TSharedPtr<FJsonObject> FSproftSequencerEditCommands::HandleAddTransformSectionKeys(const TSharedPtr<FJsonObject>& Params)
+{
+    // Resolve the target sequence + MovieScene the same way the other
+    // sequencer_edit ops do.
+    FString SequencePath;
+    if (!Params->TryGetStringField(TEXT("sequence"), SequencePath)
+        && !Params->TryGetStringField(TEXT("path"), SequencePath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sequence' parameter"));
+    }
+    UObject* Asset = UEditorAssetLibrary::LoadAsset(SequencePath);
+    UMovieSceneSequence* Sequence = Cast<UMovieSceneSequence>(Asset);
+    if (!Sequence)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMovieSceneSequence"), *SequencePath));
+    }
+    UMovieScene* MovieScene = Sequence->GetMovieScene();
+    if (!MovieScene)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Sequence '%s' has no MovieScene"), *SequencePath));
+    }
+
+    // Resolve the target binding. Transform tracks are always binding-scoped:
+    // the engine refuses to add a master 3D transform track because the
+    // track has nothing to drive without a binding.
+    FGuid BindingGuid;
+    FString BindingGuidString;
+    if (Params->TryGetStringField(TEXT("binding"), BindingGuidString)
+        || Params->TryGetStringField(TEXT("binding_guid"), BindingGuidString))
+    {
+        if (!FGuid::Parse(BindingGuidString, BindingGuid))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Invalid binding GUID '%s'"), *BindingGuidString));
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        FString PossessableName;
+        if (Params->TryGetStringField(TEXT("possessable"), PossessableName)
+            || Params->TryGetStringField(TEXT("actor"), PossessableName))
+        {
+            BindingGuid = FindBindingByName(MovieScene, PossessableName);
+            if (!BindingGuid.IsValid())
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("No binding matching '%s' on sequence '%s'"),
+                        *PossessableName, *Sequence->GetName()));
+            }
+        }
+    }
+    if (!BindingGuid.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing target binding ('binding' GUID or 'actor' / 'possessable' name)"));
+    }
+
+    // Find or create a 3D transform track on the binding. We do not pass
+    // through `add_track` so callers can write keys in one call without
+    // a follow-on.
+    UMovieScene3DTransformTrack* TransformTrack = nullptr;
+    bool bTrackCreated = false;
+    if (UMovieSceneTrack* Existing = MovieScene->FindTrack(UMovieScene3DTransformTrack::StaticClass(), BindingGuid))
+    {
+        TransformTrack = Cast<UMovieScene3DTransformTrack>(Existing);
+    }
+    if (!TransformTrack)
+    {
+        UMovieSceneTrack* NewTrack = MovieScene->AddTrack(UMovieScene3DTransformTrack::StaticClass(), BindingGuid);
+        TransformTrack = Cast<UMovieScene3DTransformTrack>(NewTrack);
+        if (!TransformTrack)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Failed to add UMovieScene3DTransformTrack to binding %s"), *BindingGuid.ToString()));
+        }
+        bTrackCreated = true;
+    }
+
+    // Parse the keyframes array. Each entry is
+    // `{time_frames, location?, rotation?, scale?}`. The optional
+    // start_frame falls back to either the smallest key time or the
+    // playback start; we use the smallest key time after parsing.
+    const TArray<TSharedPtr<FJsonValue>>* KeyframesArr = nullptr;
+    if (!Params->TryGetArrayField(TEXT("keyframes"), KeyframesArr)
+        || !KeyframesArr || KeyframesArr->Num() == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'keyframes' array (at least one keyframe required)"));
+    }
+
+    FString Interpolation = TEXT("cubic");
+    {
+        FString Token;
+        if (Params->TryGetStringField(TEXT("interpolation"), Token)
+            || Params->TryGetStringField(TEXT("key_shape"), Token))
+        {
+            Interpolation = Token.ToLower();
+        }
+    }
+
+    // Iterate keyframes, gather min/max frames so the section's range
+    // covers every key. We could expand per key through `ExpandToFrame`,
+    // but a single SetRange at the end keeps the section's TryModify
+    // count down.
+    struct FParsedKey
+    {
+        FFrameNumber Frame;
+        FVector Location;
+        bool bHasLocation = false;
+        FRotator Rotation;
+        bool bHasRotation = false;
+        FVector Scale;
+        bool bHasScale = false;
+    };
+    TArray<FParsedKey> ParsedKeys;
+    int32 MinFrame = TNumericLimits<int32>::Max();
+    int32 MaxFrame = TNumericLimits<int32>::Min();
+    for (int32 RowIdx = 0; RowIdx < KeyframesArr->Num(); ++RowIdx)
+    {
+        const TSharedPtr<FJsonValue>& RowVal = (*KeyframesArr)[RowIdx];
+        if (!RowVal.IsValid() || RowVal->Type != EJson::Object)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("keyframes[%d] is not an object"), RowIdx));
+        }
+        const TSharedPtr<FJsonObject>& Row = RowVal->AsObject();
+        double TimeFramesValue = 0.0;
+        if (!Row->TryGetNumberField(TEXT("time_frames"), TimeFramesValue)
+            && !Row->TryGetNumberField(TEXT("frame"), TimeFramesValue)
+            && !Row->TryGetNumberField(TEXT("time"), TimeFramesValue))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("keyframes[%d] missing 'time_frames' (integer, tick-resolution frame)"), RowIdx));
+        }
+        FParsedKey Parsed;
+        Parsed.Frame = FFrameNumber(static_cast<int32>(TimeFramesValue));
+        if (Parsed.Frame.Value < MinFrame) MinFrame = Parsed.Frame.Value;
+        if (Parsed.Frame.Value > MaxFrame) MaxFrame = Parsed.Frame.Value;
+
+        TSharedPtr<FJsonValue> LocVal = Row->TryGetField(TEXT("location"));
+        if (!LocVal.IsValid()) LocVal = Row->TryGetField(TEXT("translation"));
+        if (LocVal.IsValid())
+        {
+            if (!TransformKey_TryParseVec3(LocVal, Parsed.Location))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("keyframes[%d].location: expected [x, y, z] or {x, y, z}"), RowIdx));
+            }
+            Parsed.bHasLocation = true;
+        }
+        TSharedPtr<FJsonValue> RotVal = Row->TryGetField(TEXT("rotation"));
+        if (RotVal.IsValid())
+        {
+            FVector R;
+            if (!TransformKey_TryParseVec3(RotVal, R))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("keyframes[%d].rotation: expected [roll, pitch, yaw] or {x, y, z}"), RowIdx));
+            }
+            // The transform section's rotation channels at proxy slots
+            // 3 / 4 / 5 are Roll / Pitch / Yaw (the canonical FRotator
+            // channel order on UMovieScene3DTransformSection's
+            // CacheChannelProxy). Input is `[roll, pitch, yaw]` in
+            // degrees, matching the Sequencer transform track's per-key
+            // surface.
+            Parsed.Rotation = FRotator();
+            Parsed.Rotation.Roll  = R.X;
+            Parsed.Rotation.Pitch = R.Y;
+            Parsed.Rotation.Yaw   = R.Z;
+            Parsed.bHasRotation = true;
+        }
+        TSharedPtr<FJsonValue> ScaleVal = Row->TryGetField(TEXT("scale"));
+        if (ScaleVal.IsValid())
+        {
+            if (!TransformKey_TryParseVec3(ScaleVal, Parsed.Scale))
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("keyframes[%d].scale: expected [sx, sy, sz] or {x, y, z}"), RowIdx));
+            }
+            Parsed.bHasScale = true;
+        }
+        if (!Parsed.bHasLocation && !Parsed.bHasRotation && !Parsed.bHasScale)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("keyframes[%d] needs at least one of 'location' / 'rotation' / 'scale'"), RowIdx));
+        }
+        ParsedKeys.Add(Parsed);
+    }
+
+    // Find or create the transform section. The transform track's
+    // CreateNewSection picks UMovieScene3DTransformSection as the native
+    // subclass; we attach + range-set the new section so subsequent
+    // SetRange calls expand cleanly.
+    UMovieScene3DTransformSection* Section = nullptr;
+    bool bSectionCreated = false;
+    {
+        // start_frame defaults to either the optional caller param or
+        // the smallest key time we just parsed.
+        int32 CallerStartFrame = MinFrame;
+        Params->TryGetNumberField(TEXT("start_frame"), CallerStartFrame);
+
+        const TArray<UMovieSceneSection*>& Existing = TransformTrack->GetAllSections();
+        for (UMovieSceneSection* S : Existing)
+        {
+            if (UMovieScene3DTransformSection* TS = Cast<UMovieScene3DTransformSection>(S))
+            {
+                Section = TS;
+                break;
+            }
+        }
+        if (!Section)
+        {
+            UMovieSceneSection* NewSection = TransformTrack->CreateNewSection();
+            Section = Cast<UMovieScene3DTransformSection>(NewSection);
+            if (!Section)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("UMovieScene3DTransformTrack::CreateNewSection returned the wrong section subclass"));
+            }
+            // Seed the range to the key time bounds; ExpandToFrame
+            // below stretches as needed.
+            Section->SetRange(TRange<FFrameNumber>(
+                TRangeBound<FFrameNumber>::Inclusive(FFrameNumber(CallerStartFrame)),
+                TRangeBound<FFrameNumber>::Exclusive(FFrameNumber(CallerStartFrame + 1))));
+            TransformTrack->AddSection(*Section);
+            bSectionCreated = true;
+        }
+        // Stretch the section to cover every keyframe time. ExpandToFrame
+        // is the documented section-range-extend path for keyframe
+        // authoring and is what the Sequencer key-add UI uses.
+        Section->ExpandToFrame(FFrameNumber(MinFrame));
+        Section->ExpandToFrame(FFrameNumber(MaxFrame));
+    }
+
+    // Walk channel proxy slots in the canonical 3D transform section
+    // order: Translation X/Y/Z, Rotation X(Roll)/Y(Pitch)/Z(Yaw),
+    // Scale X/Y/Z. The section's private FMovieSceneDoubleChannel[3]
+    // arrays show up through the channel proxy at slots 0..8 (plus the
+    // ManualWeight float channel at slot 9, which we leave alone).
+    FMovieSceneChannelProxy& Proxy = Section->GetChannelProxy();
+    int32 KeysWritten = 0;
+    int32 KeysSkipped = 0;
+    int32 KeyfailureCount = 0;
+    TArray<FString> ChannelKindLog;
+    for (const FParsedKey& Key : ParsedKeys)
+    {
+        struct FChannelWrite
+        {
+            int32 Index;
+            double Value;
+            bool bActive;
+        };
+        const FChannelWrite Writes[9] = {
+            { 0, Key.Location.X, Key.bHasLocation },
+            { 1, Key.Location.Y, Key.bHasLocation },
+            { 2, Key.Location.Z, Key.bHasLocation },
+            { 3, Key.Rotation.Roll, Key.bHasRotation },
+            { 4, Key.Rotation.Pitch, Key.bHasRotation },
+            { 5, Key.Rotation.Yaw, Key.bHasRotation },
+            { 6, Key.Scale.X, Key.bHasScale },
+            { 7, Key.Scale.Y, Key.bHasScale },
+            { 8, Key.Scale.Z, Key.bHasScale },
+        };
+        for (const FChannelWrite& W : Writes)
+        {
+            if (!W.bActive) { ++KeysSkipped; continue; }
+            FString Kind;
+            if (TransformKey_WriteChannel(Proxy, W.Index, Key.Frame, W.Value, Interpolation, Kind))
+            {
+                ++KeysWritten;
+                if (!ChannelKindLog.Contains(Kind))
+                {
+                    ChannelKindLog.Add(Kind);
+                }
+            }
+            else
+            {
+                ++KeyfailureCount;
+            }
+        }
+    }
+
+    if (KeysWritten == 0)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("No keys landed; the transform section has no addressable float / double channels in the 0..8 range"));
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+
+    Section->MarkPackageDirty();
+    Sequence->MarkPackageDirty();
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Sequence->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("operation"), TEXT("add_transform_section_keys"));
+    Result->SetStringField(TEXT("sequence"), Sequence->GetPathName());
+    Result->SetStringField(TEXT("binding_guid"), BindingGuid.ToString());
+    Result->SetStringField(TEXT("track_name"), TransformTrack->GetFName().ToString());
+    Result->SetStringField(TEXT("track_class"), TransformTrack->GetClass()->GetName());
+    Result->SetBoolField(TEXT("track_created"), bTrackCreated);
+    Result->SetStringField(TEXT("section_class"), Section->GetClass()->GetName());
+    Result->SetStringField(TEXT("section_class_path"), Section->GetClass()->GetPathName());
+    Result->SetBoolField(TEXT("section_created"), bSectionCreated);
+    Result->SetNumberField(TEXT("keyframe_count"), ParsedKeys.Num());
+    Result->SetNumberField(TEXT("keys_written"), KeysWritten);
+    Result->SetNumberField(TEXT("keys_skipped"), KeysSkipped);
+    Result->SetNumberField(TEXT("key_failures"), KeyfailureCount);
+    Result->SetStringField(TEXT("interpolation"), Interpolation);
+    Result->SetNumberField(TEXT("min_frame"), MinFrame);
+    Result->SetNumberField(TEXT("max_frame"), MaxFrame);
+    {
+        TArray<TSharedPtr<FJsonValue>> KindArr;
+        for (const FString& Kind : ChannelKindLog)
+        {
+            KindArr.Add(MakeShared<FJsonValueString>(Kind));
+        }
+        Result->SetArrayField(TEXT("channel_kinds"), KindArr);
     }
     Result->SetBoolField(TEXT("saved"), bSave);
     return Result;

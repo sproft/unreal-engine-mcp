@@ -2311,6 +2311,27 @@ ability" alongside `tag_registry_edit`.
   per-row Triggers array (next to Modifiers on
   FEnhancedActionKeyMapping) and per-action Modifier surface on
   the UInputAction asset stay on this list.
+- `sequencer_edit add_transform_section_keys` (small) — declarative
+  one-call writer for per-channel transform keys on a binding's
+  `UMovieScene3DTransformTrack`. Resolves the target binding through
+  `binding` GUID or `actor` / `possessable` name, finds or creates
+  the transform track via `UMovieScene::FindTrack` / `AddTrack`,
+  finds or creates a `UMovieScene3DTransformSection` via the track's
+  `CreateNewSection` + `AddSection`, then walks the supplied
+  `keyframes` list and writes each `{time_frames, location?,
+  rotation?, scale?}` row through the section's channel proxy.
+  Channel layout follows `UMovieScene3DTransformSection::CacheChannelProxy`:
+  slots 0..2 are Translation X/Y/Z, slots 3..5 are Rotation X/Y/Z
+  (Roll/Pitch/Yaw on FRotator), slots 6..8 are Scale X/Y/Z. The op
+  writes through `FMovieSceneDoubleChannel::AddCubicKey` /
+  `AddLinearKey` / `AddConstantKey` (the 5.4+ double-channel storage
+  shape) with a `FMovieSceneFloatChannel` fallback for older section
+  variants. The section's range expands through `ExpandToFrame` to
+  cover the min / max key times so a camera fly-through is one call.
+  Optional `interpolation` is `cubic` (default) / `linear` /
+  `constant`. Saves on success unless `save=false`. The per-mask
+  EMovieSceneTransformChannel toggle and the weight / constraint
+  channel writes stay on this list.
 - `animation_edit add_blendspace_sample` (small) — appends a sample
   to a UBlendSpace or UBlendSpace1D through the documented public
   editor surface `UBlendSpace::AddSample(UAnimSequence*, FVector)`
