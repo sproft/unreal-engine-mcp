@@ -19,6 +19,7 @@
 #include "Materials/MaterialExpressionClamp.h"
 #include "Materials/MaterialExpressionComponentMask.h"
 #include "Materials/MaterialExpressionConstant.h"
+#include "Materials/MaterialExpressionConstant2Vector.h"
 #include "Materials/MaterialExpressionConstant3Vector.h"
 #include "Materials/MaterialExpressionConstant4Vector.h"
 #include "Materials/MaterialExpressionCosine.h"
@@ -504,9 +505,14 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::HandleMaterialEdit(const TS
     {
         return AddTexture2DArraySample(Params);
     }
+    if (Operation == TEXT("add_constant") || Operation == TEXT("add_const")
+        || Operation == TEXT("add_value") || Operation == TEXT("add_scalar"))
+    {
+        return AddConstant(Params);
+    }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
-        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample"), *Operation));
+        FString::Printf(TEXT("Unsupported material_edit operation '%s'. Supported: create_material, create_material_instance_constant, set_instance_parameter, add_expression, add_expressions, connect_expressions, set_expression_property, create_parameter_collection, add_collection_parameter, create_material_function, add_function_call, set_attribute_blendable, add_texture_sample, add_texture_sample_cube, add_2d_array_sample, add_constant"), *Operation));
 }
 
 TSharedPtr<FJsonObject> FSproftMaterialEditCommands::CreateMaterial(const TSharedPtr<FJsonObject>& Params)
@@ -3308,6 +3314,287 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddTexture2DArraySample(con
         TArray<TSharedPtr<FJsonValue>> Arr;
         for (const FString& S : PropertiesSkipped) { Arr.Add(MakeShared<FJsonValueString>(S)); }
         ResultObj->SetArrayField(TEXT("properties_skipped"), Arr);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_property"), bConnectedToProperty);
+    if (bConnectedToProperty)
+    {
+        ResultObj->SetStringField(TEXT("property"), PropertyConnected);
+    }
+    ResultObj->SetBoolField(TEXT("connected_to_expression"), bConnectedToExpression);
+    if (bConnectedToExpression)
+    {
+        ResultObj->SetStringField(TEXT("connect_to"), ExpressionConnected);
+    }
+    ResultObj->SetBoolField(TEXT("recompiled"), bRecompile);
+    ResultObj->SetBoolField(TEXT("saved"), bSave);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddConstant(const TSharedPtr<FJsonObject>& Params)
+{
+    // Wraps the existing add_expression for the common literal-constant
+    // case so callers do not need to know the expression class name.
+    // The op auto-picks between UMaterialExpressionConstant (1 channel),
+    // UMaterialExpressionConstant2Vector (2 channels),
+    // UMaterialExpressionConstant3Vector (3 channels), and
+    // UMaterialExpressionConstant4Vector (4 channels) from the supplied
+    // `value` (scalar number / 2-tuple / 3-tuple / 4-tuple). The
+    // resulting node lands its literal on the matching node fields
+    // (`R` for the scalar, `R` / `G` for the 2-channel, `Constant`
+    // (FLinearColor) for the 3- / 4-channel variants).
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material"), MaterialPath)
+        && !Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'material' parameter (path to a UMaterial)"));
+    }
+    UMaterial* Material = Cast<UMaterial>(UEditorAssetLibrary::LoadAsset(MaterialPath));
+    if (!Material)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset at '%s' is not a UMaterial"), *MaterialPath));
+    }
+
+    // `value` accepts a JSON scalar (number) or a JSON array of length
+    // 2 / 3 / 4. We keep the parsed channels in a 4-wide buffer so we
+    // can map onto whichever constant subclass we pick.
+    int32 ChannelCount = 0;
+    float Channels[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    const TSharedPtr<FJsonValue> ValueField = Params->TryGetField(TEXT("value"));
+    if (!ValueField.IsValid())
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Missing 'value' parameter (number or array of 2 / 3 / 4 numbers)"));
+    }
+    if (ValueField->Type == EJson::Number)
+    {
+        Channels[0] = static_cast<float>(ValueField->AsNumber());
+        ChannelCount = 1;
+    }
+    else if (ValueField->Type == EJson::Array)
+    {
+        const TArray<TSharedPtr<FJsonValue>>& Arr = ValueField->AsArray();
+        if (Arr.Num() < 1 || Arr.Num() > 4)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("'value' array length %d not supported (use 1, 2, 3, or 4 channels)"),
+                    Arr.Num()));
+        }
+        ChannelCount = Arr.Num();
+        for (int32 I = 0; I < ChannelCount; ++I)
+        {
+            if (!Arr[I].IsValid() || Arr[I]->Type != EJson::Number)
+            {
+                return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("'value[%d]' must be a number"), I));
+            }
+            Channels[I] = static_cast<float>(Arr[I]->AsNumber());
+        }
+    }
+    else
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("'value' must be a number or an array of 2 / 3 / 4 numbers"));
+    }
+
+    // Auto-pick the expression class from the channel count.
+    TSubclassOf<UMaterialExpression> ConstantClass = nullptr;
+    FString ConstantClassTokenEcho;
+    switch (ChannelCount)
+    {
+        case 1:
+            ConstantClass = UMaterialExpressionConstant::StaticClass();
+            ConstantClassTokenEcho = TEXT("Constant");
+            break;
+        case 2:
+            ConstantClass = UMaterialExpressionConstant2Vector::StaticClass();
+            ConstantClassTokenEcho = TEXT("Constant2Vector");
+            break;
+        case 3:
+            ConstantClass = UMaterialExpressionConstant3Vector::StaticClass();
+            ConstantClassTokenEcho = TEXT("Constant3Vector");
+            break;
+        case 4:
+            ConstantClass = UMaterialExpressionConstant4Vector::StaticClass();
+            ConstantClassTokenEcho = TEXT("Constant4Vector");
+            break;
+        default:
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                TEXT("Could not resolve a Constant subclass for the supplied 'value'"));
+    }
+
+    // Position cascade reuses the same DeriveDefaultPosition helper
+    // that add_expression / add_texture_sample share so a chain of
+    // single-call ops lays its nodes out left-to-right.
+    int32 PosX = 0, PosY = 0;
+    bool bExplicitPos = false;
+    if (Params->HasField(TEXT("position")))
+    {
+        const TSharedPtr<FJsonValue> PosVal = Params->TryGetField(TEXT("position"));
+        if (PosVal.IsValid() && PosVal->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Arr = PosVal->AsArray();
+            if (Arr.Num() >= 2)
+            {
+                PosX = static_cast<int32>(Arr[0]->AsNumber());
+                PosY = static_cast<int32>(Arr[1]->AsNumber());
+                bExplicitPos = true;
+            }
+        }
+        else if (PosVal.IsValid() && PosVal->Type == EJson::Object)
+        {
+            const TSharedPtr<FJsonObject> PosObj = PosVal->AsObject();
+            double X = 0.0, Y = 0.0;
+            if (PosObj.IsValid()
+                && (PosObj->TryGetNumberField(TEXT("x"), X) || PosObj->TryGetNumberField(TEXT("X"), X))
+                && (PosObj->TryGetNumberField(TEXT("y"), Y) || PosObj->TryGetNumberField(TEXT("Y"), Y)))
+            {
+                PosX = static_cast<int32>(X);
+                PosY = static_cast<int32>(Y);
+                bExplicitPos = true;
+            }
+        }
+    }
+    if (!bExplicitPos)
+    {
+        DeriveDefaultPosition(Material, PosX, PosY);
+    }
+
+    UMaterialExpression* NewExpr = UMaterialEditingLibrary::CreateMaterialExpression(
+        Material, ConstantClass, PosX, PosY);
+    if (!NewExpr)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("CreateMaterialExpression failed for class '%s'"), *ConstantClass->GetName()));
+    }
+
+    // Land the literal on the matching node fields. The plain
+    // Constant and Constant2Vector classes expose `R` / `G`
+    // scalar fields; Constant3Vector / Constant4Vector expose an
+    // FLinearColor `Constant` field. We write directly through the
+    // typed pointer so the engine's value path stays the canonical
+    // one.
+    if (UMaterialExpressionConstant* AsScalar = Cast<UMaterialExpressionConstant>(NewExpr))
+    {
+        AsScalar->R = Channels[0];
+    }
+    else if (UMaterialExpressionConstant2Vector* As2 = Cast<UMaterialExpressionConstant2Vector>(NewExpr))
+    {
+        As2->R = Channels[0];
+        As2->G = Channels[1];
+    }
+    else if (UMaterialExpressionConstant3Vector* As3 = Cast<UMaterialExpressionConstant3Vector>(NewExpr))
+    {
+        As3->Constant = FLinearColor(Channels[0], Channels[1], Channels[2], 1.0f);
+    }
+    else if (UMaterialExpressionConstant4Vector* As4 = Cast<UMaterialExpressionConstant4Vector>(NewExpr))
+    {
+        As4->Constant = FLinearColor(Channels[0], Channels[1], Channels[2], Channels[3]);
+    }
+
+    // Optional flat property dict mirrors add_expression so callers
+    // can override the node's display name, the description, or the
+    // colour channels through ImportText if a future engine drift
+    // renames anything.
+    TArray<FString> PropertyErrors;
+    int32 PropertyAppliedCount = 0;
+    if (Params->HasField(TEXT("properties")))
+    {
+        const TSharedPtr<FJsonValue> PropsVal = Params->TryGetField(TEXT("properties"));
+        if (PropsVal.IsValid() && PropsVal->Type == EJson::Object)
+        {
+            PropertyAppliedCount = MaterialEdit_ApplyPropertyDict(NewExpr, PropsVal->AsObject(), PropertyErrors);
+        }
+    }
+
+    // Optional one-shot wiring into a material attribute or another
+    // expression's named input pin. Same shape as add_expression.
+    bool bConnectedToProperty = false;
+    bool bConnectedToExpression = false;
+    FString PropertyConnected;
+    FString ExpressionConnected;
+
+    FString PropertyToken;
+    if (Params->TryGetStringField(TEXT("property"), PropertyToken)
+        || Params->TryGetStringField(TEXT("connect_property"), PropertyToken))
+    {
+        EMaterialProperty MaterialProperty;
+        if (!TryParseMaterialProperty(PropertyToken, MaterialProperty))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Unknown material property token '%s'. Use BaseColor, Metallic, Roughness, EmissiveColor, etc."), *PropertyToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialProperty(NewExpr, FromOutput, MaterialProperty))
+        {
+            bConnectedToProperty = true;
+            PropertyConnected = PropertyToken;
+        }
+    }
+
+    FString ConnectToToken;
+    FString ConnectInputToken;
+    if (Params->TryGetStringField(TEXT("connect_to"), ConnectToToken))
+    {
+        Params->TryGetStringField(TEXT("connect_input"), ConnectInputToken);
+        UMaterialExpression* ToExpr = FindExpressionByName(Material, ConnectToToken);
+        if (!ToExpr)
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("connect_to expression '%s' not found on material"), *ConnectToToken));
+        }
+        FString FromOutput;
+        Params->TryGetStringField(TEXT("source_output"), FromOutput);
+        if (UMaterialEditingLibrary::ConnectMaterialExpressions(NewExpr, FromOutput, ToExpr, ConnectInputToken))
+        {
+            bConnectedToExpression = true;
+            ExpressionConnected = ToExpr->GetName();
+        }
+    }
+
+    bool bRecompile = true;
+    Params->TryGetBoolField(TEXT("recompile"), bRecompile);
+    if (bRecompile)
+    {
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+
+    bool bSave = true;
+    Params->TryGetBoolField(TEXT("save"), bSave);
+    if (UPackage* Package = Material->GetOutermost())
+    {
+        Package->MarkPackageDirty();
+    }
+    if (bSave)
+    {
+        UEditorAssetLibrary::SaveAsset(Material->GetPathName(), /*bOnlyIfIsDirty=*/false);
+    }
+
+    TArray<TSharedPtr<FJsonValue>> ChannelArr;
+    for (int32 I = 0; I < ChannelCount; ++I)
+    {
+        ChannelArr.Add(MakeShared<FJsonValueNumber>(Channels[I]));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("operation"), TEXT("add_constant"));
+    ResultObj->SetStringField(TEXT("material"), Material->GetPathName());
+    ResultObj->SetObjectField(TEXT("expression"), ExpressionToSummary(NewExpr));
+    ResultObj->SetStringField(TEXT("constant_class"), ConstantClassTokenEcho);
+    ResultObj->SetNumberField(TEXT("channel_count"), ChannelCount);
+    ResultObj->SetArrayField(TEXT("channels"), ChannelArr);
+    ResultObj->SetNumberField(TEXT("properties_applied"), PropertyAppliedCount);
+    if (PropertyErrors.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& E : PropertyErrors)
+        {
+            Arr.Add(MakeShared<FJsonValueString>(E));
+        }
+        ResultObj->SetArrayField(TEXT("property_errors"), Arr);
     }
     ResultObj->SetBoolField(TEXT("connected_to_property"), bConnectedToProperty);
     if (bConnectedToProperty)

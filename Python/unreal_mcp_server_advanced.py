@@ -3940,6 +3940,20 @@ def material_edit(
           spawn class from the resolved asset's class so callers
           can stay flat. Same downstream knobs as
           ``add_texture_sample``.
+        - "add_constant": single-call wrapper for the common
+          literal-constant case. Pass ``material`` and ``value``
+          (a JSON number for a 1-channel
+          ``UMaterialExpressionConstant``, a 2-element array for
+          ``UMaterialExpressionConstant2Vector``, a 3-element
+          array for ``UMaterialExpressionConstant3Vector``, or a
+          4-element array for
+          ``UMaterialExpressionConstant4Vector``); the op
+          auto-picks the matching expression class and lands the
+          literal on the matching node fields. Same downstream
+          knobs as ``add_expression`` (``position``, ``name``,
+          ``properties``, ``property`` / ``connect_to`` /
+          ``connect_input`` for one-shot wiring, ``recompile``,
+          ``save``).
         - "set_attribute_blendable": flips a per-attribute
           override toggle on a Material Instance Constant's
           ``FMaterialInstanceBasePropertyOverrides`` struct.

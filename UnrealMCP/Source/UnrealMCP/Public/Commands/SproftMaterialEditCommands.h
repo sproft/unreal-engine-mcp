@@ -149,6 +149,19 @@
  *      additional UPROPERTY values through `ImportText_InContainer`.
  *      Recompiles + saves on success unless `recompile=false` /
  *      `save=false` is passed.
+ *   - "add_constant": single-call wrapper for the common
+ *      literal-constant case. Pass `material` and `value` (a JSON
+ *      number for a 1-channel `UMaterialExpressionConstant`, a
+ *      2-element array for `UMaterialExpressionConstant2Vector`, a
+ *      3-element array for `UMaterialExpressionConstant3Vector`,
+ *      or a 4-element array for `UMaterialExpressionConstant4Vector`);
+ *      the op auto-picks the matching expression class and lands
+ *      the literal on the matching node fields (`R` for the 1- /
+ *      2-channel variants, `Constant` (FLinearColor) for the 3- /
+ *      4-channel variants). Same downstream knobs as
+ *      `add_expression` (`position`, `name`, `properties`,
+ *      `property` / `connect_to` / `connect_input` for one-shot
+ *      downstream wiring, `recompile`, `save`).
  *   - "set_attribute_blendable": flips a per-attribute override toggle
  *      on a UMaterialInstanceConstant's
  *      `FMaterialInstanceBasePropertyOverrides` struct. The
@@ -216,4 +229,5 @@ private:
     TSharedPtr<FJsonObject> AddTextureSample(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddTextureSampleCube(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> AddTexture2DArraySample(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> AddConstant(const TSharedPtr<FJsonObject>& Params);
 };
