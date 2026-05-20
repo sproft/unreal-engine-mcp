@@ -1517,8 +1517,9 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddBlackboardDecorato
     // Reflection-write the protected UPROPERTY fields. Going through
     // the property database bypasses C++ access controls without us
     // touching engine private headers. The BlackboardKey field is an
-    // FBlackboardKeySelector struct; we write only SelectedKeyName
-    // and let InitializeFromAsset resolve the rest.
+    // FBlackboardKeySelector struct; we write SelectedKeyName and then
+    // resolve the SelectedKeyID / SelectedKeyType through the struct's
+    // own public ResolveSelectedKey entry point further below.
     UClass* DecoratorClass = NewDecorator->GetClass();
     FProperty* BlackboardKeyProp = DecoratorClass->FindPropertyByName(TEXT("BlackboardKey"));
     if (FStructProperty* SelectorProp = CastField<FStructProperty>(BlackboardKeyProp))
@@ -1662,7 +1663,31 @@ TSharedPtr<FJsonObject> FSproftBehaviorTreeCommands::HandleAddBlackboardDecorato
     // Resolves the selector against the tree's Blackboard so
     // SelectedKeyID + SelectedKeyType match the named key. Without
     // this step the decorator runs against InvalidKey at game time.
-    NewDecorator->InitializeFromAsset(*Tree);
+    // UBTDecorator_Blackboard::InitializeFromAsset is protected (it is
+    // re-declared protected over the public UBTNode base), so we drive
+    // the same key resolution through FBlackboardKeySelector's own
+    // public ResolveSelectedKey. The BehaviorTreeManager still calls
+    // InitializeFromAsset on every decorator when the tree loads, so
+    // runtime keeps resolving regardless; this just lands the resolved
+    // ids on the authored asset. We reach the struct through the same
+    // reflection pointer used above to avoid touching engine privates.
+    if (FStructProperty* SelectorProp = CastField<FStructProperty>(
+            DecoratorClass->FindPropertyByName(TEXT("BlackboardKey"))))
+    {
+        FBlackboardKeySelector* Selector =
+            SelectorProp->ContainerPtrToValuePtr<FBlackboardKeySelector>(NewDecorator);
+        if (Selector)
+        {
+            if (const UBlackboardData* BBData = Tree->GetBlackboardAsset())
+            {
+                Selector->ResolveSelectedKey(*BBData);
+            }
+            else
+            {
+                Selector->InvalidateResolvedKey();
+            }
+        }
+    }
 
     // Attach to the child slot. Same path HandleAddDecorator uses.
     ParentComposite->Children[ChildIndex].Decorators.Add(NewDecorator);

@@ -5469,7 +5469,7 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWrapBoxSlot(const TSharedP
     // Capture the previous values for the diff payload.
     const FMargin PrevPadding = Slot->GetPadding();
     const bool PrevFillEmptySpace = Slot->DoesFillEmptySpace();
-    const float PrevFillSpan = Slot->GetFillSpan();
+    const float PrevFillSpan = Slot->GetFillSpanWhenLessThan();
     const EHorizontalAlignment PrevHAlign = Slot->GetHorizontalAlignment();
     const EVerticalAlignment PrevVAlign = Slot->GetVerticalAlignment();
 
@@ -5574,7 +5574,7 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWrapBoxSlot(const TSharedP
     Slot->Modify();
     if (bWrotePadding)        { Slot->SetPadding(NewPadding); }
     if (bWroteFillEmptySpace) { Slot->SetFillEmptySpace(NewFillEmptySpace); }
-    if (bWroteFillSpan)       { Slot->SetFillSpan(NewFillSpan); }
+    if (bWroteFillSpan)       { Slot->SetFillSpanWhenLessThan(NewFillSpan); }
     if (bWroteHAlign)         { Slot->SetHorizontalAlignment(NewHAlign); }
     if (bWroteVAlign)         { Slot->SetVerticalAlignment(NewVAlign); }
 
@@ -5629,7 +5629,7 @@ TSharedPtr<FJsonObject> FSproftWidgetEditCommands::SetWrapBoxSlot(const TSharedP
 
     ResultObj->SetArrayField(TEXT("padding"), MarginToArray(Slot->GetPadding()));
     ResultObj->SetBoolField(TEXT("fill_empty_space"), Slot->DoesFillEmptySpace());
-    ResultObj->SetNumberField(TEXT("fill_span"), Slot->GetFillSpan());
+    ResultObj->SetNumberField(TEXT("fill_span"), Slot->GetFillSpanWhenLessThan());
     ResultObj->SetStringField(TEXT("horizontal_alignment"), HAlignToToken(Slot->GetHorizontalAlignment()));
     ResultObj->SetStringField(TEXT("vertical_alignment"), VAlignToToken(Slot->GetVerticalAlignment()));
 

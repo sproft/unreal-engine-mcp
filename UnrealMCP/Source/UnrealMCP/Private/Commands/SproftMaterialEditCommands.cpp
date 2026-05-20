@@ -4593,7 +4593,8 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddDynamicParameter(const T
     }
     for (int32 I = 0; I < 4; ++I)
     {
-        NewExpr->ParamNames[I] = ChannelNames[I];
+        // ParamNames is TArray<FString>; ChannelNames is TArray<FName>.
+        NewExpr->ParamNames[I] = ChannelNames[I].ToString();
     }
 
     NewExpr->ParameterIndex = ParameterIndex;
@@ -4738,7 +4739,8 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddDynamicParameter(const T
     TArray<TSharedPtr<FJsonValue>> NamesOut;
     for (int32 I = 0; I < 4; ++I)
     {
-        NamesOut.Add(MakeShared<FJsonValueString>(NewExpr->ParamNames[I].ToString()));
+        // ParamNames entries are already FString.
+        NamesOut.Add(MakeShared<FJsonValueString>(NewExpr->ParamNames[I]));
     }
 
     TSharedPtr<FJsonObject> DefaultOut = MakeShared<FJsonObject>();
@@ -5696,7 +5698,9 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::SetShadingModel(const TShar
     }
 
     Material->PreEditChange(ShadingModelProperty);
-    Material->ShadingModel = NewModel;
+    // UMaterial::ShadingModel is private; SetShadingModel lands the value
+    // and keeps the paired ShadingModels bitset in sync.
+    Material->SetShadingModel(NewModel);
 
     // PostEditChangeProperty on ShadingModel rebuilds the cached shader
     // permutation map plus the ShadingModels bitset, which is what we
@@ -5845,8 +5849,12 @@ namespace
         }
         if (T == TEXT("surfaceforwardshading") || T == TEXT("forward") || T == TEXT("forwardshading"))
         {
-            OutByteValue = static_cast<uint8>(TLM_SurfaceForwardShading);
-            OutCanonical = TEXT("SurfaceForwardShading");
+            // UE 5.7 folded the old TLM_SurfaceForwardShading into
+            // TLM_SurfacePerPixelLighting (its DisplayName is still
+            // "Surface ForwardShading"); the forward-shading aliases map
+            // onto that value.
+            OutByteValue = static_cast<uint8>(TLM_SurfacePerPixelLighting);
+            OutCanonical = TEXT("SurfacePerPixelLighting");
             return true;
         }
         return false;
@@ -5863,7 +5871,6 @@ namespace
         case TLM_VolumetricPerVertexDirectional:     return TEXT("VolumetricPerVertexDirectional");
         case TLM_Surface:                            return TEXT("Surface");
         case TLM_SurfacePerPixelLighting:            return TEXT("SurfacePerPixelLighting");
-        case TLM_SurfaceForwardShading:              return TEXT("SurfaceForwardShading");
         default: return FString::Printf(TEXT("Unknown(%d)"), static_cast<int32>(InByte));
         }
     }

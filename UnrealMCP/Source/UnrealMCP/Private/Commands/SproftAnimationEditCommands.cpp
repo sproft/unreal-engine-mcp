@@ -2126,12 +2126,12 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetCompressionScheme
     }
 #endif
 
-    // Optional sync compression refresh. The public NIAGARA-style
-    // engine call is UAnimSequence::RequestAnimCompression with a
-    // FRequestAnimCompressionParams instance. The default-constructed
-    // params run synchronously; we forward through the public NOOP
-    // overload that takes the params struct, so the DDC bake reruns
-    // with the new codec before we save.
+    // Optional sync compression refresh. UE 5.7 retired the old
+    // UAnimSequence::RequestAnimCompression(FRequestAnimCompressionParams)
+    // entry point in favour of the DDC pipeline; the supported public
+    // synchronous request is CacheDerivedDataForCurrentPlatform(), which
+    // re-bakes the compressed data for the current platform with the new
+    // codec before we save.
     bool bRequestCompile = false;
     Params->TryGetBoolField(TEXT("request_compile"), bRequestCompile);
     if (!bRequestCompile)
@@ -2146,11 +2146,7 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetCompressionScheme
 #if WITH_EDITOR
     if (bRequestCompile)
     {
-        // FRequestAnimCompressionParams takes a UAnimSequence pointer in
-        // the documented public ctor; the default-constructed value is
-        // safe and uses the engine's current platform settings.
-        FRequestAnimCompressionParams CompressionParams(Seq);
-        Seq->RequestAnimCompression(CompressionParams);
+        Seq->CacheDerivedDataForCurrentPlatform();
         bRequestedCompile = true;
     }
 #endif
@@ -2338,10 +2334,10 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetCurveCompression(
     }
 #endif
 
-    // Optional sync compression refresh. RequestAnimCompression on
-    // UAnimSequence reruns both the bone and curve compression
-    // pipelines through the DDC so the saved asset reflects the new
-    // codec.
+    // Optional sync compression refresh. CacheDerivedDataForCurrentPlatform
+    // reruns both the bone and curve compression pipelines through the DDC
+    // so the saved asset reflects the new codec. (UE 5.7 dropped the older
+    // RequestAnimCompression(FRequestAnimCompressionParams) path.)
     bool bRequestCompile = false;
     Params->TryGetBoolField(TEXT("request_compile"), bRequestCompile);
     if (!bRequestCompile)
@@ -2356,8 +2352,7 @@ TSharedPtr<FJsonObject> FSproftAnimationEditCommands::HandleSetCurveCompression(
 #if WITH_EDITOR
     if (bRequestCompile)
     {
-        FRequestAnimCompressionParams CompressionParams(Seq);
-        Seq->RequestAnimCompression(CompressionParams);
+        Seq->CacheDerivedDataForCurrentPlatform();
         bRequestedCompile = true;
     }
 #endif

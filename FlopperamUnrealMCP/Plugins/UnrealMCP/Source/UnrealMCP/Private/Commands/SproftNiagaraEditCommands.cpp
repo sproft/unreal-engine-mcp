@@ -3186,7 +3186,8 @@ TSharedPtr<FJsonObject> FSproftNiagaraEditCommands::HandleRemoveEmitter(const TS
     const int32 PrevCount = System->GetEmitterHandles().Num();
 
     System->Modify();
-    TArray<FGuid> ToRemove;
+    // RemoveEmitterHandlesById takes a TSet<FGuid>.
+    TSet<FGuid> ToRemove;
     ToRemove.Add(HandleId);
     System->RemoveEmitterHandlesById(ToRemove);
 
