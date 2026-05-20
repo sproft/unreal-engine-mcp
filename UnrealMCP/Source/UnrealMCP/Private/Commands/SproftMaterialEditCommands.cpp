@@ -74,6 +74,31 @@
 
 namespace
 {
+    /**
+     * Find a parameter index by name on a parameter collection. The engine's
+     * UMaterialParameterCollection::GetScalarParameterIndexByName /
+     * GetVectorParameterIndexByName helpers are declared but not exported in
+     * this UE 5.7 snapshot, so we walk the public ScalarParameters /
+     * VectorParameters arrays directly.
+     */
+    int32 MaterialEdit_FindScalarParamIndex(const UMaterialParameterCollection* MPC, const FName Name)
+    {
+        for (int32 I = 0; I < MPC->ScalarParameters.Num(); ++I)
+        {
+            if (MPC->ScalarParameters[I].ParameterName == Name) { return I; }
+        }
+        return INDEX_NONE;
+    }
+
+    int32 MaterialEdit_FindVectorParamIndex(const UMaterialParameterCollection* MPC, const FName Name)
+    {
+        for (int32 I = 0; I < MPC->VectorParameters.Num(); ++I)
+        {
+            if (MPC->VectorParameters[I].ParameterName == Name) { return I; }
+        }
+        return INDEX_NONE;
+    }
+
     /** Split "/Game/Foo/Bar" into ("/Game/Foo/", "Bar"). */
     void MaterialEdit_SplitPackagePath(const FString& InPath, FString& OutPackageDir, FString& OutAssetName)
     {
@@ -1743,12 +1768,12 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddCollectionParameter(cons
     // duplicates, but emitting a clear error keeps the response surface
     // predictable for callers chaining several add_collection_parameter
     // calls.
-    if (MPC->GetScalarParameterIndexByName(ParamFName) != INDEX_NONE)
+    if (MaterialEdit_FindScalarParamIndex(MPC, ParamFName) != INDEX_NONE)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
             FString::Printf(TEXT("Scalar parameter '%s' already exists on %s"), *ParameterName, *CollectionPath));
     }
-    if (MPC->GetVectorParameterIndexByName(ParamFName) != INDEX_NONE)
+    if (MaterialEdit_FindVectorParamIndex(MPC, ParamFName) != INDEX_NONE)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
             FString::Printf(TEXT("Vector parameter '%s' already exists on %s"), *ParameterName, *CollectionPath));
@@ -1831,7 +1856,7 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddCollectionParameter(cons
     ResultObj->SetNumberField(TEXT("vector_parameter_count"), MPC->VectorParameters.Num());
     if (bIsScalar)
     {
-        const int32 Idx = MPC->GetScalarParameterIndexByName(ParamFName);
+        const int32 Idx = MaterialEdit_FindScalarParamIndex(MPC, ParamFName);
         if (MPC->ScalarParameters.IsValidIndex(Idx))
         {
             ResultObj->SetNumberField(TEXT("default_value"), MPC->ScalarParameters[Idx].DefaultValue);
@@ -1839,7 +1864,7 @@ TSharedPtr<FJsonObject> FSproftMaterialEditCommands::AddCollectionParameter(cons
     }
     else
     {
-        const int32 Idx = MPC->GetVectorParameterIndexByName(ParamFName);
+        const int32 Idx = MaterialEdit_FindVectorParamIndex(MPC, ParamFName);
         if (MPC->VectorParameters.IsValidIndex(Idx))
         {
             const FLinearColor& C = MPC->VectorParameters[Idx].DefaultValue;

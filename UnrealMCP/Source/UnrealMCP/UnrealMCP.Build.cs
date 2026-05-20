@@ -56,6 +56,7 @@ public class UnrealMCP : ModuleRules
 				"Landscape",          // For ALandscape / ULandscapeInfo / ULandscapeLayerInfoObject (Sproft landscape_inspect)
 				"Foliage",            // For AInstancedFoliageActor / UFoliageType (Sproft foliage_inspect)
 				"MovieScene",         // For UMovieScene / UMovieSceneTrack / UMovieSceneSection (Sproft sequencer_edit)
+				"MovieSceneTracks",   // For concrete track / section classes: UMovieScene3DTransform/Audio/Event/Visibility Track + Section (Sproft sequencer_edit)
 				"LevelSequence",      // For ULevelSequence (Sproft sequencer_edit)
 				"EngineSettings",     // For UGameMapsSettings (Sproft project_context); Projects is already in PrivateDependencyModuleNames below
 				"RenderCore",         // For GGameThreadTime / GRenderThreadTime / GRHIThreadTime (Sproft performance_audit)
